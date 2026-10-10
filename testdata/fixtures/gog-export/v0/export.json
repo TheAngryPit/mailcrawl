@@ -1,14 +1,58 @@
 {
   "schema": "mailcrawl.gog-export.v0",
   "synthetic": true,
-  "note": "Contract stub. Not a guess of gog export field names. Readers fail closed with unsupported_schema.",
+  "note": "Fixture contract mailcrawl.gog-export.v0. Field names belong to this contract. They are not verified gog export names.",
+  "example_manifest": {
+    "messages": 2
+  },
+  "example_labels": [
+    {
+      "example_label_id": "Label_synthetic",
+      "example_name": "Example/Synthetic",
+      "example_kind": "user"
+    },
+    {
+      "example_label_id": "INBOX",
+      "example_name": "INBOX",
+      "example_kind": "system"
+    }
+  ],
   "example_messages": [
     {
-      "example_ref": "fixture-001",
-      "example_from": "ada@example.com",
-      "example_to": "bao@example.com",
-      "example_subject": "Synthetic hello from example.com",
-      "example_body": "This body is fake fixture text."
+      "example_message_id": "fixture-001",
+      "example_thread_id": "thread-001",
+      "example_label_ids": ["INBOX", "Label_synthetic"],
+      "example_date": 1760054400,
+      "example_rfc822_message_id": "<fixture-001@example.com>",
+      "example_from": "Ada Fixture <ada@example.com>",
+      "example_to": "Bao Fixture <bao@example.com>",
+      "example_subject": "Re: Re: Synthetic hello from example.com",
+      "example_body": "This body is fake fixture text.\n\n> quoted line stays\n\n-- \nAda Fixture",
+      "example_raw_file": "note.eml",
+      "example_headers": {
+        "Message-ID": "<fixture-001@example.com>",
+        "X-Mailer": "fixture",
+        "X-Not-Stored": "drop-me"
+      }
+    },
+    {
+      "example_message_id": "fixture-002",
+      "example_thread_id": "thread-002",
+      "example_label_ids": ["Label_synthetic"],
+      "example_date": 1760140800,
+      "example_from": "Bao Fixture <bao@example.com>",
+      "example_to": "Ada Fixture <ada@example.com>",
+      "example_subject": "Fwd: Reunião de exemplo",
+      "example_body": "A reunião sintética fica no índice.",
+      "example_attachments": [
+        {
+          "example_name": "note.txt",
+          "example_mime": "text/plain",
+          "example_size": 12,
+          "example_attachment_id": "att-synthetic-1"
+        }
+      ],
+      "example_vendor_extra": "keep-raw"
     }
   ]
 }

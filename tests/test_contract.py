@@ -12,10 +12,22 @@ UNKNOWN_PATH = ROOT / "testdata" / "fixtures" / "gog-export" / "unknown" / "expo
 
 
 class ClassifyExportTest(unittest.TestCase):
-    def test_v0_fixture_fails_closed(self) -> None:
+    def test_v0_fixture_is_accepted(self) -> None:
         document = json.loads(V0_PATH.read_text(encoding="utf-8"))
         self.assertEqual(document["schema"], CONTRACT_V0)
-        self.assertEqual(classify_export(document), UNSUPPORTED_SCHEMA)
+        self.assertEqual(classify_export(document), "ok")
+
+    def test_missing_required_key_fails_closed(self) -> None:
+        document = json.loads(V0_PATH.read_text(encoding="utf-8"))
+        for key in (
+            "example_message_id",
+            "example_thread_id",
+            "example_label_ids",
+            "example_date",
+        ):
+            broken = json.loads(json.dumps(document))
+            del broken["example_messages"][0][key]
+            self.assertEqual(classify_export(broken), UNSUPPORTED_SCHEMA)
 
     def test_unknown_fixture_fails_closed(self) -> None:
         document = json.loads(UNKNOWN_PATH.read_text(encoding="utf-8"))

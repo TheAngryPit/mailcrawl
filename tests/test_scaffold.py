@@ -7,13 +7,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+)")
-V0_KEYS = {"schema", "synthetic", "note", "example_messages"}
-MESSAGE_KEYS = {
-    "example_ref",
-    "example_from",
-    "example_to",
-    "example_subject",
-    "example_body",
+V0_KEYS = {
+    "schema",
+    "synthetic",
+    "note",
+    "example_manifest",
+    "example_labels",
+    "example_messages",
+}
+MESSAGE_REQUIRED = {
+    "example_message_id",
+    "example_thread_id",
+    "example_label_ids",
+    "example_date",
 }
 
 
@@ -45,10 +51,11 @@ class ScaffoldFixtureTest(unittest.TestCase):
         self.assertEqual(set(document), V0_KEYS)
         self.assertTrue(document["synthetic"])
         self.assertEqual(document["schema"], "mailcrawl.gog-export.v0")
+        self.assertEqual(document["example_manifest"]["messages"], 2)
         messages = document["example_messages"]
-        self.assertGreaterEqual(len(messages), 1)
+        self.assertEqual(len(messages), 2)
         for message in messages:
-            self.assertEqual(set(message), MESSAGE_KEYS)
+            self.assertTrue(MESSAGE_REQUIRED <= set(message))
 
     def test_taxonomy_fixture_is_synthetic(self) -> None:
         document = json.loads(
