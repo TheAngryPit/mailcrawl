@@ -62,19 +62,21 @@ class ScaffoldFixtureTest(unittest.TestCase):
         self.assertNotIn("personal", blob)
         self.assertNotIn("pessoal", blob)
 
-    def test_spec_leaves_schema_points_open(self) -> None:
+    def test_spec_closes_schema_points(self) -> None:
         text = (ROOT / "docs/SPEC.md").read_text(encoding="utf-8")
         for phrase in (
-            "v1 DDL",
-            "`personal` or `pessoal`",
-            "provenance_hash",
+            "user_version=1",
+            "The account alias is `personal`",
+            "`pessoal` is an optional CLI input alias",
+            "The hash does not use `account_id`",
             "mailcrawl.gog-export.v0",
-            "quote and signature stripping",
+            "Quote and signature stripping is phase 2",
             "from_hdr",
-            "index.db",
-            "taxonomy catalogue",
+            "does not create `index.db` or `reads.db`",
+            "taxonomy-account-maps.json",
             "allow-list",
-            "subject_norm",
+            "does not fold accents",
+            "unicode61 remove_diacritics 2",
         ):
             self.assertIn(phrase, text)
-        self.assertGreaterEqual(text.count("**OPEN.**"), 10)
+        self.assertEqual(text.count("**OPEN.**"), 0)

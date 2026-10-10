@@ -1,11 +1,11 @@
 # mailcrawl: spec v0
 
-Status: scaffold. Phase 1 is specified and is not implemented in this revision. Repo: `TheAngryPit/mailcrawl`. License: MIT.
+Status: schema v1 is in the tree. Import, FTS search, and the CLI are specified and are not in this revision. Repo: `TheAngryPit/mailcrawl`. License: MIT.
 
 **Local-only.** mailcrawl archives mail that is already on disk. It does not open a network connection, does not read credentials, and does not write to Gmail. Unknown export shapes fail closed.
 
 ## 1. What it is
-A local-first, read-only archive of your mail. Phase 1 is a Python prototype: a SQLite schema, an idempotent import of a gog export, FTS5, a JSON CLI, and fixture tests. This revision ships the scaffold around that contract. Import, FTS, and the CLI are not in this tree.
+A local-first, read-only archive of your mail. Phase 1 is a Python prototype: a SQLite schema, an idempotent import of a gog export, FTS5, a JSON CLI, and fixture tests. This revision adds schema v1. Import, FTS search, and the CLI are not in this tree.
 
 No servers, no cloud copy, no writes back to Gmail. The program never runs `gog`. No language model runs on the crawl path.
 
@@ -25,6 +25,8 @@ Makefile                         # make check
 scripts/hygiene.sh               # tracked-file and secret gate
 scripts/proof.sh                 # scaffold proof, temp HOME, no network
 mailcrawl/contract.py            # fail-closed export gate only
+mailcrawl/schema.py              # schema v1 DDL
+mailcrawl/store.py               # open one account database and migrate it
 tests/
 testdata/fixtures/gog-export/    # synthetic; contract mailcrawl.gog-export.v0
 testdata/catalogue/              # synthetic taxonomy stand-in
@@ -33,16 +35,16 @@ skills/mailcrawl/SKILL.md
 ```
 Phase 1 language is Python. A Go port is later, after the prototype settles. This revision does not add a Go module.
 
-## 4. Phase 1 contract (not implemented here)
-When phase 1 code lands, it is read-only Python and it does all of the following:
+## 4. Phase 1 contract
+Phase 1 is read-only Python and it does all of the following:
 
-- Create the SQLite schema for one local archive.
-- Import a gog export idempotently.
-- Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`.
-- Speak JSON on the CLI.
+- Create SQLite schema v1 for one local archive. `mailcrawl/schema.py` migrates an empty database to `user_version` 1.
+- Import a gog export idempotently on `(account_id, gmail_message_id)`. That command is not in this revision.
+- Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`. Schema v1 creates `msg_fts`. The search command is not in this revision.
+- Speak JSON on the CLI. That command is not in this revision.
 - Test against synthetic fixtures only.
 
-Until that code exists, `mailcrawl.contract.classify_export` returns `unsupported_schema` for every document, including a document labeled `mailcrawl.gog-export.v0`. That label is a name for the fixture. It is not a map of real gog field names.
+`mailcrawl.contract.classify_export` still returns `unsupported_schema` for every document, including a document labeled `mailcrawl.gog-export.v0`. That label is a name for the fixture. It is not a map of real gog field names. The import change replaces this gate with the rule in section 6 point 4.
 
 ## 5. Scaffold proof (this revision)
 A scaffold change is done when, on a clean Linux runner with no network credentials and a temporary `HOME`, this exits 0:
@@ -61,23 +63,23 @@ make check && scripts/proof.sh
 
 The scaffold proof does not import mail, build an FTS index, or run a product CLI.
 
-## 6. Open questions
-These points are **OPEN**. This scaffold does not decide them.
+## 6. Closed decisions
+These points are closed.
 
-1. **OPEN.** v1 DDL is the full plan schema, or ingest and FTS tables only.
-2. **OPEN.** The account alias is `personal` or `pessoal`.
-3. **OPEN.** `provenance_hash` uses a stable alias or an integer `account_id`. The version input is a semver or a git SHA.
-4. **OPEN.** gog export field names are unverified. Until they are verified, the fixture contract `mailcrawl.gog-export.v0` fails closed (`unsupported_schema`). The fixture is not a guess of real gog keys.
-5. **OPEN.** `body_text` quote and signature stripping happens in phase 1 or in phase 2.
-6. **OPEN.** Phase 1 FTS columns include `from_hdr` and an empty `attachment_text`, or they do not.
-7. **OPEN.** `init` creates `index.db` and `reads.db` now, or later.
-8. **OPEN.** The real taxonomy catalogue stays off git. A testdata catalogue is synthetic. This revision includes only the synthetic file.
-9. **OPEN.** Stored headers are an allow-list, or all headers.
-10. **OPEN.** Population rules for `snippet`, `gmail_history_id`, and `subject_norm`.
+1. Schema v1 (`user_version=1`) contains only the tables ingest and FTS write. Those tables are `accounts`, `labels`, `senders`, `threads`, `messages`, `headers`, `message_labels`, `attachments`, `cursors`, `import_runs`, `ledger`, and `msg_fts`. Decisions, plans, embeddings, and clips arrive in a later migration when code writes them. v1 does not create empty tables for them.
+2. The account alias is `personal`. `pessoal` is an optional CLI input alias that selects `personal`. The database file is `personal.db`.
+3. `provenance_hash` is the SHA-256 of five lines. The lines are `gog`, the stable alias, `gmail_message_id`, `raw_sha256`, and the mailcrawl version. The hash does not use `account_id`. The version is the package semver plus a short git SHA when git can see one, for example `0.1.0+abc1234`.
+4. The fixture contract stays `mailcrawl.gog-export.v0` until a Codex export confirms live gog field names. The four required keys are message id, thread id, label ids, and date. A document that lacks any of those four fails closed with `unsupported_schema`. Other listed fields are optional and stay NULL when the export omits them. Unknown keys go to one raw JSON field. Fixture key names belong to this contract. They are not a guess of live gog names.
+5. `body_text` is the `text/plain` part. When the message has no plain part, `body_text` is the HTML part converted to text. The stored text includes quotations and signatures. Quote and signature stripping is phase 2. Phase 2 keeps this original text.
+6. `msg_fts` indexes `subject`, `body_text`, `from_hdr`, and `attachment_text`. The tokenizer is `unicode61 remove_diacritics 2`. `attachment_text` stays empty. `attachments.extract_status` stays `pending`. Addresses in the local index stay on the machine.
+7. `init` creates one database per alias, named `<alias>.db`. It does not create `index.db` or `reads.db`.
+8. Real label names and `taxonomy-account-maps.json` stay off this repository. Tests load `testdata/catalogue/taxonomy.synthetic.json`. A real catalogue is a local file passed with `--taxonomy` or the config key `taxonomy`.
+9. `headers` stores an allow-list, in lower case. The names are `list-unsubscribe`, `list-unsubscribe-post`, `list-id`, `precedence`, `auto-submitted`, `x-mailer`, `feedback-id`, `message-id`, `in-reply-to`, `references`, `reply-to`, `return-path`, `authentication-results`, and `received-spf`. Other headers are dropped.
+10. `snippet` and `gmail_history_id` are NULL when the export omits them. `subject_norm` trims the subject, removes a leading run of `Re:`, `Fwd:`, and `Fw:` without regard to case, and collapses whitespace. It does not fold accents.
 
 ## 7. Scope
-**In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, scaffold proof, fail-closed contract gate.
+**In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, scaffold proof, fail-closed contract gate, and schema v1.
 
-**Phase 1 (later):** the Python work in section 4.
+**Still to land in phase 1:** idempotent import, FTS search, and the JSON CLI from section 4.
 
-**Out of scope:** a real import, FTS, the product CLI, embeddings, Gmail writes, running `gog`, a language model on the crawl path, and the Go port.
+**Out of scope:** embeddings, Gmail writes, running `gog`, a language model on the crawl path, a live gog field map, and the Go port.

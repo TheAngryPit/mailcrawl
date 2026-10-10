@@ -1,6 +1,6 @@
-"""mailcrawl scaffold.
+"""mailcrawl.
 
-Phase 1 import, FTS, and the CLI are not implemented.
+Schema v1 is implemented. Import, FTS search, and the CLI are not.
 """
 
 from mailcrawl.contract import classify_export
