@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Scaffold proof. Temp HOME, no credentials, no network.
-# Does not import mail, build FTS, or run a product CLI.
+# Phase 1 proof. Temp HOME, no credentials, no network.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -103,22 +102,156 @@ log "check: python tests"
   python3 -m unittest discover -s tests -v
 ) | tee -a "${PROOF_DIR}/tests.log"
 
-python3 - "${PROOF_DIR}/summary.json" <<'PY'
+EXPORT="${REPO_ROOT}/testdata/fixtures/gog-export/v0"
+TAXONOMY="${REPO_ROOT}/testdata/catalogue/taxonomy.synthetic.json"
+DATA_DIR="${HOME}/.local/share/mailcrawl"
+DB="${DATA_DIR}/personal.db"
+FIXTURE_BEFORE="${PROOF_DIR}/fixtures.sha256.before"
+FIXTURE_AFTER="${PROOF_DIR}/fixtures.sha256.after"
+
+record_fixture_hashes() {
+  find "${REPO_ROOT}/testdata" -type f | sort | xargs sha256sum >"$1"
+}
+
+dump_hash() {
+  (
+    cd "${REPO_ROOT}"
+    python3 - "$1" <<'PY'
+import sys
+from mailcrawl.store import connect, ordered_row_dump_hash
+
+conn = connect(sys.argv[1])
+try:
+    print(ordered_row_dump_hash(conn))
+finally:
+    conn.close()
+PY
+  )
+}
+
+record_fixture_hashes "${FIXTURE_BEFORE}"
+
+log "check: init creates only personal.db"
+(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json init --account pessoal --email ada@example.com
+) | tee "${PROOF_DIR}/init.log"
+[[ -f "${DB}" ]] || fail "personal.db missing"
+[[ ! -e "${DATA_DIR}/index.db" ]] || fail "init created index.db"
+[[ ! -e "${DATA_DIR}/reads.db" ]] || fail "init created reads.db"
+[[ ! -e "${DATA_DIR}/pessoal.db" ]] || fail "init created pessoal.db"
+
+log "check: import count matches the manifest"
+import_out="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json import gog-export \
+    --account personal \
+    --dir "${EXPORT}" \
+    --taxonomy "${TAXONOMY}"
+)"
+echo "${import_out}" | tee "${PROOF_DIR}/import.log"
+IMPORT_JSON="${import_out}" EXPORT_JSON="${EXPORT}/export.json" python3 <<'PY' || fail "import count does not match the manifest"
+import json, os
+doc = json.loads(os.environ["IMPORT_JSON"])
+manifest = json.loads(open(os.environ["EXPORT_JSON"], encoding="utf-8").read())
+want = manifest["example_manifest"]["messages"]
+if doc["n_seen"] != want or doc["n_new"] != want:
+    raise SystemExit(1)
+PY
+
+hash1="$(dump_hash "${DB}")"
+log "check: reimport keeps the ordered-row-dump hash"
+reimport_out="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json import gog-export \
+    --account personal \
+    --dir "${EXPORT}" \
+    --taxonomy "${TAXONOMY}"
+)"
+echo "${reimport_out}" | tee "${PROOF_DIR}/reimport.log"
+hash2="$(dump_hash "${DB}")"
+[[ "${hash1}" == "${hash2}" ]] || fail "reimport hash ${hash1} != ${hash2}"
+REIMPORT_JSON="${reimport_out}" python3 <<'PY' || fail "reimport did not count every row as a duplicate"
+import json, os
+doc = json.loads(os.environ["REIMPORT_JSON"])
+if doc["n_dup"] != doc["n_seen"] or doc["n_new"] != 0:
+    raise SystemExit(1)
+PY
+echo "${hash1}" >"${PROOF_DIR}/row-dump.hash"
+log "reimport hash stable: ${hash1}"
+
+log "check: search reuniao finds reunião"
+search_out="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json search reuniao --account personal
+)"
+echo "${search_out}" | tee "${PROOF_DIR}/search.log"
+SEARCH_JSON="${search_out}" python3 <<'PY' || fail "search reuniao missed reunião"
+import json, os
+doc = json.loads(os.environ["SEARCH_JSON"])
+hits = doc.get("hits") or []
+if not any("reunião" in (hit.get("snippet") or "") for hit in hits):
+    raise SystemExit(1)
+PY
+
+log "check: missing required keys fail closed"
+for key in example_message_id example_thread_id example_label_ids example_date; do
+  broken="$(mktemp -d)"
+  KEY="${key}" SRC="${EXPORT}/export.json" DEST="${broken}" python3 <<'PY'
+import json, os
+from pathlib import Path
+doc = json.loads(Path(os.environ["SRC"]).read_text(encoding="utf-8"))
+del doc["example_messages"][0][os.environ["KEY"]]
+Path(os.environ["DEST"], "export.json").write_text(json.dumps(doc), encoding="utf-8")
+PY
+  set +e
+  bad_out="$(
+    cd "${REPO_ROOT}"
+    python3 -m mailcrawl --json import gog-export --account personal --dir "${broken}"
+  )"
+  bad_code=$?
+  set -e
+  rm -rf "${broken}"
+  echo "${bad_out}" >>"${PROOF_DIR}/unsupported.log"
+  [[ "${bad_code}" -eq 3 ]] || fail "missing ${key} exited ${bad_code}"
+  printf '%s' "${bad_out}" | grep -q unsupported_schema || fail "missing ${key} lacked unsupported_schema"
+done
+
+record_fixture_hashes "${FIXTURE_AFTER}"
+if ! diff -q "${FIXTURE_BEFORE}" "${FIXTURE_AFTER}" >/dev/null; then
+  diff -u "${FIXTURE_BEFORE}" "${FIXTURE_AFTER}" | tee "${PROOF_DIR}/fixtures-diff.log" || true
+  fail "source fixture hashes changed"
+fi
+log "source fixture hashes unchanged"
+
+python3 - "${PROOF_DIR}/summary.json" "${hash1}" <<'PY'
 import json
 import sys
 
-path = sys.argv[1]
+path, digest = sys.argv[1], sys.argv[2]
 doc = {
-    "schema": "mailcrawl.scaffold-proof.v0",
+    "schema": "mailcrawl.phase1-proof.v0",
     "status": "pass",
     "home_isolated": True,
     "network": "blocked",
     "credentials": "unset",
-    "checks": ["hygiene", "fixtures", "secrets", "python_tests"],
+    "row_dump_hash": digest,
+    "checks": [
+        "hygiene",
+        "fixtures",
+        "secrets",
+        "python_tests",
+        "init_personal_db_only",
+        "import_count_matches_manifest",
+        "reimport_row_dump_hash",
+        "search_reuniao",
+        "missing_required_key_unsupported_schema",
+        "fixture_sha256_unchanged",
+    ],
 }
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(doc, handle, indent=2)
     handle.write("\n")
 PY
 
-log "scaffold proof passed"
+log "phase 1 proof passed"

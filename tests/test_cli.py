@@ -86,6 +86,20 @@ class CliImportTest(unittest.TestCase):
             self.assertEqual(again.returncode, 0, again.stderr)
             self.assertEqual(json.loads(again.stdout)["n_dup"], 2)
 
+            found = run_mailcrawl(
+                home,
+                "--json",
+                "search",
+                "reuniao",
+                "--account",
+                "personal",
+            )
+            self.assertEqual(found.returncode, 0, found.stderr)
+            hits = json.loads(found.stdout)["hits"]
+            self.assertEqual(len(hits), 1)
+            self.assertIn("reunião", hits[0]["snippet"])
+            self.assertEqual(hits[0]["gmail_message_id"], "fixture-002")
+
             broken_dir = home / "broken"
             broken_dir.mkdir()
             broken = json.loads((EXPORT / "export.json").read_text(encoding="utf-8"))

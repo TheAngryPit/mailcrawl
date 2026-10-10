@@ -1,4 +1,4 @@
-"""JSON CLI for init and import."""
+"""JSON CLI for init, import, and search."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from mailcrawl.configfile import account_email, taxonomy_path, write_account
 from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.ingest import import_gog_export
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
+from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
 
 
@@ -26,6 +27,8 @@ def main(argv: list[str] | None = None) -> int:
             return _init(args)
         if args.command == "import":
             return _import(args)
+        if args.command == "search":
+            return _search(args)
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
@@ -61,6 +64,10 @@ def _parser() -> argparse.ArgumentParser:
     gog.add_argument("--dir", required=True)
     gog.add_argument("--taxonomy")
     gog.add_argument("--account", required=True)
+
+    search = sub.add_parser("search")
+    search.add_argument("query")
+    search.add_argument("--account", required=True)
     return parser
 
 
@@ -120,6 +127,20 @@ def _import(args: argparse.Namespace) -> int:
             "ok": True,
         },
     )
+    return 0
+
+
+def _search(args: argparse.Namespace) -> int:
+    alias = canonical_alias(args.account)
+    db_path = data_dir(args.home) / f"{alias}.db"
+    if not db_path.is_file():
+        raise UsageError("account is not initialized")
+    conn = connect(db_path)
+    try:
+        hits = search_messages(conn, args.query)
+    finally:
+        conn.close()
+    _emit(args, {"hits": hits, "ok": True, "query": args.query})
     return 0
 
 

@@ -3,7 +3,7 @@ Local-first, read-only archive for mail you already exported. Pulls a local expo
 
 ## Status
 
-mailcrawl is pre-alpha. Schema v1 and an idempotent import of the v0 fixture contract are in the tree. FTS search is not implemented yet. [The spec](docs/SPEC.md) is the behavior contract.
+mailcrawl is pre-alpha. Phase 1 is in the tree. That is schema v1, an idempotent import of the v0 fixture contract, FTS search, and a JSON CLI. [The spec](docs/SPEC.md) is the behavior contract.
 
 ## Why it exists
 
@@ -24,7 +24,7 @@ Bodies, subjects, and addresses from real mail never go to GitHub. The tree hold
 
 ## How agents use it
 
-Phase 1 plans a JSON CLI. A later phase plans a read-only MCP server. Neither is in this scaffold. `skills/mailcrawl/SKILL.md` states the boundary.
+The JSON CLI is `python3 -m mailcrawl`. Search returns untrusted message text. A later phase plans a read-only MCP server. `skills/mailcrawl/SKILL.md` states the boundary.
 
 ## Security and privacy
 
@@ -32,9 +32,9 @@ Archives stay on the local machine. Report a vulnerability in private. The steps
 
 ## Roadmap
 
-This revision is the spec, this README, the security policy, synthetic fixtures, a scaffold proof, schema v1, and import.
+This revision is the spec, this README, the security policy, synthetic fixtures, schema v1, import, FTS search, and the phase 1 proof.
 
-Phase 1 adds the Python SQLite schema, an idempotent import of a gog export, FTS5 (`unicode61 remove_diacritics 2`), a JSON CLI, and fixture tests. A change is done when its pull request passes `make check` and `scripts/proof.sh` on a clean Linux runner with no network credentials.
+Phase 1 is the Python SQLite schema, an idempotent import of a gog export, FTS5 (`unicode61 remove_diacritics 2`), a JSON CLI, and fixture tests. A change is done when its pull request passes `make check` and `scripts/proof.sh` on a clean Linux runner with no network credentials.
 
 A Go port comes after the Python prototype settles. The archive stays local.
 
