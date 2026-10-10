@@ -1,0 +1,9 @@
+From: Ada Fixture <ada@example.com>
+To: Bao Fixture <bao@example.com>
+Subject: Synthetic hello from example.com
+Date: Fri, 10 Oct 2026 00:00:00 +0000
+Message-ID: <fixture-001@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+This body is fake fixture text.

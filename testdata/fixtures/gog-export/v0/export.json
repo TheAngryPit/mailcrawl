@@ -1,0 +1,14 @@
+{
+  "schema": "mailcrawl.gog-export.v0",
+  "synthetic": true,
+  "note": "Contract stub. Not a guess of gog export field names. Readers fail closed with unsupported_schema.",
+  "example_messages": [
+    {
+      "example_ref": "fixture-001",
+      "example_from": "ada@example.com",
+      "example_to": "bao@example.com",
+      "example_subject": "Synthetic hello from example.com",
+      "example_body": "This body is fake fixture text."
+    }
+  ]
+}
