@@ -76,6 +76,11 @@ tracked_ok "testdata/fixtures/gog-export/v0/export.json"
 tracked_ok "testdata/fixtures/example.db"
 tracked_ok "testdata/fixtures/example.jsonl"
 
+if git ls-files -- 'taxonomy-account-maps.json' '*taxonomy-account-maps.json' | grep -q .; then
+  echo "tracked forbidden catalogue taxonomy-account-maps.json"
+  fail=1
+fi
+
 if [[ "$fail" -ne 0 ]]; then
   exit "$fail"
 fi
