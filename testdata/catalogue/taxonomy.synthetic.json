@@ -1,0 +1,11 @@
+{
+  "schema": "mailcrawl.taxonomy.synthetic",
+  "synthetic": true,
+  "note": "Stand-in catalogue. The real taxonomy catalogue stays off git. Account alias is unresolved.",
+  "labels": [
+    {
+      "name": "Example/Synthetic",
+      "account": "example"
+    }
+  ]
+}

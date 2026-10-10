@@ -1,0 +1,12 @@
+---
+description: One-thread Cursor agents for mailcrawl (poteto-mode and pstack, Cursor models)
+alwaysApply: true
+---
+
+# Agent mold
+
+Work this repo in one thread. Do not open a stacked pull request from an agent run, and do not spawn subagents for mailcrawl tasks.
+
+poteto-mode and pstack apply when those skills are installed. Choose Cursor models.
+
+Privacy stays in force. Real message bodies, subjects, and addresses never go to GitHub. Do not run gog. Do not write to Gmail. Do not call a language model on a crawl path. Fixtures stay synthetic.

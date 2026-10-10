@@ -1,0 +1,5 @@
+{
+  "schema": "not-a-known-export",
+  "synthetic": true,
+  "note": "Unknown shape. Readers fail closed with unsupported_schema."
+}

@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+EVIDENCE_DIR="${EVIDENCE_DIR:-/tmp/mailcrawl-verify-evidence/$RUN_ID}"
+SCRATCH_DIR="/tmp/mailcrawl-verify-scratch/$RUN_ID"
+
+log() {
+  echo "[mailcrawl-verify] $*"
+}
+
+append_summary() {
+  local feature="$1" code="$2"
+  printf '%s feature=%s exit=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$feature" "$code" >>"$EVIDENCE_DIR/summary.txt"
+}
+
+scaffold_proof_runnable() {
+  [[ -f "$REPO_ROOT/Makefile" && -f "$REPO_ROOT/scripts/proof.sh" ]]
+}
+
+record_spec_hash() {
+  mkdir -p "$EVIDENCE_DIR"
+  sha256sum "$REPO_ROOT/docs/SPEC.md" | awk '{print $1}' >"$EVIDENCE_DIR/spec.sha256"
+}
+
+verify_spec_unchanged() {
+  local before after
+  before="$(cat "$EVIDENCE_DIR/spec.sha256")"
+  after="$(sha256sum "$REPO_ROOT/docs/SPEC.md" | awk '{print $1}')"
+  if [[ "$before" != "$after" ]]; then
+    log "docs/SPEC.md changed during verification (hash mismatch)"
+    return 1
+  fi
+  log "docs/SPEC.md unchanged"
+  return 0
+}
+
+docs_secret_check() {
+  "$REPO_ROOT/scripts/hygiene.sh"
+}
+
+drive_required_docs_and_ci() {
+  local fail=0
+  cd "$REPO_ROOT"
+  for f in README.md docs/SPEC.md SECURITY.md CONTRIBUTING.md \
+    .github/CODEOWNERS .github/dependabot.yml .github/workflows/check.yml; do
+    if [[ ! -f "$f" ]]; then
+      echo "missing $f"
+      fail=1
+    else
+      echo "present $f"
+    fi
+  done
+  [[ "$fail" -eq 0 ]]
+}
+
+drive_secrets_and_tracked_forbidden() {
+  docs_secret_check
+}
+
+drive_spec_integrity() {
+  verify_spec_unchanged
+}
+
+drive_scaffold_headless_proof() {
+  if ! scaffold_proof_runnable; then
+    log "scaffold-headless-proof: not runnable (need Makefile and scripts/proof.sh)"
+    return 2
+  fi
+  cd "$REPO_ROOT"
+  make check && scripts/proof.sh
+}
+
+cmd_doctor() {
+  mkdir -p "$EVIDENCE_DIR"
+  {
+    log "doctor run_id=$RUN_ID repo=$REPO_ROOT evidence=$EVIDENCE_DIR"
+    if [[ "$(git -C "$REPO_ROOT" rev-parse --show-toplevel)" != "$REPO_ROOT" ]]; then
+      log "REPO_ROOT is not git toplevel"
+      exit 1
+    fi
+    record_spec_hash
+    if scaffold_proof_runnable; then
+      log "scaffold proof: runnable"
+    else
+      log "scaffold proof: not runnable (missing Makefile and/or scripts/proof.sh)"
+    fi
+    log "doctor ok"
+  } | tee "$EVIDENCE_DIR/doctor.log"
+}
+
+cmd_drive() {
+  local feature="${1:-}"
+  if [[ -z "$feature" ]]; then
+    echo "usage: mailcrawl-verify drive --feature <id>" >&2
+    exit 1
+  fi
+  mkdir -p "$EVIDENCE_DIR"
+  local code=0
+  {
+    log "drive feature=$feature"
+    case "$feature" in
+      required-docs-and-ci) drive_required_docs_and_ci ;;
+      secrets-and-tracked-forbidden) drive_secrets_and_tracked_forbidden ;;
+      spec-integrity) drive_spec_integrity ;;
+      scaffold-headless-proof) drive_scaffold_headless_proof ;;
+      *)
+        log "unknown feature: $feature"
+        exit 1
+        ;;
+    esac
+    verify_spec_unchanged || exit 1
+    log "drive ok feature=$feature"
+  } | tee "$EVIDENCE_DIR/drive.log" || code=$?
+  append_summary "$feature" "$code"
+  exit "$code"
+}
+
+cmd_cleanup() {
+  rm -rf "$SCRATCH_DIR"
+  log "cleanup done (evidence kept at $EVIDENCE_DIR)"
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+  case "$cmd" in
+    doctor) cmd_doctor ;;
+    drive)
+      if [[ "${1:-}" == --feature ]]; then
+        shift
+        cmd_drive "${1:-}"
+      else
+        echo "usage: mailcrawl-verify drive --feature <id>" >&2
+        exit 1
+      fi
+      ;;
+    cleanup) cmd_cleanup ;;
+    docs-secret-check) docs_secret_check ;;
+    *)
+      echo "usage: mailcrawl-verify {doctor|drive|cleanup|docs-secret-check}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

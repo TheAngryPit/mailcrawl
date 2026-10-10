@@ -1,0 +1,102 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+!coverage.go
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+.env*
+
+# Local SQLite archives and proof output
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+!testdata/**/*.db
+!testdata/**/*.db-wal
+!testdata/**/*.db-shm
+!testdata/**/*.sqlite
+!testdata/**/*.sqlite3
+proof/
+
+# OAuth token and credential JSON files
+*credential*.json
+client_secret*.json
+*oauth*token*.json
+token.json
+tokens.json
+*.pem
+age.key
+*.age
+
+# Editor/IDE
+# .idea/
+# .vscode/
+
+# Local Gmail archives, gog backups, and plaintext exports
+MailVault/
+mail-vault/
+gog-backup-repo/
+gog-backup/
+gogcli/
+.gog/
+
+# Real mail exports and backups. Synthetic fixtures under testdata/ stay tracked.
+*.eml
+*.mbox
+*.jsonl
+!testdata/**/*.eml
+!testdata/**/*.mbox
+!testdata/**/*.jsonl
+
+# Models, embeddings, and vectors
+models/
+embeddings/
+vectors/
+*.gguf
+*.safetensors
+*.onnx
+*.npy
+
+# OCR outputs
+ocr/
+ocr-out/
+*.ocr.txt
+*.ocr.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.tox/
