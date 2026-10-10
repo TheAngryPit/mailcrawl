@@ -1,6 +1,6 @@
 """mailcrawl.
 
-Schema v1 is implemented. Import, FTS search, and the CLI are not.
+Schema v1 and fixture import are implemented. FTS search is not.
 """
 
 from mailcrawl.contract import classify_export

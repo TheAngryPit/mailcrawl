@@ -3,7 +3,7 @@ Local-first, read-only archive for mail you already exported. Pulls a local expo
 
 ## Status
 
-mailcrawl is pre-alpha. Schema v1 (`user_version=1`) is in the tree. Import, FTS search, and the JSON CLI are specified and are not implemented yet. [The spec](docs/SPEC.md) is the behavior contract.
+mailcrawl is pre-alpha. Schema v1 and an idempotent import of the v0 fixture contract are in the tree. FTS search is not implemented yet. [The spec](docs/SPEC.md) is the behavior contract.
 
 ## Why it exists
 
@@ -32,7 +32,7 @@ Archives stay on the local machine. Report a vulnerability in private. The steps
 
 ## Roadmap
 
-This revision is the spec, this README, the security policy, synthetic fixtures, a scaffold proof, and schema v1.
+This revision is the spec, this README, the security policy, synthetic fixtures, a scaffold proof, schema v1, and import.
 
 Phase 1 adds the Python SQLite schema, an idempotent import of a gog export, FTS5 (`unicode61 remove_diacritics 2`), a JSON CLI, and fixture tests. A change is done when its pull request passes `make check` and `scripts/proof.sh` on a clean Linux runner with no network credentials.
 

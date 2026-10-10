@@ -72,9 +72,26 @@ if v0.get("schema") != "mailcrawl.gog-export.v0":
     sys.exit("v0 fixture schema drifted")
 if v0.get("synthetic") is not True:
     sys.exit("v0 fixture is not marked synthetic")
-allowed = {"schema", "synthetic", "note", "example_messages"}
+allowed = {
+    "schema",
+    "synthetic",
+    "note",
+    "example_manifest",
+    "example_labels",
+    "example_messages",
+}
 if set(v0) != allowed:
-    sys.exit(f"v0 keys are not the stub set: {sorted(v0)}")
+    sys.exit(f"v0 keys drifted: {sorted(set(v0) ^ allowed)}")
+required = {
+    "example_message_id",
+    "example_thread_id",
+    "example_label_ids",
+    "example_date",
+}
+for message in v0["example_messages"]:
+    missing = required - set(message)
+    if missing:
+        sys.exit(f"v0 message missing {sorted(missing)}")
 PY
 
 log "check: repo hygiene"
