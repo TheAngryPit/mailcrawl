@@ -15,7 +15,7 @@ On a clean Linux runner with **no network credentials**, this must exit **0**:
 make check && scripts/proof.sh
 ```
 
-That run writes `proof/summary.json` and `proof/*.log` (gitignored). It covers the scaffold checks in [docs/SPEC.md](../../../docs/SPEC.md) section **5**. It does not claim that import, FTS, or the CLI exist.
+That run writes `proof/summary.json` and `proof/*.log` (gitignored). It covers the phase 1 checks in [docs/SPEC.md](../../../docs/SPEC.md) section **5**, including import, FTS search, and the JSON CLI against synthetic fixtures.
 
 ## Launch
 

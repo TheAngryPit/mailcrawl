@@ -1,11 +1,11 @@
 # mailcrawl: spec v0
 
-Status: schema v1 and idempotent import are in the tree. FTS search is not in this revision. Repo: `TheAngryPit/mailcrawl`. License: MIT.
+Status: phase 1 is in the tree. Schema v1, idempotent import, FTS search, and the JSON CLI. Repo: `TheAngryPit/mailcrawl`. License: MIT.
 
 **Local-only.** mailcrawl archives mail that is already on disk. It does not open a network connection, does not read credentials, and does not write to Gmail. Unknown export shapes fail closed.
 
 ## 1. What it is
-A local-first, read-only archive of your mail. Phase 1 is a Python prototype: a SQLite schema, an idempotent import of a gog export, FTS5, a JSON CLI, and fixture tests. This revision adds schema v1 and an idempotent import of the v0 fixture contract. FTS search is not in this tree.
+A local-first, read-only archive of your mail. Phase 1 is a Python prototype: a SQLite schema, an idempotent import of a gog export, FTS5, a JSON CLI, and fixture tests. This revision adds schema v1, an idempotent import of the v0 fixture contract, FTS search, and a JSON CLI.
 
 No servers, no cloud copy, no writes back to Gmail. The program never runs `gog`. No language model runs on the crawl path.
 
@@ -28,7 +28,8 @@ mailcrawl/contract.py            # v0 fixture contract
 mailcrawl/schema.py              # schema v1 DDL
 mailcrawl/store.py               # open one account database and migrate it
 mailcrawl/ingest.py              # idempotent gog-export import
-mailcrawl/cli.py                 # init and import
+mailcrawl/search.py              # FTS search
+mailcrawl/cli.py                 # init, import, and search
 tests/
 testdata/fixtures/gog-export/    # synthetic; contract mailcrawl.gog-export.v0
 testdata/catalogue/              # synthetic taxonomy stand-in
@@ -42,14 +43,14 @@ Phase 1 is read-only Python and it does all of the following:
 
 - Create SQLite schema v1 for one local archive. `mailcrawl/schema.py` migrates an empty database to `user_version` 1.
 - Import a gog export idempotently on `(account_id, gmail_message_id)`. `mailcrawl import gog-export` does that for the fixture contract.
-- Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`. Import writes `msg_fts`. The search command is not in this revision.
-- Speak JSON on the CLI. `init` and `import` accept `--json`. Search does not exist yet.
+- Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`. Import writes `msg_fts`. `mailcrawl search` reads it.
+- Speak JSON on the CLI. `init`, `import`, and `search` accept `--json` before the command.
 - Test against synthetic fixtures only.
 
 `mailcrawl.contract.classify_export` returns `ok` for a `mailcrawl.gog-export.v0` document that has the four required keys from section 6 point 4. It returns `unsupported_schema` when the schema label differs or any of those keys is missing. The key names belong to the fixture contract. They are not a map of live gog field names.
 
-## 5. Scaffold proof (this revision)
-A scaffold change is done when, on a clean Linux runner with no network credentials and a temporary `HOME`, this exits 0:
+## 5. Phase 1 proof
+A phase 1 change is done when, on a clean Linux runner with no network credentials and a temporary `HOME`, this exits 0:
 
 ```
 make check && scripts/proof.sh
@@ -61,9 +62,12 @@ make check && scripts/proof.sh
 2. Synthetic fixtures under `testdata/` are present, use `example.com`, and are not gitignored.
 3. Local archive paths, SQLite files, real-mail exports, models, and secret files are ignored, and none of those are tracked.
 4. Python tests that exist pass.
-5. A `mailcrawl.gog-export.v0` document that lacks any of the four required keys fails closed with `unsupported_schema`. The tracked fixture includes those keys.
-
-The scaffold proof does not import mail, build an FTS index, or run a product CLI.
+5. `init --account pessoal` creates `personal.db` and does not create `index.db`, `reads.db`, or `pessoal.db`.
+6. Import counts match `example_manifest.messages`.
+7. A second import keeps the same ordered-row-dump hash.
+8. `search reuniao` finds the fixture text `reunião`.
+9. Source fixture hashes are unchanged after import and search.
+10. A `mailcrawl.gog-export.v0` document that lacks any of the four required keys fails closed with `unsupported_schema`.
 
 ## 6. Closed decisions
 These points are closed.
@@ -80,8 +84,6 @@ These points are closed.
 10. `snippet` and `gmail_history_id` are NULL when the export omits them. `subject_norm` trims the subject, removes a leading run of `Re:`, `Fwd:`, and `Fw:` without regard to case, and collapses whitespace. It does not fold accents.
 
 ## 7. Scope
-**In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, scaffold proof, schema v1, `init`, and idempotent `import gog-export`.
+**In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, schema v1, `init`, idempotent `import gog-export`, FTS search, and the phase 1 proof.
 
-**Still to land in phase 1:** FTS search and the proof checks in the phase 1 assignment.
-
-**Out of scope:** embeddings, Gmail writes, running `gog`, a language model on the crawl path, a live gog field map, and the Go port.
+**Out of scope:** embeddings, label apply, Gmail writes, running `gog`, a language model on the crawl path, a live gog field map, and the Go port.
