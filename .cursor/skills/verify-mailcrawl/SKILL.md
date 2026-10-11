@@ -1,6 +1,6 @@
 ---
 name: verify-mailcrawl
-description: Verify mailcrawl repo health (required docs, CI wiring, secrets and forbidden paths, SPEC integrity) and drive the scaffold headless proof. Use before shipping doc or CI changes, or when proving make check and scripts/proof.sh.
+description: Verify mailcrawl repo health (required docs, CI wiring, secrets and forbidden paths, SPEC integrity), drive the scaffold headless proof, and drive native gog import on the synthetic fixture. Use before shipping doc or CI changes, or when proving make check, scripts/proof.sh, or import of a gog export that has no export.json.
 ---
 
 # verify-mailcrawl
@@ -16,6 +16,8 @@ make check && scripts/proof.sh
 ```
 
 That run writes `proof/summary.json` and `proof/*.log` (gitignored). It covers the phase 1 checks in [docs/SPEC.md](../../../docs/SPEC.md) section **5**, including import, FTS search, and the JSON CLI against synthetic fixtures.
+
+Native gog import, a directory with `labels.json` and `messages/index.jsonl` and no `export.json`, is a separate drive. See [native-gog-import](./features/native-gog-import.md).
 
 ## Launch
 
@@ -61,6 +63,12 @@ make check && scripts/proof.sh
 
 Feature IDs match the map filenames without `.md`.
 
+To drive native gog import:
+
+```bash
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature native-gog-import
+```
+
 ## Evidence
 
 Capture proof outside gitignored `proof/` so cleanup does not erase it.
@@ -92,6 +100,7 @@ test -f "$EVIDENCE_DIR/summary.txt" && test -f "$EVIDENCE_DIR/doctor.log"
 ```bash
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" doctor
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature scaffold-headless-proof
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature native-gog-import
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" cleanup
 ```
 
