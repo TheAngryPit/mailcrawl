@@ -1,6 +1,6 @@
 ---
 name: verify-mailcrawl
-description: Verify mailcrawl repo health (required docs, CI wiring, secrets and forbidden paths, SPEC integrity), drive the scaffold headless proof, drive native gog import, drive body cleaning, and drive attachment parsing. Use before shipping doc or CI changes, or when proving make check, scripts/proof.sh, a gog export with no export.json, quote stripping, or attachment status.
+description: Verify mailcrawl repo health (required docs, CI wiring, secrets and forbidden paths, SPEC integrity), drive the scaffold headless proof, drive native gog import, drive body cleaning, drive attachment parsing, and drive rules v0. Use before shipping doc or CI changes, or when proving make check, scripts/proof.sh, a gog export with no export.json, quote stripping, attachment status, or rule counts.
 ---
 
 # verify-mailcrawl
@@ -22,6 +22,8 @@ Native gog import, a directory with `labels.json` and `messages/index.jsonl` and
 Body cleaning stores `body_text_raw`, indexes the cleaned `body_text`, and migrates to schema v2. See [body-clean](./features/body-clean.md).
 
 Attachment parsing extracts text parts and leaves every other type behind an interface. See [attachment-parse](./features/attachment-parse.md).
+
+Rules 0 to 8 print counts and do not print message text. See [rules-v0](./features/rules-v0.md).
 
 ## Launch
 
@@ -85,6 +87,12 @@ To drive attachment parsing:
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature attachment-parse
 ```
 
+To drive rules:
+
+```bash
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature rules-v0
+```
+
 ## Evidence
 
 Capture proof outside gitignored `proof/` so cleanup does not erase it.
@@ -119,6 +127,7 @@ test -f "$EVIDENCE_DIR/summary.txt" && test -f "$EVIDENCE_DIR/doctor.log"
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature native-gog-import
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature body-clean
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature attachment-parse
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature rules-v0
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" cleanup
 ```
 

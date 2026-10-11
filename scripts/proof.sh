@@ -341,6 +341,96 @@ if missing.extract_method != "pdf":
     raise SystemExit(f"default method {missing.extract_method}")
 PY
 
+log "check: rules print counts and no message text"
+(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json init --account vcl --email ada@example.com
+) >/dev/null
+VCL_DB="${DATA_DIR}/vcl.db"
+VCL_DB="${VCL_DB}" python3 - <<'PY'
+import os
+import sqlite3
+
+conn = sqlite3.connect(os.environ["VCL_DB"])
+conn.execute("PRAGMA foreign_keys = ON")
+account = conn.execute("SELECT account_id FROM accounts").fetchone()[0]
+now = 1700000000
+
+def add(number: int, body: str, starred: bool) -> None:
+    conn.execute(
+        "INSERT INTO senders(account_id, address_norm, domain) VALUES (?, ?, 'example.com')",
+        (account, f"bao{number}@example.com"),
+    )
+    sender = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO threads(account_id, gmail_thread_id) VALUES (?, ?)",
+        (account, f"rules-{number}"),
+    )
+    thread = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO messages(
+          account_id, gmail_message_id, thread_pk, internal_date, sender_id,
+          body_text, is_from_me, raw_sha256, provenance_hash, imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, 'raw', 'prov', ?)
+        """,
+        (account, f"rules-msg-{number}", thread, now - 86400, sender, body, now),
+    )
+    if starred:
+        msg = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at)
+            VALUES (?, 'STARRED', 'STARRED', 'system', ?)
+            """,
+            (account, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+            VALUES (?, ?, 'STARRED', ?)
+            """,
+            (msg, account, now),
+        )
+
+add(1, "secretbodyqx", True)
+add(2, "hello there", False)
+conn.commit()
+conn.close()
+PY
+rules_out="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json rules \
+    --account vcl \
+    --rules testdata/rules/rules-v0.json \
+    --now 1700000000
+)"
+echo "${rules_out}" | tee "${PROOF_DIR}/rules.log"
+printf '%s' "${rules_out}" | grep -q secretbodyqx && fail "rules output included message text"
+RULES_JSON="${rules_out}" python3 <<'PY' || fail "rules counts drifted"
+import json, os
+doc = json.loads(os.environ["RULES_JSON"])
+if doc.get("rules_version") != "rules-v0" or doc.get("threads") != 2 or doc.get("covered") != 2:
+    raise SystemExit(doc)
+if doc.get("by_state") != {"needs_review": 1, "reply": 1}:
+    raise SystemExit(doc.get("by_state"))
+if doc.get("by_rule") != {"0": 1, "5": 1}:
+    raise SystemExit(doc.get("by_rule"))
+PY
+(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json rules \
+    --account vcl \
+    --rules testdata/rules/rules-v0.json \
+    --now 1700000000
+) >/dev/null
+DECISIONS="$(python3 - "${VCL_DB}" <<'PY'
+import sqlite3, sys
+print(sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM decisions").fetchone()[0])
+PY
+)"
+[[ "${DECISIONS}" == "2" ]] || fail "rules rerun added decisions"
+
 log "check: missing required keys fail closed"
 for key in example_message_id example_thread_id example_label_ids example_date; do
   broken="$(mktemp -d)"
@@ -395,6 +485,7 @@ doc = {
         "body_text_cleaned",
         "native_gog_export",
         "attachment_parse",
+        "rules_v0",
         "missing_required_key_unsupported_schema",
         "fixture_sha256_unchanged",
     ],
