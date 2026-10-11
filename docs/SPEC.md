@@ -51,7 +51,7 @@ Phase 1 is read-only Python and it does all of the following:
 
 `mailcrawl.contract.classify_export` returns `ok` for a `mailcrawl.gog-export.v0` document that has the four required keys from section 6 point 4. It returns `unsupported_schema` when the schema label differs or any of those keys is missing. The key names belong to the fixture contract. They are not a map of live gog field names.
 
-`import gog-export` also reads a gog backup plaintext export when the directory has no `export.json`. The gogcli source writes `gmail/<account>/labels.json` and `gmail/<account>/messages/index.jsonl`. Each index record's `eml` value is a slash-separated path relative to the `gog backup export --out` directory. Pass that directory as `--dir`, or pass `gmail/<account>`. Paths that leave the export directory are rejected. A missing `.eml` file is `missing_file` and exits 1. A malformed record is `malformed_record` and exits 3. An unrecognized directory is `unsupported_schema` and exits 3. None of those errors include a message body or an address. A real mailbox export has not been imported here. The synthetic fixture under `testdata/fixtures/gog-export/native/` is the checked behavior.
+`import gog-export` also reads a gog backup plaintext export when the directory has no `export.json`. The gogcli source writes `gmail/<account>/labels.json` and `gmail/<account>/messages/index.jsonl`. Each index record's `eml` value is a slash-separated path relative to the `gog backup export --out` directory. Pass that directory as `--dir`, or pass `gmail/<account>`. Paths that leave the export directory are rejected. A missing `.eml` file is `missing_file` and exits 1. A malformed record is `malformed_record` and exits 3. An unrecognized directory is `unsupported_schema` and exits 3. None of those errors include a message body or an address. A native gog import of a real thehive export was verified on the Mac at commit `32b936c`. The export had 25 messages. The first import counted 25 new, 0 duplicates, and 0 errors. The second import counted 0 new, 25 duplicates, and 0 errors. Two searches each returned 13 hits. Both searches returned the same `gmail_message_id` values. The database stayed at 25 messages. The synthetic fixture under `testdata/fixtures/gog-export/native/` is still the behavior this repository checks.
 
 ## 5. Phase 1 proof
 A phase 1 change is done when, on a clean Linux runner with no network credentials and a temporary `HOME`, this exits 0:
@@ -91,4 +91,69 @@ These points are closed.
 ## 7. Scope
 **In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, schema v1, `init`, idempotent `import gog-export` for the fixture contract and for a gog backup plaintext export, FTS search, and the phase 1 proof.
 
-**Out of scope:** embeddings, label apply, Gmail writes, running `gog`, a language model on the crawl path, markdown-only gog exports, a confirmed import of a real mailbox, and the Go port.
+**Out of scope:** embeddings, label apply, Gmail writes, running `gog`, a language model on the crawl path, markdown-only gog exports, and the Go port. Section 8 lists later phases. Those phases are planned and out of this revision. Section 4 records a 25-message thehive smoke import. A full mailbox import is phase 2, not this revision.
+
+## 8. Later phases
+Status: PLANNED. This section is out of the current scope. Sections 4 to 7 describe the work this repository does now. The phases below are not requirements of this revision.
+
+An inference stays marked as still to be decided. An open approval stays marked as still to be decided.
+
+Deterministic triage in phase 2 uses rules 0 to 8 and no model. No language model runs on the crawl path.
+
+### Phase 2. Full thehive backup and export
+The work is a full thehive backup and export, the parser and OCR, rules 0 to 8, `stats`, and dry-run counts. The dry-run writes nothing.
+
+Acceptance is coverage of 100% of Gmail threads. The known 404 stays outside that coverage. Acceptance also includes a coverage report and a review of 100 sample decisions.
+
+An error under 2% on that sample is an inference. It is still to be decided. The full thehive backup needs Pit's approval. The cache-deletion policy needs Pit's approval. Both approvals are still to be decided.
+
+### Phase 3. Embeddings
+The local baseline is EmbeddingGemma 2, stored with sqlite-vec at 256 or 768 dimensions. The choice of model and dimension is still open. `mailcrawl embed` is a separate step outside the crawl path.
+
+The fallback named in the plan is EmbeddingGemma 1. That fallback is an inference, and it is not benchmarked. It is still to be decided.
+
+The benchmarks are B1 retrieval, B2 label prediction, B3 scans, B4 cost, and B5 sanity. Clusters are part of this phase. Portuguese pt-PT quality is unverified. Speed on Pit's Mac is unverified. The full license text is unverified. Those three wait on benchmarks B1 to B5.
+
+Acceptance is decision rule G.6. The text of that rule is outside this spec.
+
+Model download needs approval. The license read needs approval. Image embedding of scans needs approval. Those approvals are still to be decided.
+
+### Phase 4. First Gmail write
+The work is a 100-message plan on thehive. The sequence is a dry-run, a before-state, the apply step, a readback, and the ledger.
+
+Acceptance is 100% verified, and 0 unexpected label changes.
+
+The write needs explicit approval from Pit before it runs. The approved write adds existing labels only, and it runs on thehive only. That approval is still to be decided.
+
+### Phase 5. Other accounts by age cohorts
+The work is the vcl account, then personal, by age cohorts. Cohorts run oldest first. The last 90 days go thread by thread. Section G of an earlier plan holds the rest of the cohort order. That section is outside this spec.
+
+Acceptance is per-cohort verification, and drift is 0.
+
+Each cohort needs approval. Archive rules need approval. Both are still to be decided.
+
+### Phase 6. Daily sync
+The work is history sync, jornalzinho from the database, HEY lanes, and a weekly review.
+
+Acceptance is that the inbox-zero definition in section J of an earlier plan holds for 7 days. That definition is outside this spec.
+
+Schedules and routines need approval. That approval is still to be decided.
+
+### Phase 7. Optional local language model
+The work is a small local decision model. It is advisory only. It may suggest triage decisions and reply drafts for messages that deterministic rules leave in `needs_review`. It has no tools. It does not write to Gmail. Pit approves before any write.
+
+The concrete model is undefined. Pit mentioned a "laya decision model". That model is not identified yet.
+
+Acceptance is that the slice beats the rules baseline on an audit sample, and that it uses no tools.
+
+Any cloud language model needs approval. The default is no. That choice is still to be decided.
+
+### Not yet specified
+The phase plan leaves these items unspecified. They are undecided.
+
+- Read-only MCP.
+- Privacy classes.
+- Go port.
+- Markdown-only gog exports.
+
+Section 6 point 4 still rejects a record with no `eml` path.
