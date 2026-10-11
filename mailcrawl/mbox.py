@@ -13,6 +13,7 @@ import re
 import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
+import email
 from email import policy
 from email.feedparser import BytesFeedParser
 from email.header import decode_header, make_header
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from mailcrawl.contract import PSEUDO_LABEL, LabelRec, MessageRec
-from mailcrawl.eml import parsed_record
+from mailcrawl.eml import allow_headers, parsed_record
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.textnorm import parse_date
 
@@ -165,10 +166,17 @@ def provisional_thread(root: str) -> str:
 class MboxSource:
     """Yield labels and messages from one mbox file, one message in memory at a time."""
 
-    def __init__(self, path: Path, known: dict[str, LabelRec], seed: tuple[LabelRec, ...] = ()) -> None:
+    def __init__(
+        self,
+        path: Path,
+        known: dict[str, LabelRec],
+        seed: tuple[LabelRec, ...] = (),
+        stored: Callable[[str], bool] = lambda key: False,
+    ) -> None:
         if not path.is_file():
             raise ExportInvalid("missing_file", "mbox file is missing", 1)
         self.path = path
+        self._stored = stored
         self._known = dict(known)
         self._seed = seed
         self._digest = hashlib.sha256()
@@ -186,7 +194,7 @@ class MboxSource:
             yield label
         raw_path = RAW_PATH + str(self.path.resolve())
         with self.path.open("rb") as handle:
-            for entry in _entries(handle, self._digest.update):
+            for entry in _entries(handle, self._digest.update, self._stored):
                 parsed = self._parse(entry, f"{raw_path}#{entry.offset}")
                 if isinstance(parsed, Refused):
                     yield parsed
@@ -202,7 +210,7 @@ class MboxSource:
     def _parse(self, entry: _Entry, raw_path: str) -> tuple[list[LabelRec], MessageRec] | Refused:
         offset, separator = entry.offset, entry.separator
         try:
-            parsed, raw_sha256, size_bytes, takeout = entry.finish()
+            parsed, raw_sha256, size_bytes, takeout, message_id = entry.finish()
             draft = parsed_record(
                 parsed,
                 raw_sha256=raw_sha256,
@@ -215,15 +223,8 @@ class MboxSource:
             )
         except Exception:
             return Refused(offset, "unparseable")
-        message_id = (
-            gmail_hex(takeout.gm_msgid, decimal_only=True)
-            or gmail_hex(takeout.gmail_message_id, decimal_only=False)
-            or _separator_id(separator)
-        )
         if message_id is None:
-            if not draft.rfc822_message_id or not _bare_message_id(draft.rfc822_message_id):
-                return Refused(offset, "no_message_id")
-            message_id = rfc822_key(draft.rfc822_message_id)
+            return Refused(offset, "no_message_id")
         own = _bare_message_id(draft.rfc822_message_id or "") or message_id
         thread_id = gmail_hex(takeout.gm_thrid, decimal_only=True) or provisional_thread(
             thread_root(draft.references_hdr, draft.in_reply_to, own)
@@ -253,7 +254,9 @@ class MboxSource:
         return found
 
 
-def _entries(handle: BinaryIO, digest: Callable[[bytes], None]) -> Iterator[_Entry]:
+def _entries(
+    handle: BinaryIO, digest: Callable[[bytes], None], stored: Callable[[str], bool]
+) -> Iterator[_Entry]:
     offset = 0
     entry: _Entry | None = None
     previous_blank = True
@@ -263,7 +266,7 @@ def _entries(handle: BinaryIO, digest: Callable[[bytes], None]) -> Iterator[_Ent
         if line.startswith(b"From ") and previous_blank:
             if entry is not None:
                 yield entry
-            entry = _Entry(offset, line)
+            entry = _Entry(offset, line, stored)
         elif entry is None:
             if not blank:
                 raise ExportInvalid("unsupported_schema", "file does not start with an mbox From line", 3)
@@ -289,11 +292,18 @@ class _Entry:
     Body lines go to SHA-256 and to a feed parser in fixed-size chunks, so the
     raw message is never held whole. ``email.message_from_bytes`` on a whole
     message splits it into a line list first and peaks near ten times its size.
+
+    When the key is already stored, the body is hashed but not parsed. Every
+    outcome for an existing row (duplicate, conflict, or a row from another
+    source) needs only the header block and the hash.
     """
 
-    def __init__(self, offset: int, separator: bytes) -> None:
+    def __init__(self, offset: int, separator: bytes, stored: Callable[[str], bool]) -> None:
         self.offset = offset
         self.separator = separator
+        self._stored = stored
+        self._key: str | None = None
+        self._header: EmailMessage | None = None
         self._head: bytearray | None = bytearray()
         self._held = b""
         self._chunk = bytearray()
@@ -312,13 +322,13 @@ class _Entry:
         else:
             self._take(line)
 
-    def finish(self) -> tuple[EmailMessage, str, int, _Takeout]:
+    def finish(self) -> tuple[EmailMessage, str, int, _Takeout, str | None]:
         if self._head is not None:
             self._end_head()
         self._flush()
-        parsed = self._parser.close()
+        parsed = self._parser.close() if self._header is None else self._header
         assert isinstance(parsed, EmailMessage)
-        return parsed, self._hash.hexdigest(), self._size, self._takeout
+        return parsed, self._hash.hexdigest(), self._size, self._takeout, self._key
 
     def _take(self, line: bytes) -> None:
         if self._head is None:
@@ -334,6 +344,15 @@ class _Entry:
         assert self._head is not None
         kept, self._takeout = _strip_takeout(bytes(self._head))
         self._head = None
+        header: EmailMessage | None = None
+        try:
+            header = email.message_from_bytes(kept, policy=policy.default)
+            rfc822_id = allow_headers(header).get("message-id")
+        except Exception:
+            rfc822_id = None
+        self._key = _message_key(self._takeout, self.separator, rfc822_id)
+        if header is not None and self._key is not None and self._stored(self._key):
+            self._header = header
         self._chunk += kept
         self._flush()
 
@@ -342,8 +361,20 @@ class _Entry:
             data = bytes(self._chunk)
             self._chunk.clear()
             self._hash.update(data)
-            self._parser.feed(data)
+            if self._header is None:
+                self._parser.feed(data)
             self._size += len(data)
+
+
+def _message_key(takeout: _Takeout, separator: bytes, rfc822_id: str | None) -> str | None:
+    found = (
+        gmail_hex(takeout.gm_msgid, decimal_only=True)
+        or gmail_hex(takeout.gmail_message_id, decimal_only=False)
+        or _separator_id(separator)
+    )
+    if found is None and rfc822_id and _bare_message_id(rfc822_id):
+        found = rfc822_key(rfc822_id)
+    return found
 
 
 def _strip_takeout(head: bytes) -> tuple[bytes, _Takeout]:
