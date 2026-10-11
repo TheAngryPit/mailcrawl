@@ -14,7 +14,7 @@ A reunião do arquivo mboxtoken fica no índice.
 
 From 999@example.com Fri Jan 02 10:00:00 +0000 2026
 X-GM-MSGID: 1767348000000000002
-X-Gmail-Labels: Caixa de entrada,Com estrela,Não lidas,Etiqueta Nova
+X-Gmail-Labels: Arquivada,Com estrela,Não lidas,Etiqueta Nova
 From: Cam Fixture <cam@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Boletim HTML
@@ -27,7 +27,7 @@ Content-Type: text/html; charset="utf-8"
 
 From 1767434400000000003@example.com Sat Jan 03 10:00:00 +0000 2026
 X-GM-THRID: 1767225600000000001
-X-Gmail-Labels: Sent,"Projetos, Exemplo"
+X-Gmail-Labels: Sent,Archived,"Projetos, Exemplo"
 From: Ada Fixture <ada@example.com>
 To: Bao Fixture <bao@example.com>
 Subject: Re: Reunião de arquivo
@@ -84,6 +84,7 @@ Nenhum id refusedtoken.
 From 12ab@example.com not a date
 X-GM-MSGID: not-a-number
 X-GM-THRID: also-bad
+X-Gmail-Labels: Aberto
 Message-ID: <mbox-odd@example.com>
 From: Fay Fixture <fay@example.com>
 Subject: Separador estranho

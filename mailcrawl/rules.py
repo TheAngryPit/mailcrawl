@@ -8,6 +8,8 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from mailcrawl.contract import GMAIL_LABEL_SQL
+
 RULES_VERSION = "rules-v0"
 _DAY = 86400
 _KEY_ROLES = (
@@ -395,13 +397,13 @@ def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfi
 
 def _message_labels(conn: sqlite3.Connection, msg_pk: int) -> list[dict[str, object]]:
     rows = conn.execute(
-        """
+        f"""
         SELECT labels.gmail_label_id, labels.name, labels.catalogue_key
         FROM message_labels
         JOIN labels
           ON labels.account_id = message_labels.account_id
          AND labels.gmail_label_id = message_labels.gmail_label_id
-        WHERE message_labels.msg_pk = ?
+        WHERE message_labels.msg_pk = ? AND {GMAIL_LABEL_SQL}
         """,
         (msg_pk,),
     ).fetchall()
