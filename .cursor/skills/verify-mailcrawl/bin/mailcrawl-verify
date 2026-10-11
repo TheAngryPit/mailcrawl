@@ -19,6 +19,10 @@ scaffold_proof_runnable() {
   [[ -f "$REPO_ROOT/Makefile" && -f "$REPO_ROOT/scripts/proof.sh" ]]
 }
 
+attachment_parse_runnable() {
+  body_clean_runnable && native_fixture_runnable
+}
+
 body_clean_runnable() {
   [[ -f "$REPO_ROOT/testdata/fixtures/gog-export/v0/export.json" ]]
 }
@@ -307,6 +311,86 @@ sys.exit(0 if "html-clean-001" in ids else 1)
   trap - EXIT
 }
 
+drive_attachment_parse() {
+  if ! attachment_parse_runnable; then
+    log "attachment parse: not runnable"
+    return 2
+  fi
+  mkdir -p "$SCRATCH_DIR"
+  local home
+  home="$(mktemp -d "$SCRATCH_DIR/attach-home.XXXXXX")"
+  ATTACH_HOME="$home"
+  trap 'rm -rf "$ATTACH_HOME"' EXIT
+  local taxonomy="$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json"
+  local personal="$home/.local/share/mailcrawl/personal.db"
+  local hive="$home/.local/share/mailcrawl/thehive.db"
+
+  mailcrawl_in "$home" --json init --account personal --email ada@example.com
+  mailcrawl_in "$home" --json init --account thehive --email ada@example.com
+  mailcrawl_in "$home" --json import gog-export \
+    --account personal \
+    --dir "$REPO_ROOT/testdata/fixtures/gog-export/v0" \
+    --taxonomy "$taxonomy" >/dev/null
+  mailcrawl_in "$home" --json import gog-export \
+    --account thehive \
+    --dir "$REPO_ROOT/testdata/fixtures/gog-export/native" \
+    --taxonomy "$taxonomy" >/dev/null
+
+  PERSONAL_DB="$personal" HIVE_DB="$hive" python3 - <<'PY' || {
+import os, sqlite3, sys
+from mailcrawl.extract import BackendRead, parse_attachment
+
+personal = sqlite3.connect(os.environ["PERSONAL_DB"])
+try:
+    row = personal.execute(
+        "SELECT extract_status, extract_method, file_sha256 FROM attachments"
+    ).fetchone()
+finally:
+    personal.close()
+if row != ("skipped", "no_bytes", None):
+    sys.exit(f"v0 attachment {row}")
+
+hive = sqlite3.connect(os.environ["HIVE_DB"])
+try:
+    rows = {
+        name: (status, text, digest)
+        for name, status, text, digest in hive.execute(
+            "SELECT filename, extract_status, extracted_text, file_sha256 FROM attachments"
+        )
+    }
+    marker = hive.execute(
+        "SELECT count(*) FROM msg_fts WHERE msg_fts MATCH 'ZZBINMARKERZZ'"
+    ).fetchone()[0]
+finally:
+    hive.close()
+if rows["note.txt"][0] != "ok" or "attachmenttoken" not in (rows["note.txt"][1] or ""):
+    sys.exit(f"text attachment {rows.get('note.txt')}")
+if rows["blob.bin"][0] != "unsupported" or rows["blob.bin"][1] is not None:
+    sys.exit(f"binary attachment {rows.get('blob.bin')}")
+if marker != 0 or not rows["note.txt"][2] or not rows["blob.bin"][2]:
+    sys.exit("hash or index check failed")
+
+class Present:
+    def available(self, kind: str) -> bool:
+        return True
+    def read(self, kind: str, payload: bytes) -> BackendRead:
+        return BackendRead("x" * 24, 1, 59.0)
+
+low = parse_attachment("application/pdf", b"%PDF", backend=Present())
+missing = parse_attachment("application/pdf", b"%PDF")
+if low.ocr_status != "low_confidence" or low.extract_status != "ok":
+    sys.exit(f"threshold {low}")
+if missing.extract_status != "skipped" or missing.ocr_status != "not_needed":
+    sys.exit(f"default backend {missing}")
+print("attachment parse ok")
+PY
+    log "attachment parse: status check failed"
+    return 1
+  }
+  rm -rf "$ATTACH_HOME"
+  trap - EXIT
+}
+
 cmd_doctor() {
   mkdir -p "$EVIDENCE_DIR"
   {
@@ -331,6 +415,11 @@ cmd_doctor() {
     else
       log "body clean: not runnable (missing v0 export.json)"
     fi
+    if attachment_parse_runnable; then
+      log "attachment parse: runnable"
+    else
+      log "attachment parse: not runnable (missing v0 export or native fixture)"
+    fi
     log "doctor ok"
   } | tee "$EVIDENCE_DIR/doctor.log"
 }
@@ -353,6 +442,7 @@ cmd_drive() {
       scaffold-headless-proof) drive_scaffold_headless_proof || drive_code=$? ;;
       native-gog-import) drive_native_gog_import || drive_code=$? ;;
       body-clean) drive_body_clean || drive_code=$? ;;
+      attachment-parse) drive_attachment_parse || drive_code=$? ;;
       *)
         log "unknown feature: $feature"
         drive_code=1

@@ -120,13 +120,16 @@ class ImportFixtureTest(unittest.TestCase):
 
             attachment = conn.execute(
                 """
-                SELECT extract_status, extracted_text, gmail_attachment_id
+                SELECT extract_status, extract_method, extracted_text,
+                       gmail_attachment_id, file_sha256
                 FROM attachments
                 """
             ).fetchone()
-            self.assertEqual(attachment[0], "pending")
-            self.assertIsNone(attachment[1])
-            self.assertEqual(attachment[2], "att-synthetic-1")
+            self.assertEqual(attachment[0], "skipped")
+            self.assertEqual(attachment[1], "no_bytes")
+            self.assertIsNone(attachment[2])
+            self.assertEqual(attachment[3], "att-synthetic-1")
+            self.assertIsNone(attachment[4])
 
             row = conn.execute(
                 """

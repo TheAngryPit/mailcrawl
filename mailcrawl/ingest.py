@@ -334,8 +334,9 @@ def _insert_attachment(
         """
         INSERT INTO attachments(
           msg_pk, filename, mime_type, size_bytes, gmail_attachment_id,
-          content_id, is_inline, extract_status, extracted_text
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          content_id, is_inline, file_sha256, extract_status, extract_method,
+          extracted_text, ocr_status, ocr_conf, page_count, parser_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             msg_pk,
@@ -345,8 +346,14 @@ def _insert_attachment(
             attachment.attachment_id,
             attachment.content_id,
             attachment.is_inline,
+            attachment.file_sha256,
             attachment.extract_status,
+            attachment.extract_method,
             attachment.extracted_text,
+            attachment.ocr_status,
+            attachment.ocr_conf,
+            attachment.page_count,
+            attachment.parser_version,
         ),
     )
 
