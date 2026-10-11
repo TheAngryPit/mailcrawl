@@ -1,0 +1,37 @@
+# Takeout mbox import
+
+`import mbox <file> --alias <alias>` streams a Google Takeout mbox into the same writer as `import gog-export`. The synthetic fixture is `testdata/fixtures/mbox/takeout.mbox`. `testdata/fixtures/mbox/gog-after` is a native gog export of two of its messages. Both are synthetic. The Takeout format itself is unverified on real mail (SPEC section 4.1).
+
+## Sub-features
+
+- `mbox-import`. Init `pessoal` and import with `--alias pessoal`. The JSON reports `account` `personal`, `n_seen` 6, `n_new` 5, `n_refused` 1, and `n_error` 0.
+- `mbox-search`. `search mboxtoken` returns `18867251edfa0001`, the hex form of the decimal From-line id. `search anexotoken` finds the attachment text on `18873038f7ce4003`.
+- `mbox-reimport`. A second import with `--account personal` reports `n_new` 0 and `n_dup` 5. The ordered-row-dump hash does not change.
+- `mbox-then-gog`. `import gog-export --dir testdata/fixtures/mbox/gog-after` reports `n_dup` 1 and `n_reconciled` 1. The archive still has 5 messages. No `mbox:` label id is left. `1886e1a4667f4002` moves to thread `1886e1a4667f4002`.
+- `mbox-not-mbox`. A text file that does not start with `From ` exits 3 with `unsupported_schema` and no traceback.
+
+## How to get to it (user POV)
+
+- From the repo root, init a synthetic account in an isolated home, then import the fixture file.
+- Import with `python3 -m mailcrawl --json import mbox testdata/fixtures/mbox/takeout.mbox --alias pessoal`.
+- Reconcile with `python3 -m mailcrawl --json import gog-export --alias personal --dir testdata/fixtures/mbox/gog-after`.
+- Search with `python3 -m mailcrawl --json search mboxtoken --account personal`.
+
+## Driving it with mailcrawl-verify
+
+Preconditions:
+
+- Doctor exited 0 and reported `mbox import: runnable`.
+- `testdata/fixtures/mbox/takeout.mbox` exists.
+- `testdata/fixtures/mbox/gog-after/gmail/acct_synthetic/labels.json` and `messages/index.jsonl` exist.
+
+- Run `"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature mbox-import`.
+- Expect exit 0. The log shows the three import results, the search hits, and `unsupported_schema` for the text file.
+- When a fixture file is missing, the same command exits 2.
+
+## Gotchas
+
+- The drive uses a temp home under `/tmp/mailcrawl-verify-scratch/$RUN_ID` and blocks network proxies. It does not run `gog` and it does not read a live mailbox.
+- The fixture From lines use `@example.com` so the proof's synthetic-address scan passes. The unit tests cover the `@xxx` shape inline.
+- The streaming bound is a unit test (`tests/test_mbox.py`, a generated 31 MB file) and is not part of this drive.
+- Cleanup removes the scratch directory. Evidence stays in `$EVIDENCE_DIR`.

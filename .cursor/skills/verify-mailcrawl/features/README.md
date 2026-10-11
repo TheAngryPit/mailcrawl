@@ -20,6 +20,7 @@ This directory is the maintained source for verifying mailcrawl. Recipes exercis
 - Repo checks must match `scripts/hygiene.sh`, which `make check` and CI both run.
 - Scaffold proof is runnable when `Makefile` and `scripts/proof.sh` exist. Doctor reports `runnable` for that proof.
 - Native gog import is runnable when `testdata/fixtures/gog-export/native/gmail/acct_synthetic/` has `labels.json` and `messages/index.jsonl`, and that fixture has no `export.json`. Doctor reports `native gog import: runnable` only in that case.
+- mbox import is runnable when `testdata/fixtures/mbox/takeout.mbox` and `testdata/fixtures/mbox/gog-after/gmail/acct_synthetic/` with `labels.json` and `messages/index.jsonl` exist. Doctor reports `mbox import: runnable` only in that case.
 - Body cleaning is runnable when `testdata/fixtures/gog-export/v0/export.json` exists. Doctor reports `body clean: runnable` only in that case.
 - Attachment parsing is runnable when that v0 fixture exists and the native fixture is runnable. Doctor reports `attachment parse: runnable` only in that case.
 - Rules are runnable when `testdata/rules/rules-v0.json` exists. Doctor reports `rules v0: runnable` only in that case.
@@ -36,6 +37,7 @@ Each feature file uses exactly four H2 sections: `Sub-features`, `How to get to 
 - [spec-integrity](./spec-integrity.md) — SPEC hash unchanged across the run.
 - [scaffold-headless-proof](./scaffold-headless-proof.md) — section 5 scaffold proof via `make check && scripts/proof.sh`.
 - [native-gog-import](./native-gog-import.md). Import a synthetic gog export that has no `export.json`.
+- [mbox-import](./mbox-import.md). Stream a synthetic Takeout mbox, reimport it, and reconcile it with a gog export of the same messages.
 - [body-clean](./body-clean.md). Keep `body_text_raw`, index the cleaned `body_text`, and leave schema v2 empty of plans.
 - [attachment-parse](./attachment-parse.md). Extract text parts, skip a missing hash, and leave PDF, OCR, Office, and `ics` behind an interface.
 - [rules-v0](./rules-v0.md). Apply rules 0 to 8 and print counts. `rules_version` is `rules-v0`.

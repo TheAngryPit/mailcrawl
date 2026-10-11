@@ -44,6 +44,13 @@ native_fixture_runnable() {
     && ! -e "$native/export.json" ]]
 }
 
+mbox_fixture_runnable() {
+  local fixture="$REPO_ROOT/testdata/fixtures/mbox"
+  [[ -f "$fixture/takeout.mbox" \
+    && -f "$fixture/gog-after/gmail/acct_synthetic/labels.json" \
+    && -f "$fixture/gog-after/gmail/acct_synthetic/messages/index.jsonl" ]]
+}
+
 mailcrawl_in() {
   local home="$1"
   shift
@@ -608,6 +615,118 @@ PY
   trap - EXIT
 }
 
+drive_mbox_import() {
+  if ! mbox_fixture_runnable; then
+    log "mbox import: not runnable"
+    return 2
+  fi
+  mkdir -p "$SCRATCH_DIR"
+  local home
+  home="$(mktemp -d "$SCRATCH_DIR/mbox-home.XXXXXX")"
+  MBOX_HOME="$home"
+  trap 'rm -rf "$MBOX_HOME"' EXIT
+  local fixture="$REPO_ROOT/testdata/fixtures/mbox"
+  local db="$home/.local/share/mailcrawl/personal.db"
+
+  mailcrawl_in "$home" --json init --account pessoal --email ada@example.com
+
+  local first_out
+  first_out="$(mailcrawl_in "$home" --json import mbox "$fixture/takeout.mbox" --alias pessoal)"
+  printf '%s\n' "$first_out"
+  local hash_before
+  hash_before="$(DB_PATH="$db" python3 -c '
+import os
+from mailcrawl.store import connect, ordered_row_dump_hash
+conn = connect(os.environ["DB_PATH"])
+print(ordered_row_dump_hash(conn))
+conn.close()
+')"
+  local again_out
+  again_out="$(mailcrawl_in "$home" --json import mbox "$fixture/takeout.mbox" --account personal)"
+  printf '%s\n' "$again_out"
+  local hash_after
+  hash_after="$(DB_PATH="$db" python3 -c '
+import os
+from mailcrawl.store import connect, ordered_row_dump_hash
+conn = connect(os.environ["DB_PATH"])
+print(ordered_row_dump_hash(conn))
+conn.close()
+')"
+  if [[ "$hash_before" != "$hash_after" ]]; then
+    log "mbox import: reimport changed the ordered-row-dump hash"
+    return 1
+  fi
+
+  local token_out attach_out
+  token_out="$(mailcrawl_in "$home" --json search mboxtoken --account personal)"
+  attach_out="$(mailcrawl_in "$home" --json search anexotoken --account personal)"
+  printf '%s\n%s\n' "$token_out" "$attach_out"
+
+  local gog_out
+  gog_out="$(mailcrawl_in "$home" --json import gog-export --alias personal --dir "$fixture/gog-after")"
+  printf '%s\n' "$gog_out"
+
+  FIRST="$first_out" AGAIN="$again_out" TOKEN="$token_out" ATTACH="$attach_out" GOG="$gog_out" DB_PATH="$db" python3 - <<'PY' || {
+import json, os, sqlite3, sys
+first = json.loads(os.environ["FIRST"])
+again = json.loads(os.environ["AGAIN"])
+gog = json.loads(os.environ["GOG"])
+ids = lambda name: [hit.get("gmail_message_id") for hit in json.loads(os.environ[name]).get("hits") or []]
+if first.get("account") != "personal":
+    sys.exit(f"alias pessoal resolved to {first.get('account')}")
+if (first["n_seen"], first["n_new"], first["n_refused"], first["n_error"]) != (6, 5, 1, 0):
+    sys.exit(f"first import {first}")
+if (again["n_new"], again["n_dup"]) != (0, 5):
+    sys.exit(f"reimport {again}")
+if ids("TOKEN") != ["18867251edfa0001"]:
+    sys.exit(f"mboxtoken hits {ids('TOKEN')}")
+if ids("ATTACH") != ["18873038f7ce4003"]:
+    sys.exit(f"anexotoken hits {ids('ATTACH')}")
+if (gog["n_new"], gog["n_dup"], gog["n_reconciled"], gog["n_error"]) != (0, 1, 1, 0):
+    sys.exit(f"gog after mbox {gog}")
+conn = sqlite3.connect(os.environ["DB_PATH"])
+try:
+    if conn.execute("SELECT count(*) FROM messages").fetchone()[0] != 5:
+        sys.exit("message rows changed")
+    if conn.execute("SELECT count(*) FROM labels WHERE gmail_label_id LIKE 'mbox:%'").fetchone()[0]:
+        sys.exit("provisional labels left")
+    thread = conn.execute(
+        """
+        SELECT threads.gmail_thread_id FROM messages
+        JOIN threads ON threads.thread_pk = messages.thread_pk
+        WHERE gmail_message_id = '1886e1a4667f4002'
+        """
+    ).fetchone()[0]
+    if thread != "1886e1a4667f4002":
+        sys.exit(f"provisional thread not replaced: {thread}")
+finally:
+    conn.close()
+print("mbox import ok")
+PY
+    log "mbox import: counts or reconciliation drifted"
+    return 1
+  }
+
+  local text_file bad_err bad_out bad_code
+  text_file="$home/not-an-mbox.txt"
+  printf 'hello\n' >"$text_file"
+  bad_err="$(mktemp "$SCRATCH_DIR/mbox-bad.XXXXXX")"
+  bad_code=0
+  bad_out="$(mailcrawl_in "$home" --json import mbox "$text_file" --alias personal 2>"$bad_err")" || bad_code=$?
+  printf '%s\n' "$bad_out"
+  if [[ "$bad_code" -ne 3 ]] || ! printf '%s' "$bad_out" | grep -q unsupported_schema; then
+    log "mbox import: a text file exited $bad_code without unsupported_schema"
+    return 1
+  fi
+  if grep -q Traceback "$bad_err"; then
+    log "mbox import: a text file printed a traceback"
+    return 1
+  fi
+  rm -f "$bad_err"
+  rm -rf "$MBOX_HOME"
+  trap - EXIT
+}
+
 cmd_doctor() {
   mkdir -p "$EVIDENCE_DIR"
   {
@@ -626,6 +745,11 @@ cmd_doctor() {
       log "native gog import: runnable"
     else
       log "native gog import: not runnable (missing native fixture, missing taxonomy, or export.json is present)"
+    fi
+    if mbox_fixture_runnable; then
+      log "mbox import: runnable"
+    else
+      log "mbox import: not runnable (missing testdata/fixtures/mbox/takeout.mbox or gog-after export)"
     fi
     if body_clean_runnable; then
       log "body clean: runnable"
@@ -668,6 +792,7 @@ cmd_drive() {
       spec-integrity) drive_spec_integrity || drive_code=$? ;;
       scaffold-headless-proof) drive_scaffold_headless_proof || drive_code=$? ;;
       native-gog-import) drive_native_gog_import || drive_code=$? ;;
+      mbox-import) drive_mbox_import || drive_code=$? ;;
       body-clean) drive_body_clean || drive_code=$? ;;
       attachment-parse) drive_attachment_parse || drive_code=$? ;;
       rules-v0) drive_rules_v0 || drive_code=$? ;;
