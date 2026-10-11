@@ -34,7 +34,7 @@ A gog backup plaintext export has no `export.json`. Point `--dir` at the directo
 python3 -m mailcrawl --json import gog-export --account thehive --dir <export> --taxonomy <catalogue.json>
 ```
 
-`--taxonomy` is optional. A second import of the same files does not add duplicate messages or label links. If the `.eml` bytes for an existing message id change, the stored row stays and the result counts `n_error`.
+`--taxonomy` is an optional local override. With no override, mailcrawl uses the default taxonomy in [the spec](docs/SPEC.md) section 4.2. A second import of the same files does not add duplicate messages or label links. If the `.eml` bytes for an existing message id change, the stored row stays and the result counts `n_error`.
 
 A record without an `eml` path is rejected, so a markdown-only export is not imported. `internalDate` is unix milliseconds and is stored as unix seconds. `to` and `cc` are arrays of strings. Header values from the `.eml` file win over the index when both exist. Text attachment parts are searchable. A part with no bytes is `skipped` with reason `no_bytes`. An unknown binary type is `unsupported` and is not indexed as text. Headers outside the allow-list in the spec are dropped.
 
@@ -49,6 +49,27 @@ python3 -m mailcrawl --json import mbox <file> --alias personal [--labels <label
 ```
 
 `--alias` and `--account` mean the same thing. The key is the Gmail message id in lowercase hex, read from the Takeout headers or the `From` line. A message with no Gmail id is keyed on its `Message-ID`. A message with neither is refused and counted in `n_refused`. A later gog import of the same id keeps the row, refreshes its labels, and replaces the provisional `mbox:` label and thread ids. The Takeout format is not verified on real mail yet. [The spec](docs/SPEC.md) section 4.1 has the rules.
+
+## Customize the taxonomy
+
+The default taxonomy has two axes. Content type is `newsletter`, `job_alert`, `notification`, `invoice_receipt`, `purchase_delivery`, `account_security`, `contract`, and `correspondence`. Origin is `human` and `automated`.
+
+With no override, only generic signals apply. `List-Unsubscribe`, `List-Id`, and `Precedence: bulk` mark `automated`. `CATEGORY_PROMOTIONS` marks `newsletter`. `CATEGORY_UPDATES` marks `notification`. `CATEGORY_PERSONAL` marks `correspondence`. Categories with no generic signal stay empty. `stats` and `dry-run` list them in `empty_no_override`. A `pseudo:` label is never a signal.
+
+Put account-specific label names in one JSON file. `--taxonomy` is read first, then `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`. `pessoal` means `personal`. A bad file exits 2. A label the account does not have is a warning in `taxonomy_warnings`, and the command still succeeds.
+
+```json
+{
+  "default": {
+    "newsletter": ["Example type/Bulletin"]
+  },
+  "thehive": {
+    "invoice_receipt": ["Example type/Receipt"]
+  }
+}
+```
+
+Real label names stay in that local file. The repository only has example names, in `testdata/catalogue/taxonomy.synthetic.json`.
 
 ## How agents use it
 

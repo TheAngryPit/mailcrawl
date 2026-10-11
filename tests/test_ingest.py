@@ -164,7 +164,7 @@ class ImportFixtureTest(unittest.TestCase):
                 """
             ).fetchone()
             self.assertEqual(flagged[0], 1)
-            self.assertEqual(flagged[1], "Example/Synthetic")
+            self.assertEqual(flagged[1], "newsletter")
             self.assertEqual(
                 conn.execute(
                     "SELECT count(*) FROM messages WHERE gmail_message_id = 'fixture-001'"

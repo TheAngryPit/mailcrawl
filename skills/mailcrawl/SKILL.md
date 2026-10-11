@@ -20,7 +20,7 @@ Run these from a checkout. They do not use the network.
 
 ```
 python3 -m mailcrawl --json init --account personal --email ada@example.com
-python3 -m mailcrawl --json import gog-export --account personal --dir <export> --taxonomy <catalogue.json>
+python3 -m mailcrawl --json import gog-export --account personal --dir <export> --taxonomy <override.json>
 python3 -m mailcrawl --json import mbox <takeout.mbox> --alias personal
 python3 -m mailcrawl --json search reuniao --account personal
 ```

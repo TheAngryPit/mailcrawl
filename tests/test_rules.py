@@ -47,7 +47,7 @@ class RulesEngineTest(unittest.TestCase):
         finance = self._thread(
             "hello",
             mute=True,
-            labels=[("L1", "Example type/Receipt", "type.receipt")],
+            labels=[("L1", "Example type/Receipt", "invoice_receipt")],
         )
         apply_rules(self.conn, now=NOW, config=self.config)
         self.assertEqual(self._current(muted)["next_state"], "noise")
@@ -60,16 +60,16 @@ class RulesEngineTest(unittest.TestCase):
         noise = self._thread(
             "bulletin",
             labels=[
-                ("L2", "Example origin/Machine", "origin.machine"),
-                ("L3", "Example type/Bulletin", "type.bulletin"),
+                ("L2", "Example origin/Machine", "automated"),
+                ("L3", "Example type/Bulletin", "newsletter"),
             ],
             headers=[("list-unsubscribe", "<https://example.com/unsub>")],
         )
         listed = self._thread(
             "bulletin",
             labels=[
-                ("L2", "Example origin/Machine", "origin.machine"),
-                ("L3", "Example type/Bulletin", "type.bulletin"),
+                ("L2", "Example origin/Machine", "automated"),
+                ("L3", "Example type/Bulletin", "newsletter"),
             ],
             headers=[("list-unsubscribe", "<https://example.com/unsub>")],
             sender_decision=("approved", "read", None),
@@ -87,12 +87,12 @@ class RulesEngineTest(unittest.TestCase):
         fresh = self._thread(
             "check the login",
             when=NOW - DAY,
-            labels=[("L6", "Example type/Account", "type.account")],
+            labels=[("L6", "Example type/Account", "account_security")],
         )
         stale = self._thread(
             "check the login",
             when=NOW - 8 * DAY,
-            labels=[("L6", "Example type/Account", "type.account")],
+            labels=[("L6", "Example type/Account", "account_security")],
         )
         reply = self._thread("hello there", sender_decision=("approved", "imbox", 2))
         apply_rules(self.conn, now=NOW, config=self.config)
@@ -107,13 +107,13 @@ class RulesEngineTest(unittest.TestCase):
         waiting = self._thread("Can you confirm?", from_me=1)
         task = self._thread(
             "please send the file",
-            labels=[("L8", "Example origin/Machine", "origin.machine")],
+            labels=[("L8", "Example origin/Machine", "automated")],
         )
         closed = self._thread("Thanks, all set.", from_me=1)
         guarded = self._thread(
             "Thanks, all set.",
             from_me=1,
-            labels=[("L9", "Example type/Agreement", "type.agreement")],
+            labels=[("L9", "Example type/Agreement", "contract")],
         )
         apply_rules(self.conn, now=NOW, config=self.config)
         self.assertEqual(self._current(waiting)["next_state"], "waiting")

@@ -30,6 +30,7 @@ mailcrawl/eml.py                 # RFC822 parse for that export
 mailcrawl/mbox.py                # streaming Takeout mbox reader
 mailcrawl/extract.py             # attachment parser interface
 mailcrawl/rules.py               # rules 0–8, no model
+mailcrawl/taxonomy.py            # default taxonomy and local override
 mailcrawl/report.py              # archive counts and dry-run counts
 mailcrawl/schema.py              # schema v2 DDL
 mailcrawl/store.py               # open one account database and migrate it
@@ -161,6 +162,26 @@ What it does not prove: hash equality. 1,634 of the 2,055 shared messages had a 
 
 Checking a hypothesis needs a per-message comparison of sanitized header names and line-ending counts on the Mac. Real values never leave the Mac.
 
+### 4.2 Default taxonomy
+Rules 0 to 8 match category keys on two axes. Content type is `newsletter`, `job_alert`, `notification`, `invoice_receipt`, `purchase_delivery`, `account_security`, `contract`, and `correspondence`. Origin is `human` and `automated`. The package ships that taxonomy. `--taxonomy` is a local override file. There is no second catalogue.
+
+With no override, only generic signals apply. `List-Unsubscribe`, `List-Id`, and a `Precedence` value of `bulk` mark `automated`. System label `CATEGORY_PROMOTIONS` marks `newsletter`. `CATEGORY_UPDATES` marks `notification`. `CATEGORY_PERSONAL` marks `correspondence`. `job_alert`, `invoice_receipt`, `purchase_delivery`, `account_security`, `contract`, and `human` have no generic signal. They stay empty. `stats` and `dry-run` list them in `empty_no_override` and count messages in `by_category`. A label id that starts with `pseudo:` is never a signal.
+
+An override is one JSON object. Lookup order is the `--taxonomy` flag, then the environment variable `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`. Sections are `thehive`, `vcl`, `personal`, and an optional `default`. `pessoal` is accepted and means `personal`. An account section replaces that category's `default` list. Each value is a list of label names.
+
+```json
+{
+  "default": {"newsletter": ["Example type/Bulletin"]},
+  "thehive": {"invoice_receipt": ["Example type/Receipt"]}
+}
+```
+
+Invalid JSON, a file that is not an object, an unknown category, an unknown account, or a value that is not a list of label names exits 2. A label name the account does not have is counted in `taxonomy_warnings` and listed in `missing_labels`. The command still exits 0.
+
+`*.local.json` and a `taxonomy.json` at the repository root are gitignored. `testdata/catalogue/taxonomy.synthetic.json` is the synthetic override used by tests. It contains example label names only.
+
+The rule roles `finance`, `purchase`, and `brief` are now `invoice_receipt`, `purchase_delivery`, and `correspondence`. `rules_version` stays `rules-v0`. The same rule numbers fire when the label key is the new category name.
+
 ## 5. Phase 1 proof
 A phase 1 change is done when, on a clean Linux runner with no network credentials and a temporary `HOME`, this exits 0:
 
@@ -197,11 +218,11 @@ These points are closed.
 5. `body_text_raw` is the phase 1 text, untouched. That text is the `text/plain` part, or the HTML part converted to text when the message has no plain part. `body_text` is that text after cleaning. Cleaning removes a line that starts with `>` once leading spaces are ignored. It also cuts from the first clear marker through the end of the text. The markers are a line `On … wrote:`, a line `Em … escreveu:`, a line `-----Original Message-----`, an Outlook header block that starts at `From:` or `De:` when `Sent:` or `Enviada:` appears within the next eight lines, and a signature that starts at a line that is exactly `-- ` (two dashes and a space). A line that is `--` with no space stays. Patterns are Portuguese and English only. When unsure, do not cut. The `.eml` file at `raw_path` stays the source of truth. A v2 migration copies the old `body_text` into `body_text_raw` and then cleans `body_text`.
 6. `msg_fts` indexes `subject`, the cleaned `body_text`, `from_hdr`, and `attachment_text`. It does not index `body_text_raw`. The tokenizer is `unicode61 remove_diacritics 2`. A `text/plain` or `text/html` part with bytes stores the decoded text, `extract_status` `ok`, and `file_sha256`. A part with no bytes is `skipped` with reason `no_bytes` and a NULL hash. PDF, image OCR, Office, and `ics` are `skipped` when their backend is absent. Any other type is `unsupported`. Skipped and unsupported parts are not indexed as text. Addresses in the local index stay on the machine.
 7. `init` creates one database per alias, named `<alias>.db`. It does not create `index.db` or `reads.db`.
-8. Real label names and `taxonomy-account-maps.json` stay off this repository. Tests load `testdata/catalogue/taxonomy.synthetic.json`. A real catalogue is a local file passed with `--taxonomy` or the config key `taxonomy`.
+8. Real label names and `taxonomy-account-maps.json` stay off this repository. The default taxonomy and the local override are in section 4.2. Tests load `testdata/catalogue/taxonomy.synthetic.json`. A real override stays in a local file.
 9. `headers` stores an allow-list, in lower case. The names are `list-unsubscribe`, `list-unsubscribe-post`, `list-id`, `precedence`, `auto-submitted`, `x-mailer`, `feedback-id`, `message-id`, `in-reply-to`, `references`, `reply-to`, `return-path`, `authentication-results`, and `received-spf`. Other headers are dropped.
 10. `snippet` and `gmail_history_id` are NULL when the export omits them. `subject_norm` trims the subject, removes a leading run of `Re:`, `Fwd:`, and `Fw:` without regard to case, and collapses whitespace. It does not fold accents.
 11. Attachment parsing handles `text/plain` and `text/html` only. PDF, OCR, Office, `ics`, `attachment_fields`, and image embeddings stay behind an interface with no required implementation. An unsupported type is `unsupported`. A missing backend is `skipped`. A row with no `file_sha256` is `skipped` with reason `no_bytes`. OCR thresholds are v0 constants: fewer than 25 characters per page tries OCR, and `ocr_conf` below 60 is `low_confidence`. Those thresholds are exercised only when a backend is present. This revision adds that interface in `mailcrawl/extract.py`. The default backend does not invoke `pdftotext` or `tesseract`. Image embeddings and `attachment_fields` are not created.
-12. Rules match the keys and axes of the catalogue loaded from a local file. The repository ships a synthetic catalogue with those axes and fictional leaves. Real label names never appear in code or tests. They stay in a local file outside Git.
+12. Rules match the category keys in section 4.2. `invoice_receipt`, `purchase_delivery`, and `correspondence` replace `finance`, `purchase`, and `brief`. Real label names never appear in code or tests. They stay in a local file outside Git.
 13. Guards run first. A guard can only force `needs_review` or block `noise` and `resolved`. Later rules choose the other states. `STARRED` and `IMPORTANT` are Gmail system label ids. Rules never read a `pseudo:` label.
 14. These definitions are v0, tunable, and marked v0 in code. A human participant is a sender whose origin label is human. When that label is missing, the sender has no `List-Unsubscribe`, no `Precedence` of `bulk` or `list`, and no `Auto-Submitted` other than `no`. The label beats the header. Unrecognized Account & Security means a sender with no `sender_decisions` row. The read-list is `sender_decisions.route = 'read'`. There is no extra domain file. `read_later_expiry_days` is 30, and expiry is tested on fixtures. Open questions, concrete tasks, and closing language are short clue lists in Portuguese and English. They live in a configuration file, not in the engine. The minimum question clues are a `?` at the end of a sentence outside a quote, or a start of `can you`, `could you`, `podes`, `consegues`, or `pode`. The minimum task clues are `please`, `por favor`, `preciso que`, `need you to`, and `can you send`. The minimum closing clues are `thanks`, `obrigado`, `cumprimentos`, `best regards`, `perfect`, and `combinado`. That list is not final. The client plus-three-business-days path is unimplemented. Everyone uses plus seven days. `sender_decisions.client_sla_days` exists and is NULL by default. `sender_decisions.route` may be `imbox`, `feed`, `paper_trail`, or `read`. Priority comes from `sender_decisions.priority`. When that row is missing, priority is NULL.
 15. Coverage is the fraction of threads with a current decision. `needs_review` counts as covered. The report is counts by `next_state` and by `rule_id`. A sample of 100 and a 2% threshold are not a fixture gate.

@@ -21,6 +21,7 @@ from mailcrawl.contract import (
 from mailcrawl.gognative import load_labels, load_native
 from mailcrawl.mbox import PROVISIONAL, RAW_PATH, MboxSource, Refused
 from mailcrawl.paths import UsageError
+from mailcrawl.taxonomy import axis_of, generic_category, load_taxonomy
 from mailcrawl.textnorm import clean_body, parse_address, subject_norm
 from mailcrawl.version import mailcrawl_version, provenance_hash
 
@@ -46,28 +47,10 @@ class ImportResult:
         self.n_reconciled = n_reconciled
 
 
-def load_catalogue_entries(path: Path | None) -> dict[str, dict[str, str | None]]:
+def load_catalogue_entries(path: Path | None, alias: str) -> dict[str, dict[str, str]]:
     if path is None:
         return {}
-    document = json.loads(path.read_text(encoding="utf-8"))
-    entries: dict[str, dict[str, str | None]] = {}
-    for label in document.get("labels") or []:
-        if not isinstance(label, dict):
-            continue
-        name = label.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        key = label.get("key")
-        axis = label.get("axis")
-        entries[name] = {
-            "key": key if isinstance(key, str) and key else None,
-            "axis": axis if isinstance(axis, str) and axis else None,
-        }
-    return entries
-
-
-def load_catalogue_names(path: Path | None) -> set[str]:
-    return set(load_catalogue_entries(path))
+    return load_taxonomy(path).catalogue(alias)
 
 
 def import_gog_export(
@@ -88,7 +71,7 @@ def import_gog_export(
         items=[*_label_map(parsed).values(), *parsed.messages],
         ref=lambda: manifest_sha,
         run_json=parsed.raw_json,
-        catalogue=load_catalogue_entries(taxonomy_path),
+        catalogue=load_catalogue_entries(taxonomy_path, alias),
         account_email=account_email,
     )
 
@@ -130,7 +113,7 @@ def import_mbox(
         items=source.items(),
         ref=source.sha256,
         run_json=None,
-        catalogue=load_catalogue_entries(taxonomy_path),
+        catalogue=load_catalogue_entries(taxonomy_path, alias),
         account_email=account_email,
     )
 
@@ -302,11 +285,15 @@ def _upsert_label(
             (account_id, provisional),
         )
     entry = None if pseudo else catalogue.get(label.name)
+    if entry is None and not pseudo:
+        generic = generic_category(label.gmail_label_id)
+        if generic is not None:
+            entry = {"key": generic, "axis": axis_of(generic)}
     in_catalogue = 1 if entry is not None else 0
     catalogue_key = None
     axis = None
     if entry is not None:
-        catalogue_key = entry["key"] or label.name
+        catalogue_key = entry["key"]
         axis = entry["axis"]
     conn.execute(
         """

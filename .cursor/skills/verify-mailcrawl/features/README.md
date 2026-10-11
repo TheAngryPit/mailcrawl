@@ -25,6 +25,7 @@ This directory is the maintained source for verifying mailcrawl. Recipes exercis
 - Attachment parsing is runnable when that v0 fixture exists and the native fixture is runnable. Doctor reports `attachment parse: runnable` only in that case.
 - Rules are runnable when `testdata/rules/rules-v0.json` exists. Doctor reports `rules v0: runnable` only in that case.
 - Stats and dry-run are runnable when that rules file exists. Doctor reports `stats dry-run: runnable` only in that case.
+- Default taxonomy is runnable when `testdata/catalogue/taxonomy.synthetic.json` exists. Doctor reports `default taxonomy: runnable` only in that case.
 
 ## Feature entry contract
 
@@ -42,3 +43,4 @@ Each feature file uses exactly four H2 sections: `Sub-features`, `How to get to 
 - [attachment-parse](./attachment-parse.md). Extract text parts, skip a missing hash, and leave PDF, OCR, Office, and `ics` behind an interface.
 - [rules-v0](./rules-v0.md). Apply rules 0 to 8 and print counts. `rules_version` is `rules-v0`.
 - [stats-dry-run](./stats-dry-run.md). Print archive counts and current-decision counts. No plan file and no Gmail.
+- [default-taxonomy](./default-taxonomy.md). Apply generic category signals, accept one local override, and print empty categories.
