@@ -8,14 +8,12 @@ path relative to the export `--out` directory, from `backupExportMessageEMLPath`
 
 from __future__ import annotations
 
-import email
 import hashlib
 import json
-from email import policy
 from pathlib import Path, PurePosixPath
 
 from mailcrawl.contract import ExportDocument, LabelRec, MessageRec, infer_kind
-from mailcrawl.eml import header_text, view_message
+from mailcrawl.eml import eml_record
 from mailcrawl.textnorm import parse_date
 
 _INDEX_KNOWN = frozenset(
@@ -49,7 +47,7 @@ class ExportInvalid(Exception):
 
 def load_native(export_dir: Path) -> tuple[ExportDocument, str]:
     root, labels_path, index_path = _locate(export_dir)
-    labels = _parse_labels(labels_path)
+    labels = load_labels(labels_path)
     raw_index = _read_bytes(index_path, "messages/index.jsonl")
     messages = _parse_index(raw_index, root)
     return (
@@ -100,7 +98,9 @@ def _locate(export_dir: Path) -> tuple[Path, Path, Path]:
     )
 
 
-def _parse_labels(path: Path) -> tuple[LabelRec, ...]:
+def load_labels(path: Path) -> tuple[LabelRec, ...]:
+    if not path.is_file():
+        raise ExportInvalid("missing_file", "labels.json is missing", 1)
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
@@ -167,39 +167,26 @@ def _parse_record(line: str, line_no: int, root: Path) -> MessageRec:
         raise _bad(f"{where} has no eml path")
     eml_path = _resolve_eml(root, eml_rel, where)
     raw_bytes = _read_bytes(eml_path, eml_rel, where)
-    parsed = email.message_from_bytes(raw_bytes, policy=policy.default)
-    body, headers, parts = view_message(parsed)
     unknown = {key: value for key, value in item.items() if key not in _INDEX_KNOWN}
     history = item.get("historyId")
     if history is not None and not isinstance(history, str):
         raise _bad(f"{where} field historyId is not a string")
-    size = _size(item.get("sizeEstimate"), where)
-    if size is None:
-        size = len(raw_bytes)
-    return MessageRec(
+    return eml_record(
+        raw_bytes,
         gmail_message_id=message_id,
         gmail_thread_id=thread_id,
         label_ids=tuple(label_ids),
         internal_date=internal_date,
-        rfc822_message_id=headers.get("message-id"),
-        from_hdr=header_text(parsed, "from") or index_from,
-        to_hdr=header_text(parsed, "to") or index_to,
-        cc_hdr=header_text(parsed, "cc") or index_cc,
-        bcc_hdr=header_text(parsed, "bcc"),
-        reply_to_hdr=headers.get("reply-to"),
-        subject=header_text(parsed, "subject") or index_subject,
-        snippet=None,
-        gmail_history_id=history if isinstance(history, str) else None,
-        body_text=body,
-        headers=tuple(sorted(headers.items())),
-        attachments=parts,
-        raw_json=_raw_json(unknown),
-        raw_sha256=hashlib.sha256(raw_bytes).hexdigest(),
         raw_path=str(eml_path),
-        size_bytes=size,
-        in_reply_to=headers.get("in-reply-to"),
-        references_hdr=headers.get("references"),
-        auth_results=headers.get("authentication-results"),
+        size_bytes=_size(item.get("sizeEstimate"), where),
+        gmail_history_id=history,
+        raw_json=_raw_json(unknown),
+        fallback={
+            "from": index_from,
+            "to": index_to,
+            "cc": index_cc,
+            "subject": index_subject,
+        },
     )
 
 
