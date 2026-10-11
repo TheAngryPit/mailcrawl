@@ -201,6 +201,27 @@ class MboxImportTest(unittest.TestCase):
         self.assertEqual((again.n_new, again.n_dup, again.n_refused, again.n_error), (0, 5, 1, 0))
         self.assertEqual(ordered_row_dump_hash(self.conn), digest)
 
+    def test_reimport_without_body_parse_keeps_outcomes(self) -> None:
+        self.mbox()
+        kept = self.row(PLAIN)
+        changed = self.home / "changed.mbox"
+        text = TAKEOUT.read_bytes()
+        text = text.replace(b"Caixa de Entrada,Importante,", b"Importante,", 1)
+        text = text.replace(b"Segue o anexo multitoken.", b"Outro anexo multitoken.", 1)
+        changed.write_bytes(text)
+        again = self.mbox(changed)
+        self.assertEqual((again.n_new, again.n_dup, again.n_error, again.n_refused), (0, 4, 1, 1))
+        self.assertNotIn("INBOX", self.labels_of(PLAIN))
+        self.assertEqual(self.row(PLAIN)["body_text"], kept["body_text"])
+        self.assertEqual(self.row(PARTS)["body_text"], "Segue o anexo multitoken.")
+        detail = json.loads(
+            self.conn.execute("SELECT detail_json FROM ledger ORDER BY seq DESC").fetchone()[0]
+        )
+        self.assertEqual(detail["conflicts"], [PARTS])
+
+    def test_connect_pins_mmap_off(self) -> None:
+        self.assertEqual(self.conn.execute("PRAGMA mmap_size").fetchone()[0], 0)
+
     def test_labels_json_matches_user_label_names(self) -> None:
         self.mbox(labels=NATIVE_LABELS)
         self.assertIn("Label_synthetic", self.labels_of(PLAIN))
@@ -359,7 +380,8 @@ from pathlib import Path
 from mailcrawl.ingest import import_mbox
 from mailcrawl.store import connect, init_account
 home, mbox = Path(sys.argv[1]), Path(sys.argv[2])
-conn = connect(init_account(home, "personal", "ada@example.com"))
+db = home / "personal.db"
+conn = connect(db if db.exists() else init_account(home, "personal", "ada@example.com"))
 result = import_mbox(conn, alias="personal", mbox_path=mbox, labels_path=None,
                      taxonomy_path=None, account_email="ada@example.com")
 status = Path("/proc/self/status")
@@ -369,7 +391,7 @@ if status.exists():
     peak = int(kib) * 1024
 else:
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-print(json.dumps({"n_new": result.n_new, "peak": peak}))
+print(json.dumps({"n_new": result.n_new, "n_dup": result.n_dup, "peak": peak}))
 """
 
 
@@ -398,18 +420,34 @@ def write_attachment_mbox(path: Path, sizes_mb: list[int]) -> int:
 
 
 class MboxMemoryTest(unittest.TestCase):
-    def peak_rss(self, mbox: Path) -> tuple[int, int]:
-        with tempfile.TemporaryDirectory() as home:
+    def peak_rss(self, mbox: Path, home: Path | None = None) -> tuple[int, int]:
+        found = self.run_driver(mbox, home)
+        return found["n_new"], found["peak"]
+
+    def run_driver(self, mbox: Path, home: Path | None = None) -> dict[str, int]:
+        with tempfile.TemporaryDirectory() as scratch:
             done = subprocess.run(
-                [sys.executable, "-c", RSS_DRIVER, home, str(mbox)],
+                [sys.executable, "-c", RSS_DRIVER, str(home or scratch), str(mbox)],
                 cwd=ROOT,
                 env={**os.environ, "PYTHONPATH": str(ROOT)},
                 text=True,
                 capture_output=True,
                 check=True,
             )
-        found = json.loads(done.stdout)
-        return found["n_new"], found["peak"]
+        return json.loads(done.stdout)
+
+    def test_reimport_peak_rss_stays_below_the_first_import(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            big = Path(tmp) / "attachments.mbox"
+            home = Path(tmp) / "home"
+            write_attachment_mbox(big, [24, 4, 4, 4, 4, 4, 4])
+            base = self.run_driver(TAKEOUT)["peak"]
+            first = self.run_driver(big, home)
+            again = self.run_driver(big, home)
+        self.assertEqual((first["n_new"], again["n_new"], again["n_dup"]), (7, 0, 7))
+        print(f"\nmbox reimport RSS: base {base >> 20} MB, first {first['peak'] >> 20} MB, "
+              f"reimport {again['peak'] >> 20} MB", file=sys.stderr)
+        self.assertLess(again["peak"] - base, (first["peak"] - base) // 4)
 
     def test_peak_rss_stays_near_the_largest_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

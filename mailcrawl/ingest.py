@@ -112,7 +112,16 @@ def import_mbox(
         )
     }
     known.update({label.name: label for label in seed})
-    source = MboxSource(mbox_path, known, seed)
+    source = MboxSource(
+        mbox_path,
+        known,
+        seed,
+        stored=lambda key: conn.execute(
+            "SELECT 1 FROM messages WHERE account_id = ? AND gmail_message_id = ?",
+            (account_id, key),
+        ).fetchone()
+        is not None,
+    )
     return _ingest(
         conn,
         account_id=account_id,
