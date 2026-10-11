@@ -239,6 +239,65 @@ class MboxImportTest(unittest.TestCase):
         self.assertEqual(detail["reconciled"][0]["kept_raw_sha256"], kept)
         self.assertNotEqual(detail["reconciled"][0]["seen_raw_sha256"], kept)
 
+    def pair(self, cases: list[tuple[bytes, bytes]]) -> Path:
+        """Write one Takeout copy and one gog copy per case and import the Takeout side.
+
+        Each case is (body as Takeout writes it, the same message as gog's raw).
+        """
+        takeout = self.home / "pair.mbox"
+        export = self.home / "pair-gog"
+        messages = export / "gmail/acct/messages"
+        messages.mkdir(parents=True)
+        (export / "gmail/acct/labels.json").write_text("[]", encoding="utf-8")
+        index = []
+        with takeout.open("wb") as handle:
+            for number, (takeout_text, gog_raw) in enumerate(cases, start=1):
+                handle.write(
+                    b"From %d@example.com Thu Jan 01 00:00:00 +0000 2026\r\n"
+                    b"X-GM-THRID: %d\r\nX-Gmail-Labels: Caixa de Entrada\r\n" % (number, number)
+                )
+                handle.write(takeout_text + b"\r\n")
+                (messages / f"{number}.eml").write_bytes(gog_raw)
+                index.append(
+                    {"id": format(number, "x"), "threadId": format(number, "x"), "internalDate": 1,
+                     "labelIds": ["INBOX"], "eml": f"gmail/acct/messages/{number}.eml"}
+                )
+        (messages / "index.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in index), encoding="utf-8"
+        )
+        self.assertEqual(self.mbox(takeout).n_new, len(cases))
+        return export
+
+    def test_hash_mechanisms_between_takeout_and_gog(self) -> None:
+        head = b"From: Ada Fixture <ada@example.com>\r\nMessage-ID: <%d@example.com>\r\nSubject: s\r\n\r\n"
+        state = b"X-Gm-Message-State: c3ludGhldGlj\r\n"
+        cases = {
+            "same bytes": (head % 1 + b"body\r\n", head % 1 + b"body\r\n"),
+            "an original LF line": (head % 2 + b"one\ntwo\r\n", head % 2 + b"one\ntwo\r\n"),
+            "a Google header on both sides": (state + head % 3 + b"body\r\n", state + head % 3 + b"body\r\n"),
+            "mboxrd escaping": (head % 4 + b">>From x\r\n", head % 4 + b">From x\r\n"),
+            "mboxo escaping": (head % 5 + b">From x\r\n", head % 5 + b">From x\r\n"),
+        }
+        export = self.pair(list(cases.values()))
+        result = self.gog(export)
+        self.assertEqual((result.n_new, result.n_dup, result.n_reconciled, result.n_error), (0, 2, 3, 0))
+        detail = json.loads(
+            self.conn.execute("SELECT detail_json FROM ledger ORDER BY seq DESC").fetchone()[0]
+        )
+        self.assertEqual([item["gmail_message_id"] for item in detail["reconciled"]], ["2", "3", "5"])
+
+    def test_gog_reimport_counts_the_same_rows_as_reconciled_again(self) -> None:
+        self.mbox()
+        first = self.gog()
+        digest = ordered_row_dump_hash(self.conn)
+        kept = self.row(HTML)["raw_sha256"]
+        again = self.gog()
+        self.assertEqual((first.n_dup, first.n_reconciled), (1, 1))
+        self.assertEqual((again.n_new, again.n_dup, again.n_reconciled, again.n_error), (0, 1, 1, 0))
+        self.assertEqual(self.row(HTML)["raw_sha256"], kept)
+        self.assertTrue(self.row(HTML)["raw_path"].startswith("mbox:"))
+        self.assertEqual(ordered_row_dump_hash(self.conn), digest)
+
     def test_mbox_after_gog_leaves_api_rows_alone(self) -> None:
         self.gog()
         before = (self.labels_of(PLAIN), self.labels_of(HTML), self.row(HTML)["raw_path"])
