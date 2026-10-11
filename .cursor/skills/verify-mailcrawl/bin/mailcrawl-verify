@@ -19,6 +19,37 @@ scaffold_proof_runnable() {
   [[ -f "$REPO_ROOT/Makefile" && -f "$REPO_ROOT/scripts/proof.sh" ]]
 }
 
+native_fixture_runnable() {
+  local native="$REPO_ROOT/testdata/fixtures/gog-export/native"
+  local taxonomy="$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json"
+  [[ -f "$native/gmail/acct_synthetic/labels.json" \
+    && -f "$native/gmail/acct_synthetic/messages/index.jsonl" \
+    && -f "$taxonomy" \
+    && ! -e "$native/export.json" ]]
+}
+
+mailcrawl_in() {
+  local home="$1"
+  shift
+  (
+    cd "$REPO_ROOT"
+    env \
+      -u GOG_KEY \
+      -u OPENAI_API_KEY \
+      -u ANTHROPIC_API_KEY \
+      -u GH_TOKEN \
+      -u GITHUB_TOKEN \
+      -u GOOGLE_APPLICATION_CREDENTIALS \
+      HOME="$home" \
+      http_proxy=http://127.0.0.1:9 \
+      https_proxy=http://127.0.0.1:9 \
+      HTTP_PROXY=http://127.0.0.1:9 \
+      HTTPS_PROXY=http://127.0.0.1:9 \
+      ALL_PROXY=http://127.0.0.1:9 \
+      python3 -m mailcrawl "$@"
+  )
+}
+
 record_spec_hash() {
   mkdir -p "$EVIDENCE_DIR"
   sha256sum "$REPO_ROOT/docs/SPEC.md" | awk '{print $1}' >"$EVIDENCE_DIR/spec.sha256"
@@ -72,6 +103,99 @@ drive_scaffold_headless_proof() {
   make check && scripts/proof.sh
 }
 
+drive_native_gog_import() {
+  if ! native_fixture_runnable; then
+    log "native gog import: not runnable"
+    return 2
+  fi
+  mkdir -p "$SCRATCH_DIR"
+  local home
+  home="$(mktemp -d "$SCRATCH_DIR/native-home.XXXXXX")"
+  NATIVE_HOME="$home"
+  trap 'rm -rf "$NATIVE_HOME"' EXIT
+  local native="$REPO_ROOT/testdata/fixtures/gog-export/native"
+  local taxonomy="$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json"
+
+  mailcrawl_in "$home" --json init --account thehive --email ada@example.com
+
+  local import_out
+  import_out="$(mailcrawl_in "$home" --json import gog-export \
+    --account thehive \
+    --dir "$native" \
+    --taxonomy "$taxonomy")"
+  printf '%s\n' "$import_out"
+  printf '%s' "$import_out" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+ok = (
+    doc.get("ok") is True
+    and doc.get("n_seen") == 3
+    and doc.get("n_new") == 3
+    and doc.get("n_error") == 0
+)
+sys.exit(0 if ok else 1)
+' || {
+    log "native import count is not 3"
+    return 1
+  }
+
+  local search_out
+  search_out="$(mailcrawl_in "$home" --json search reuniao --account thehive)"
+  printf '%s\n' "$search_out"
+  printf '%s' "$search_out" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+hits = doc.get("hits") or []
+ok = any(
+    hit.get("gmail_message_id") == "msg-plain"
+    and "reunião" in (hit.get("snippet") or "")
+    for hit in hits
+)
+sys.exit(0 if ok else 1)
+' || {
+    log "native search reuniao missed reunião"
+    return 1
+  }
+
+  local again_out
+  again_out="$(mailcrawl_in "$home" --json import gog-export \
+    --account thehive \
+    --dir "$native")"
+  printf '%s\n' "$again_out"
+  printf '%s' "$again_out" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+ok = doc.get("n_dup") == 3 and doc.get("n_new") == 0
+sys.exit(0 if ok else 1)
+' || {
+    log "native reimport was not a duplicate"
+    return 1
+  }
+
+  local bad_out bad_err bad_code
+  bad_err="$(mktemp "$SCRATCH_DIR/native-missing.XXXXXX")"
+  bad_code=0
+  bad_out="$(mailcrawl_in "$home" --json import gog-export \
+    --account thehive \
+    --dir "$home/missing-export" 2>"$bad_err")" || bad_code=$?
+  printf '%s\n' "$bad_out"
+  if [[ "$bad_code" -ne 3 ]]; then
+    log "native-gog-import: missing directory exited $bad_code"
+    return 1
+  fi
+  printf '%s' "$bad_out" | grep -q unsupported_schema || {
+    log "native-gog-import: missing directory lacked unsupported_schema"
+    return 1
+  }
+  if grep -q Traceback "$bad_err" || printf '%s' "$bad_out" | grep -q Traceback; then
+    log "native-gog-import: missing directory printed a traceback"
+    return 1
+  fi
+  rm -f "$bad_err"
+  rm -rf "$NATIVE_HOME"
+  trap - EXIT
+}
+
 cmd_doctor() {
   mkdir -p "$EVIDENCE_DIR"
   {
@@ -85,6 +209,11 @@ cmd_doctor() {
       log "scaffold proof: runnable"
     else
       log "scaffold proof: not runnable (missing Makefile and/or scripts/proof.sh)"
+    fi
+    if native_fixture_runnable; then
+      log "native gog import: runnable"
+    else
+      log "native gog import: not runnable (missing native fixture, missing taxonomy, or export.json is present)"
     fi
     log "doctor ok"
   } | tee "$EVIDENCE_DIR/doctor.log"
@@ -100,16 +229,21 @@ cmd_drive() {
   local code=0
   {
     log "drive feature=$feature"
+    local drive_code=0
     case "$feature" in
-      required-docs-and-ci) drive_required_docs_and_ci ;;
-      secrets-and-tracked-forbidden) drive_secrets_and_tracked_forbidden ;;
-      spec-integrity) drive_spec_integrity ;;
-      scaffold-headless-proof) drive_scaffold_headless_proof ;;
+      required-docs-and-ci) drive_required_docs_and_ci || drive_code=$? ;;
+      secrets-and-tracked-forbidden) drive_secrets_and_tracked_forbidden || drive_code=$? ;;
+      spec-integrity) drive_spec_integrity || drive_code=$? ;;
+      scaffold-headless-proof) drive_scaffold_headless_proof || drive_code=$? ;;
+      native-gog-import) drive_native_gog_import || drive_code=$? ;;
       *)
         log "unknown feature: $feature"
-        exit 1
+        drive_code=1
         ;;
     esac
+    if [[ "$drive_code" -ne 0 ]]; then
+      exit "$drive_code"
+    fi
     verify_spec_unchanged || exit 1
     log "drive ok feature=$feature"
   } | tee "$EVIDENCE_DIR/drive.log" || code=$?
