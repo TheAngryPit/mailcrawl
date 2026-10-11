@@ -1,9 +1,8 @@
 """Stream a Google Takeout mbox into label and message records.
 
-The Takeout shape is not verified on real mail: the ``From <number>@...``
-separator, the ``X-GM-*`` and ``X-Gmail-*`` header names, and their decimal
-encoding all come from the approved plan, not from a sanitized sample. Every
-value that does not parse falls back. Nothing in a message raises.
+SPEC section 4.1 lists which Takeout facts were observed on real mail and
+which are still assumptions. Every value that does not parse falls back.
+Nothing in a message raises.
 """
 
 from __future__ import annotations
@@ -14,12 +13,15 @@ import re
 import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
+from email import policy
+from email.feedparser import BytesFeedParser
 from email.header import decode_header, make_header
+from email.message import EmailMessage
 from pathlib import Path
 from typing import BinaryIO
 
 from mailcrawl.contract import PSEUDO_LABEL, LabelRec, MessageRec
-from mailcrawl.eml import eml_record
+from mailcrawl.eml import parsed_record
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.textnorm import parse_date
 
@@ -34,7 +36,8 @@ _ESCAPED_FROM = re.compile(rb"^>+From ")
 _TAKEOUT_HEADERS = ("x-gm-", "x-gmail-", "x-google-")
 _HEX = re.compile(r"[0-9a-f]+")
 _MESSAGE_ID = re.compile(r"<([^<>\s]+)>")
-_HEADER_END = re.compile(rb"\r?\n\r?\n")
+_BLANK = b"\r\n"
+_FEED_CHUNK = 1 << 16
 _READ = ("x-gm-msgid", "x-gm-thrid", "x-gmail-message-id", "x-gmail-labels", "date")
 
 SYSTEM_LABELS: dict[str, str] = {
@@ -183,8 +186,8 @@ class MboxSource:
             yield label
         raw_path = RAW_PATH + str(self.path.resolve())
         with self.path.open("rb") as handle:
-            for offset, separator, raw in _entries(handle, self._digest.update):
-                parsed = self._parse(offset, separator, raw, f"{raw_path}#{offset}")
+            for entry in _entries(handle, self._digest.update):
+                parsed = self._parse(entry, f"{raw_path}#{entry.offset}")
                 if isinstance(parsed, Refused):
                     yield parsed
                     continue
@@ -196,13 +199,14 @@ class MboxSource:
                 yield message
         self._done = True
 
-    def _parse(
-        self, offset: int, separator: bytes, raw: bytes, raw_path: str
-    ) -> tuple[list[LabelRec], MessageRec] | Refused:
+    def _parse(self, entry: _Entry, raw_path: str) -> tuple[list[LabelRec], MessageRec] | Refused:
+        offset, separator = entry.offset, entry.separator
         try:
-            stripped, takeout = _strip_takeout(raw)
-            draft = eml_record(
-                stripped,
+            parsed, raw_sha256, size_bytes, takeout = entry.finish()
+            draft = parsed_record(
+                parsed,
+                raw_sha256=raw_sha256,
+                size_bytes=size_bytes,
                 gmail_message_id="",
                 gmail_thread_id="",
                 label_ids=(),
@@ -249,29 +253,27 @@ class MboxSource:
         return found
 
 
-def _entries(handle: BinaryIO, digest: Callable[[bytes], None]) -> Iterator[tuple[int, bytes, bytes]]:
+def _entries(handle: BinaryIO, digest: Callable[[bytes], None]) -> Iterator[_Entry]:
     offset = 0
-    start = 0
-    separator: bytes | None = None
-    lines: list[bytes] = []
+    entry: _Entry | None = None
     previous_blank = True
     for line in handle:
         digest(line)
         blank = line.strip(b"\r\n") == b""
         if line.startswith(b"From ") and previous_blank:
-            if separator is not None:
-                yield start, separator, _join(lines)
-            separator, start, lines = line, offset, []
-        elif separator is None:
+            if entry is not None:
+                yield entry
+            entry = _Entry(offset, line)
+        elif entry is None:
             if not blank:
                 raise ExportInvalid("unsupported_schema", "file does not start with an mbox From line", 3)
         else:
-            lines.append(_canonical(line[1:] if _ESCAPED_FROM.match(line) else line))
+            entry.add(_canonical(line[1:] if _ESCAPED_FROM.match(line) else line))
         previous_blank = blank
         offset += len(line)
-    if separator is None:
+    if entry is None:
         raise ExportInvalid("unsupported_schema", "file has no mbox From line", 3)
-    yield start, separator, _join(lines)
+    yield entry
 
 
 def _canonical(line: bytes) -> bytes:
@@ -281,16 +283,71 @@ def _canonical(line: bytes) -> bytes:
     return line
 
 
-def _join(lines: list[bytes]) -> bytes:
-    if lines and lines[-1].strip(b"\r\n") == b"":
-        lines.pop()
-    return b"".join(lines)
+class _Entry:
+    """One message in flight. Only its header block is buffered.
+
+    Body lines go to SHA-256 and to a feed parser in fixed-size chunks, so the
+    raw message is never held whole. ``email.message_from_bytes`` on a whole
+    message splits it into a line list first and peaks near ten times its size.
+    """
+
+    def __init__(self, offset: int, separator: bytes) -> None:
+        self.offset = offset
+        self.separator = separator
+        self._head: bytearray | None = bytearray()
+        self._held = b""
+        self._chunk = bytearray()
+        self._hash = hashlib.sha256()
+        self._parser = BytesFeedParser(policy=policy.default)
+        self._size = 0
+        self._takeout = _Takeout()
+
+    def add(self, line: bytes) -> None:
+        # A blank line is held back one step: the one before the next separator is not part of the message.
+        if self._held:
+            self._take(self._held)
+            self._held = b""
+        if line == _BLANK:
+            self._held = line
+        else:
+            self._take(line)
+
+    def finish(self) -> tuple[EmailMessage, str, int, _Takeout]:
+        if self._head is not None:
+            self._end_head()
+        self._flush()
+        parsed = self._parser.close()
+        assert isinstance(parsed, EmailMessage)
+        return parsed, self._hash.hexdigest(), self._size, self._takeout
+
+    def _take(self, line: bytes) -> None:
+        if self._head is None:
+            self._chunk += line
+            if len(self._chunk) >= _FEED_CHUNK:
+                self._flush()
+            return
+        self._head += line
+        if line == _BLANK:
+            self._end_head()
+
+    def _end_head(self) -> None:
+        assert self._head is not None
+        kept, self._takeout = _strip_takeout(bytes(self._head))
+        self._head = None
+        self._chunk += kept
+        self._flush()
+
+    def _flush(self) -> None:
+        if self._chunk:
+            data = bytes(self._chunk)
+            self._chunk.clear()
+            self._hash.update(data)
+            self._parser.feed(data)
+            self._size += len(data)
 
 
-def _strip_takeout(raw: bytes) -> tuple[bytes, _Takeout]:
+def _strip_takeout(head: bytes) -> tuple[bytes, _Takeout]:
     """Drop ``X-Gm-*``, ``X-Gmail-*``, and ``X-Google-*`` from the header block and read Takeout values."""
-    found = _HEADER_END.search(raw)
-    head, tail = (raw[: found.end()], raw[found.end() :]) if found else (raw, b"")
     kept: list[bytes] = []
     values: dict[str, str] = {}
     capturing: str | None = None
@@ -317,7 +374,7 @@ def _strip_takeout(raw: bytes) -> tuple[bytes, _Takeout]:
         labels=_decoded(values.get("x-gmail-labels")),
         date=values.get("date"),
     )
-    return b"".join(kept) + tail, takeout
+    return b"".join(kept), takeout
 
 
 def _header_text(value: bytes) -> str:

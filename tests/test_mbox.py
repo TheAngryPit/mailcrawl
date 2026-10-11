@@ -1,5 +1,6 @@
 """Import a synthetic Takeout-style mbox through the gog-export writer."""
 
+import base64
 import hashlib
 import json
 import os
@@ -291,6 +292,78 @@ class MboxImportTest(unittest.TestCase):
             tracemalloc.stop()
         self.assertEqual((result.n_new, result.n_refused), (300, 0))
         self.assertLess(peak, 8 * 1024 * 1024)
+
+
+RSS_DRIVER = """
+import json, resource, sys
+from pathlib import Path
+from mailcrawl.ingest import import_mbox
+from mailcrawl.store import connect, init_account
+home, mbox = Path(sys.argv[1]), Path(sys.argv[2])
+conn = connect(init_account(home, "personal", "ada@example.com"))
+result = import_mbox(conn, alias="personal", mbox_path=mbox, labels_path=None,
+                     taxonomy_path=None, account_email="ada@example.com")
+status = Path("/proc/self/status")
+if status.exists():
+    # ru_maxrss survives fork and exec on Linux, so it would report the test runner's own peak.
+    kib = next(line.split()[1] for line in status.read_text().splitlines() if line.startswith("VmHWM:"))
+    peak = int(kib) * 1024
+else:
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+print(json.dumps({"n_new": result.n_new, "peak": peak}))
+"""
+
+
+def write_attachment_mbox(path: Path, sizes_mb: list[int]) -> int:
+    """Return the largest message in bytes. Payloads are random, so nothing compresses them."""
+    largest = 0
+    with path.open("wb") as handle:
+        for number, size in enumerate(sizes_mb, start=1):
+            head = (
+                b"From %d@example.com Thu Jan 01 00:00:00 +0000 2026\r\n"
+                b"X-GM-THRID: %d\r\nX-Gmail-Labels: Caixa de Entrada\r\n"
+                b"From: Ada Fixture <ada@example.com>\r\nSubject: anexo %d\r\n"
+                b"Message-ID: <rss-%d@example.com>\r\nDate: Thu, 01 Jan 2026 00:00:00 +0000\r\n"
+                b"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+                b"--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nrsstoken\r\n"
+                b"--b\r\nContent-Type: application/octet-stream; name=a.bin\r\n"
+                b"Content-Disposition: attachment; filename=a.bin\r\n"
+                b"Content-Transfer-Encoding: base64\r\n\r\n" % (number, number, number, number)
+            )
+            payload = base64.encodebytes(os.urandom(size * 1024 * 1024)).replace(b"\n", b"\r\n")
+            handle.write(head)
+            handle.write(payload)
+            handle.write(b"--b--\r\n\r\n")
+            largest = max(largest, len(head) + len(payload) + 9)
+    return largest
+
+
+class MboxMemoryTest(unittest.TestCase):
+    def peak_rss(self, mbox: Path) -> tuple[int, int]:
+        with tempfile.TemporaryDirectory() as home:
+            done = subprocess.run(
+                [sys.executable, "-c", RSS_DRIVER, home, str(mbox)],
+                cwd=ROOT,
+                env={**os.environ, "PYTHONPATH": str(ROOT)},
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+        found = json.loads(done.stdout)
+        return found["n_new"], found["peak"]
+
+    def test_peak_rss_stays_near_the_largest_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            big = Path(tmp) / "attachments.mbox"
+            largest = write_attachment_mbox(big, [24, 4, 4, 4, 4, 4, 4])
+            n_new, base = self.peak_rss(TAKEOUT)
+            self.assertEqual(n_new, 5)
+            n_new, peak = self.peak_rss(big)
+        self.assertEqual(n_new, 7)
+        growth = peak - base
+        print(f"\nmbox RSS: base {base >> 20} MB, peak {peak >> 20} MB, largest message {largest >> 20} MB",
+              file=sys.stderr)
+        self.assertLess(growth, 4 * largest)
 
 
 class MboxParserTest(unittest.TestCase):

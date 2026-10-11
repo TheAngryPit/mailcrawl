@@ -1,8 +1,10 @@
 """Attachment parsing stays behind an interface and does not require binaries."""
 
+import email
 import hashlib
 import os
 import unittest
+from email import policy
 
 from mailcrawl.extract import (
     OCR_LOW_CONFIDENCE_V0,
@@ -11,6 +13,7 @@ from mailcrawl.extract import (
     decide_ocr,
     parse_attachment,
 )
+from mailcrawl.eml import attachments
 
 
 class _PresentBackend:
@@ -104,3 +107,43 @@ class ParseAttachmentTest(unittest.TestCase):
 if __name__ == "__main__":
     os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     unittest.main()
+
+
+class AttachmentDecodeTest(unittest.TestCase):
+    """The base64 fast path must give the same bytes and text as the standard library."""
+
+    def message(self, ctype: str, cte: str, body: bytes) -> bytes:
+        return (
+            b"Subject: a\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+            b"--b\r\nContent-Type: " + ctype.encode() + b"\r\nContent-Disposition: attachment; filename=a\r\n"
+            b"Content-Transfer-Encoding: " + cte.encode() + b"\r\n\r\n" + body + b"\r\n--b--\r\n"
+        )
+
+    def test_fast_path_matches_stdlib(self) -> None:
+        text = "Relat\u00f3rio anexotoken\n".encode("latin-1")
+        cases = [
+            ("application/octet-stream", "base64", b"AAEC/w==\r\nAAEC/w=="[:8]),
+            ("application/octet-stream", "base64", b"AAEC\r\n/w=="),
+            ("application/octet-stream", "Base64", b"AAEC/w"),
+            ("application/octet-stream", "base64", b"AA*EC\r\n/w=="),
+            ("application/octet-stream", "base64", b"AAEC/w==AAEC\r\n"),
+            ("application/octet-stream", "base64", b"AAE"),
+            ("application/octet-stream", "base64", "AAEC\u00e9/w==".encode()),
+            ("application/octet-stream", "quoted-printable", b"a=3Db"),
+            ("text/plain; charset=latin-1", "base64", b"UmVsYXTzcmlvIGFuZXhvdG9rZW4K"),
+            ("text/plain; charset=unknown-x", "base64", b"UmVsYXTzcmlvIGFuZXhvdG9rZW4K"),
+            ("text/plain", "8bit", text),
+        ]
+        for ctype, cte, body in cases:
+            parsed = email.message_from_bytes(self.message(ctype, cte, body), policy=policy.default)
+            part = next(p for p in parsed.walk() if p.get_content_disposition() == "attachment")
+            want = part.get_payload(decode=True)
+            try:
+                want_text = part.get_content() if part.get_content_maintype() == "text" else None
+            except LookupError:
+                want_text = None
+            (record,) = attachments(parsed)
+            self.assertEqual(record.size_bytes, len(want), (ctype, cte, body))
+            self.assertEqual(record.file_sha256, hashlib.sha256(want).hexdigest(), (ctype, cte, body))
+            expected = parse_attachment(part.get_content_type(), want, decoded_text=want_text)
+            self.assertEqual(record.extracted_text, expected.extracted_text, (ctype, cte, body))
