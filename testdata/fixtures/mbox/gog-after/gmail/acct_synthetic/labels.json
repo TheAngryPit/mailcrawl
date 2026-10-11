@@ -1,0 +1,47 @@
+[
+  {
+    "id": "INBOX",
+    "name": "INBOX",
+    "type": "system"
+  },
+  {
+    "id": "SENT",
+    "name": "SENT",
+    "type": "system"
+  },
+  {
+    "id": "STARRED",
+    "name": "STARRED",
+    "type": "system"
+  },
+  {
+    "id": "UNREAD",
+    "name": "UNREAD",
+    "type": "system"
+  },
+  {
+    "id": "IMPORTANT",
+    "name": "IMPORTANT",
+    "type": "system"
+  },
+  {
+    "id": "CATEGORY_UPDATES",
+    "name": "CATEGORY_UPDATES",
+    "type": "system"
+  },
+  {
+    "id": "Label_synthetic",
+    "name": "Example/Synthetic",
+    "type": "user"
+  },
+  {
+    "id": "Label_proj",
+    "name": "Projetos, Exemplo",
+    "type": "user"
+  },
+  {
+    "id": "Label_nova",
+    "name": "Etiqueta Nova",
+    "type": "user"
+  }
+]

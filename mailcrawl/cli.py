@@ -12,7 +12,7 @@ from pathlib import Path
 from mailcrawl.configfile import account_email, taxonomy_path, write_account
 from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
-from mailcrawl.ingest import import_gog_export
+from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
 from mailcrawl.report import dry_run, stats
 from mailcrawl.rules import apply_rules, load_rules
@@ -80,7 +80,12 @@ def _parser() -> argparse.ArgumentParser:
     gog = imp_sub.add_parser("gog-export")
     gog.add_argument("--dir", required=True)
     gog.add_argument("--taxonomy")
-    gog.add_argument("--account", required=True)
+    gog.add_argument("--account", "--alias", dest="account", required=True)
+    mbox = imp_sub.add_parser("mbox")
+    mbox.add_argument("file")
+    mbox.add_argument("--account", "--alias", dest="account", required=True)
+    mbox.add_argument("--labels")
+    mbox.add_argument("--taxonomy")
 
     search = sub.add_parser("search")
     search.add_argument("query")
@@ -125,8 +130,6 @@ def _init(args: argparse.Namespace) -> int:
 
 
 def _import(args: argparse.Namespace) -> int:
-    if args.import_command != "gog-export":
-        raise UsageError("unknown import command")
     alias = canonical_alias(args.account)
     cfg = config_path(args.config)
     email = account_email(cfg, alias)
@@ -134,13 +137,26 @@ def _import(args: argparse.Namespace) -> int:
     db_path = data_dir(args.home) / f"{alias}.db"
     conn = connect(db_path)
     try:
-        result = import_gog_export(
-            conn,
-            alias=alias,
-            export_dir=Path(args.dir),
-            taxonomy_path=catalogue,
-            account_email=email,
-        )
+        result: ImportResult
+        if args.import_command == "gog-export":
+            result = import_gog_export(
+                conn,
+                alias=alias,
+                export_dir=Path(args.dir),
+                taxonomy_path=catalogue,
+                account_email=email,
+            )
+        elif args.import_command == "mbox":
+            result = import_mbox(
+                conn,
+                alias=alias,
+                mbox_path=Path(args.file),
+                labels_path=Path(args.labels) if args.labels else None,
+                taxonomy_path=catalogue,
+                account_email=email,
+            )
+        else:
+            raise UsageError("unknown import command")
     finally:
         conn.close()
     _emit(
@@ -151,6 +167,8 @@ def _import(args: argparse.Namespace) -> int:
             "n_dup": result.n_dup,
             "n_error": result.n_error,
             "n_new": result.n_new,
+            "n_reconciled": result.n_reconciled,
+            "n_refused": result.n_refused,
             "n_seen": result.n_seen,
             "ok": True,
         },

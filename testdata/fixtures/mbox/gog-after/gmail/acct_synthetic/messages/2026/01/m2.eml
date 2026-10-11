@@ -1,0 +1,10 @@
+Received: from mx.example.com by mx.example.com
+From: Cam Fixture <cam@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Boletim HTML
+Date: Fri, 02 Jan 2026 10:00:00 +0000
+Message-ID: <mbox-html@example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset="utf-8"
+
+<p>Boletim <b>htmltoken</b></p>

@@ -42,6 +42,8 @@ for f in \
   testdata/fixtures/gog-export/unknown/export.json \
   testdata/fixtures/gog-export/native/gmail/acct_synthetic/labels.json \
   testdata/fixtures/gog-export/native/gmail/acct_synthetic/messages/index.jsonl \
+  testdata/fixtures/mbox/takeout.mbox \
+  testdata/fixtures/mbox/gog-after/gmail/acct_synthetic/labels.json \
   testdata/catalogue/taxonomy.synthetic.json
 do
   [[ -f "${REPO_ROOT}/${f}" ]] || fail "missing fixture ${f}"
@@ -476,6 +478,40 @@ PY
 )"
 [[ "${DECISIONS_AFTER}" == "2" ]] || fail "stats or dry-run changed decisions"
 
+log "check: Takeout mbox imports, reimports, and reconciles with a gog export"
+MBOX_DATA="${HOME}/mbox-data"
+mbox_cli() {
+  (
+    cd "${REPO_ROOT}"
+    python3 -m mailcrawl --json --home "${MBOX_DATA}" "$@"
+  )
+}
+mbox_cli init --account pessoal --email ada@example.com >/dev/null
+mbox_first="$(mbox_cli import mbox testdata/fixtures/mbox/takeout.mbox --alias pessoal)"
+mbox_again="$(mbox_cli import mbox testdata/fixtures/mbox/takeout.mbox --account personal)"
+mbox_gog="$(mbox_cli import gog-export --alias personal --dir testdata/fixtures/mbox/gog-after)"
+printf '%s\n%s\n%s\n' "${mbox_first}" "${mbox_again}" "${mbox_gog}" | tee "${PROOF_DIR}/mbox.log"
+FIRST="${mbox_first}" AGAIN="${mbox_again}" GOG="${mbox_gog}" DB_PATH="${MBOX_DATA}/personal.db" python3 <<'PY' || fail "mbox import counts drifted"
+import json, os, sqlite3
+first = json.loads(os.environ["FIRST"])
+again = json.loads(os.environ["AGAIN"])
+gog = json.loads(os.environ["GOG"])
+if (first["n_seen"], first["n_new"], first["n_refused"], first["n_error"]) != (6, 5, 1, 0):
+    raise SystemExit(f"first {first}")
+if (again["n_new"], again["n_dup"]) != (0, 5):
+    raise SystemExit(f"again {again}")
+if (gog["n_new"], gog["n_dup"], gog["n_reconciled"], gog["n_error"]) != (0, 1, 1, 0):
+    raise SystemExit(f"gog {gog}")
+conn = sqlite3.connect(os.environ["DB_PATH"])
+try:
+    if conn.execute("SELECT count(*) FROM messages").fetchone()[0] != 5:
+        raise SystemExit("message rows")
+    if conn.execute("SELECT count(*) FROM labels WHERE gmail_label_id LIKE 'mbox:%'").fetchone()[0]:
+        raise SystemExit("provisional labels left")
+finally:
+    conn.close()
+PY
+
 log "check: missing required keys fail closed"
 for key in example_message_id example_thread_id example_label_ids example_date; do
   broken="$(mktemp -d)"
@@ -532,6 +568,7 @@ doc = {
         "attachment_parse",
         "rules_v0",
         "stats_dry_run",
+        "mbox_import",
         "missing_required_key_unsupported_schema",
         "fixture_sha256_unchanged",
     ],

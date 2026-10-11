@@ -1,0 +1,93 @@
+From 1767225600000000001@example.com Thu Jan 01 09:00:00 +0000 2026
+X-GM-THRID: 1767225600000000001
+X-Gmail-Labels: Inbox,Important,Opened,"Projetos, Exemplo",Example/Synthetic,Category Updates
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: =?utf-8?q?Reuni=C3=A3o_de_arquivo?=
+Date: Thu, 01 Jan 2026 09:00:00 +0000
+Message-ID: <mbox-plain@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+A reunião do arquivo mboxtoken fica no índice.
+
+From 999@example.com Fri Jan 02 10:00:00 +0000 2026
+X-GM-MSGID: 1767348000000000002
+X-Gmail-Labels: Caixa de entrada,Com estrela,Não lidas,Etiqueta Nova
+From: Cam Fixture <cam@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Boletim HTML
+Date: Fri, 02 Jan 2026 10:00:00 +0000
+Message-ID: <mbox-html@example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset="utf-8"
+
+<p>Boletim <b>htmltoken</b></p>
+
+From 1767434400000000003@example.com Sat Jan 03 10:00:00 +0000 2026
+X-GM-THRID: 1767225600000000001
+X-Gmail-Labels: Sent,"Projetos, Exemplo"
+From: Ada Fixture <ada@example.com>
+To: Bao Fixture <bao@example.com>
+Subject: Re: Reunião de arquivo
+Date: Sat, 03 Jan 2026 10:00:00 +0000
+Message-ID: <mbox-parts@example.com>
+In-Reply-To: <mbox-plain@example.com>
+References: <mbox-plain@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="outer"
+
+--outer
+Content-Type: multipart/alternative; boundary="inner"
+
+--inner
+Content-Type: text/plain; charset="utf-8"
+
+Segue o anexo multitoken.
+
+--inner
+Content-Type: text/html; charset="utf-8"
+
+<p>Segue o anexo multitoken.</p>
+
+--inner--
+
+--outer
+Content-Type: text/plain; charset="utf-8"; name="mbox-note.txt"
+Content-Disposition: attachment; filename="mbox-note.txt"
+Content-Transfer-Encoding: base64
+
+YW5leG90b2tlbiBzeW50aGV0aWMgbm90ZQo=
+
+--outer--
+
+From MAILER-DAEMON Sun Jan 04 10:00:00 2026
+From: Dee Fixture <dee@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Re: Boletim HTML
+Date: Sun, 04 Jan 2026 10:00:00 +0000
+Message-ID: <mbox-noid@example.com>
+In-Reply-To: <mbox-html@example.com>
+Content-Type: text/plain; charset="utf-8"
+
+Sem id do Gmail rfctoken.
+
+From nobody Mon Jan 05 10:00:00 2026
+From: Eve Fixture <eve@example.com>
+Subject: Sem identificador
+Date: Mon, 05 Jan 2026 10:00:00 +0000
+Content-Type: text/plain; charset="utf-8"
+
+Nenhum id refusedtoken.
+
+From 12ab@example.com not a date
+X-GM-MSGID: not-a-number
+X-GM-THRID: also-bad
+Message-ID: <mbox-odd@example.com>
+From: Fay Fixture <fay@example.com>
+Subject: Separador estranho
+Date: Tue, 06 Jan 2026 10:00:00 +0000
+Content-Type: text/plain; charset="utf-8"
+
+>From the archive oddtoken.

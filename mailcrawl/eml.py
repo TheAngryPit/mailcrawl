@@ -2,14 +2,61 @@
 
 from __future__ import annotations
 
+import email
+import hashlib
+from email import policy
 from email.message import EmailMessage, Message
 
-from mailcrawl.contract import AttachmentRec
+from mailcrawl.contract import AttachmentRec, MessageRec
 from mailcrawl.extract import parse_attachment
 from mailcrawl.schema import HEADER_ALLOW
 from mailcrawl.textnorm import html_to_text
 
 _HEADER_ALLOW = frozenset(HEADER_ALLOW)
+
+
+def eml_record(
+    raw: bytes,
+    *,
+    gmail_message_id: str,
+    gmail_thread_id: str,
+    label_ids: tuple[str, ...],
+    internal_date: int,
+    raw_path: str,
+    size_bytes: int | None = None,
+    gmail_history_id: str | None = None,
+    raw_json: str | None = None,
+    fallback: dict[str, str | None] | None = None,
+) -> MessageRec:
+    """Build a message record from RFC822 bytes. Header values beat ``fallback``."""
+    parsed = email.message_from_bytes(raw, policy=policy.default)
+    body, headers, parts = view_message(parsed)
+    spare = fallback or {}
+    return MessageRec(
+        gmail_message_id=gmail_message_id,
+        gmail_thread_id=gmail_thread_id,
+        label_ids=label_ids,
+        internal_date=internal_date,
+        rfc822_message_id=headers.get("message-id"),
+        from_hdr=header_text(parsed, "from") or spare.get("from"),
+        to_hdr=header_text(parsed, "to") or spare.get("to"),
+        cc_hdr=header_text(parsed, "cc") or spare.get("cc"),
+        bcc_hdr=header_text(parsed, "bcc"),
+        reply_to_hdr=headers.get("reply-to"),
+        subject=header_text(parsed, "subject") or spare.get("subject"),
+        snippet=None,
+        gmail_history_id=gmail_history_id,
+        body_text=body,
+        headers=tuple(sorted(headers.items())),
+        attachments=parts,
+        raw_json=raw_json,
+        raw_sha256=hashlib.sha256(raw).hexdigest(),
+        raw_path=raw_path,
+        size_bytes=len(raw) if size_bytes is None else size_bytes,
+        in_reply_to=headers.get("in-reply-to"),
+        references_hdr=headers.get("references"),
+        auth_results=headers.get("authentication-results"),
+    )
 
 
 def view_message(message: EmailMessage) -> tuple[str | None, dict[str, str], tuple[AttachmentRec, ...]]:
