@@ -690,11 +690,12 @@ PY
   crlf_out="$(mailcrawl_in "$home" --json search crlftoken --account personal)"
   printf '%s\n%s\n%s\n' "$token_out" "$attach_out" "$crlf_out"
 
-  local gog_out
+  local gog_out gog_again_out
   gog_out="$(mailcrawl_in "$home" --json import gog-export --alias personal --dir "$fixture/gog-after")"
-  printf '%s\n' "$gog_out"
+  gog_again_out="$(mailcrawl_in "$home" --json import gog-export --alias personal --dir "$fixture/gog-after")"
+  printf '%s\n%s\n' "$gog_out" "$gog_again_out"
 
-  FIRST="$first_out" AGAIN="$again_out" TOKEN="$token_out" ATTACH="$attach_out" GOG="$gog_out" CRLF="$crlf_out" DB_PATH="$db" \
+  FIRST="$first_out" AGAIN="$again_out" TOKEN="$token_out" ATTACH="$attach_out" GOG="$gog_out" GOG_AGAIN="$gog_again_out" CRLF="$crlf_out" DB_PATH="$db" \
     EML="$fixture/gog-after/gmail/acct_synthetic/messages/2026/01/m1.eml" python3 - <<'PY' || {
 import hashlib, json, os, sqlite3, sys
 first = json.loads(os.environ["FIRST"])
@@ -715,6 +716,9 @@ if ids("CRLF") != ["18867251edfa0001"]:
     sys.exit(f"crlftoken hits {ids('CRLF')}")
 if (gog["n_new"], gog["n_dup"], gog["n_reconciled"], gog["n_error"]) != (0, 1, 1, 0):
     sys.exit(f"gog after mbox {gog}")
+gog_again = json.loads(os.environ["GOG_AGAIN"])
+if (gog_again["n_new"], gog_again["n_dup"], gog_again["n_reconciled"], gog_again["n_error"]) != (0, 1, 1, 0):
+    sys.exit(f"gog reimport after mbox {gog_again}")
 conn = sqlite3.connect(os.environ["DB_PATH"])
 try:
     if conn.execute("SELECT count(*) FROM messages").fetchone()[0] != 5:

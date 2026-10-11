@@ -1,6 +1,6 @@
 # Takeout mbox import
 
-`import mbox <file> --alias <alias>` streams a Google Takeout mbox into the same writer as `import gog-export`. The synthetic fixture is `testdata/fixtures/mbox/takeout.mbox`. `testdata/fixtures/mbox/gog-after` is a native gog export of two of its messages. Both are synthetic. The fixture reproduces the shapes observed on a real thehive Takeout on 2026-10-11, never its values: mixed CRLF and LF lines, `>From ` escaping, Portuguese system labels, and `X-Gm-*`, `X-Gmail-*`, and `X-Google-*` headers. Takeout versus gog reconciliation is still unproven on real mail (SPEC section 4.1).
+`import mbox <file> --alias <alias>` streams a Google Takeout mbox into the same writer as `import gog-export`. The synthetic fixture is `testdata/fixtures/mbox/takeout.mbox`. `testdata/fixtures/mbox/gog-after` is a native gog export of two of its messages. Both are synthetic. The fixture reproduces the shapes observed on a real thehive Takeout on 2026-10-11, never its values: mixed CRLF and LF lines, `>From ` escaping, Portuguese system labels, and `X-Gm-*`, `X-Gmail-*`, and `X-Google-*` headers. Reconciliation by message id is proven on thehive, 2026-10-11. Hash equality between Takeout and gog is not proven, and 1,634 of 2,055 thehive messages differed (SPEC section 4.1).
 
 ## Sub-features
 
@@ -10,6 +10,7 @@
 - `mbox-takeout-shapes`. `search crlftoken` returns `18867251edfa0001`, whose body mixes LF and CRLF and has a `>From ` line. Its `raw_sha256` equals the SHA-256 of the pure-CRLF gog `m1.eml`, which lacks the `X-Gm-*`, `X-Gmail-*`, and `X-Google-*` headers and keeps `X-Get-Message-Sender-Via` and `x-gong-email-entity`. Its `body_text_raw` has no CR.
 - `mbox-reimport`. A second import with `--account personal` reports `n_new` 0 and `n_dup` 5. The ordered-row-dump hash does not change.
 - `mbox-then-gog`. `import gog-export --dir testdata/fixtures/mbox/gog-after` reports `n_dup` 1 and `n_reconciled` 1. The archive still has 5 messages. No `mbox:` label id is left. `1886e1a4667f4002` moves to thread `1886e1a4667f4002`. All four `pseudo:` links survive, and the gog user label `Opened` (`Label_opened`) sits beside `pseudo:opened`.
+- `mbox-gog-reimport`. A second `import gog-export` of the same directory reports `n_new` 0, `n_dup` 1, and `n_reconciled` 1 again. `n_reconciled` is a state count: the kept mbox row's hash still differs from the gog copy (SPEC section 4.1).
 - `mbox-not-mbox`. A text file that does not start with `From ` exits 3 with `unsupported_schema` and no traceback.
 
 ## How to get to it (user POV)
@@ -28,7 +29,7 @@ Preconditions:
 - `testdata/fixtures/mbox/gog-after/gmail/acct_synthetic/labels.json` and `messages/index.jsonl` exist.
 
 - Run `"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature mbox-import`.
-- Expect exit 0. The log shows the three import results, the matching rules and dry-run JSON for both accounts, the three search hits, and `unsupported_schema` for the text file.
+- Expect exit 0. The log shows the four import results, the matching rules and dry-run JSON for both accounts, the three search hits, and `unsupported_schema` for the text file.
 - When a fixture file is missing, the same command exits 2.
 
 ## Gotchas

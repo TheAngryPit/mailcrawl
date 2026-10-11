@@ -79,8 +79,9 @@ mailcrawl --json import mbox <file> --alias <thehive|vcl|personal> [--labels <la
 - *Observed on thehive, 2026-10-11.* The Portuguese system label names marked observed in the table below.
 - *Unproven.* `X-Gmail-Original-Message-ID` is not a Gmail id. It may be the RFC 822 `Message-ID`. It is never used as a message id or a thread id until that is proven.
 - *Unproven.* Which `X-Gm-*`, `X-Gmail-*`, and `X-Google-*` headers Google also writes into delivered mail, and so into the Gmail API raw that gog saves as `.eml`. The hash rule below assumes gog's `.eml` has none of them. If it does carry one, the two hashes differ and the rules under Reimport and reconciliation apply.
-- *Unproven.* The line ending gog writes in `.eml`. The hash rule below assumes CRLF.
-- *Unproven.* Reconciliation between Takeout and gog on real mail. It needs a gog export of the same mailbox.
+- *Observed on thehive, 2026-10-11.* gog's `.eml` files for the same mailbox had mixed line endings too: 28,259,588 lines ended in CRLF and 724 in LF. gog's `.eml` is hashed as written, with no line-ending change.
+- *Proven on thehive, 2026-10-11.* Takeout-versus-gog reconciliation by message id. See Thehive reconciliation below for exactly what that covers.
+- *Not proven.* Hash equality between Takeout and gog. It held for 421 messages and failed for 1,634. See Thehive reconciliation below.
 - *Unverified.* The `X-GM-MSGID` and `X-Gmail-Message-ID` rules under Message identity come from the approved plan. Neither header was seen on thehive.
 
 Splitting. A message starts at a line that begins with `From ` when that line is the first line of the file or follows a blank line. A body line that matches `>+From ` loses one `>`. The blank line before the next separator is dropped.
@@ -136,6 +137,29 @@ Reimport and reconciliation. The key stays `(account_id, gmail_message_id)`, so 
 - A provisional thread with no messages, no decision, and no mute is deleted at the end of an import.
 - An mbox import that meets a row from another source counts `n_dup` and leaves the row and its labels alone.
 - Two gog imports whose bytes differ for one id still count `n_error` and keep the stored row, as before.
+
+`n_reconciled` is a state count, not an event count. It counts messages in this gog export whose stored row came from an mbox import and whose stored `raw_sha256` differs from the gog copy. The kept mbox row, with its `raw_sha256` and `mbox:` `raw_path`, is never rewritten. So every later gog import of the same messages counts them in `n_reconciled` again and appends them to the ledger again. That is the specified behavior, not a counter bug. A test pins it. Only the stored row decides between `n_dup` and `n_reconciled`. The ledger is never consulted.
+
+Thehive reconciliation, 2026-10-11. The Pit imported the thehive Takeout and then a gog export of the same mailbox on the Mac, at `main` with #17 and #18. Only counts are recorded here.
+
+| Step | n_new | n_dup | n_reconciled | n_error |
+| --- | --- | --- | --- | --- |
+| Takeout import | 2,055 | 0 | 0 | 0 |
+| Takeout reimport | 0 | 2,055 | 0 | 0 |
+| gog import | 4 | 421 | 1,634 | 0 |
+| gog reimport | 0 | 425 | 1,634 | 0 |
+
+After the gog import the account had 2,059 messages with 2,059 distinct ids. Threads went from 1,275 to 1,278 and labels from 49 to 117. No Takeout message was missing from the gog export. 4 gog messages were missing from the Takeout. 34 `mbox:` labels were converted to gog label ids, and 0 provisional label links were left. 5 catalogue entries matched no label. `pseudo:opened` stayed on 604 messages and `pseudo:archived` on 13.
+
+What that proves: matching by message id. Every Takeout message met its gog copy under the same id, with no duplicate row. The decimal separator id, read as hex, equals the gog API id. Provisional `mbox:` labels and threads were replaced. The reimport counts match the state-count rule above: 425 = 421 + 4 rows now stored from gog.
+
+What it does not prove: hash equality. 1,634 of the 2,055 shared messages had a Takeout `raw_sha256` that differed from the gog `raw_sha256`. The cause is open. These are hypotheses only. Each mechanism is shown on synthetic data in `tests/test_mbox.py` (`test_hash_mechanisms_between_takeout_and_gog`), but none is shown to be what happened on thehive:
+
+- Hypothesis: delivery headers on one side only. Takeout drops every `X-Gm-*`, `X-Gmail-*`, and `X-Google-*` header. gog's `.eml` is hashed as written. If gog's raw carries one of those headers, such as `X-Gm-Message-State` or `X-Google-Smtp-Source` from the sending side, the hashes differ. Headers that one side adds or re-folds would differ in the same way.
+- Hypothesis: line endings. Takeout lines become CRLF before hashing. gog lines do not. A message whose own raw has an LF-only line hashes differently. Both sides had 724 LF lines, so this can explain at most 724 messages.
+- Hypothesis: `>From ` escaping. If Takeout writes mboxo (an original `>From ` line stays `>From `), the unescape turns it into `From ` and the hashes differ. Under mboxrd (`>>From `) they match. 36 such lines can explain at most 36 messages.
+
+Checking a hypothesis needs a per-message comparison of sanitized header names and line-ending counts on the Mac. Real values never leave the Mac.
 
 ## 5. Phase 1 proof
 A phase 1 change is done when, on a clean Linux runner with no network credentials and a temporary `HOME`, this exits 0:
@@ -249,6 +273,6 @@ The phase plan leaves these items unspecified. They are undecided.
 - Go port.
 - Markdown-only gog exports.
 - Merging an `rfc822:` mbox row with a gog API row by `rfc822_message_id`. That merge needs approval.
-- The Takeout mbox facts in section 4.1 that are not marked observed on thehive, 2026-10-11, and Takeout versus gog reconciliation on real mail.
+- The Takeout mbox facts in section 4.1 that are not marked observed or proven on thehive, 2026-10-11, and hash equality between Takeout and gog (1,634 of 2,055 differed on thehive).
 
 Section 6 point 4 still rejects a record with no `eml` path.
