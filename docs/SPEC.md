@@ -27,16 +27,18 @@ scripts/proof.sh                 # scaffold proof, temp HOME, no network
 mailcrawl/contract.py            # v0 fixture contract
 mailcrawl/gognative.py           # gog backup plaintext export
 mailcrawl/eml.py                 # RFC822 parse for that export
+mailcrawl/mbox.py                # streaming Takeout mbox reader
 mailcrawl/extract.py             # attachment parser interface
 mailcrawl/rules.py               # rules 0–8, no model
 mailcrawl/report.py              # archive counts and dry-run counts
 mailcrawl/schema.py              # schema v2 DDL
 mailcrawl/store.py               # open one account database and migrate it
-mailcrawl/ingest.py              # idempotent gog-export import
+mailcrawl/ingest.py              # idempotent gog-export and mbox import, one writer
 mailcrawl/search.py              # FTS search
 mailcrawl/cli.py                 # init, import, and search
 tests/
 testdata/fixtures/gog-export/    # synthetic; v0 fixture contract and native gog layout
+testdata/fixtures/mbox/          # synthetic; Takeout-style mbox and a gog export of two of its messages
 testdata/catalogue/              # synthetic taxonomy stand-in
 skills/mailcrawl/SKILL.md
 .cursor/skills/verify-mailcrawl/
@@ -48,6 +50,7 @@ Phase 1 is read-only Python and it does all of the following:
 
 - Create SQLite schema v2 for one local archive. `mailcrawl/schema.py` migrates an empty database to `user_version` 2. A database at `user_version=1` gains `body_text_raw`, a cleaned `body_text`, a rebuilt `msg_fts`, and the empty tables `decisions`, `sender_decisions`, and `thread_mutes`.
 - Import a gog export idempotently on `(account_id, gmail_message_id)`. `mailcrawl import gog-export` does that for the fixture contract and for a gog backup plaintext export.
+- Import a Google Takeout mbox idempotently with `mailcrawl import mbox <file> --alias <thehive|vcl|personal>`. It streams the file and writes through the same writer as `import gog-export`. See section 4.1.
 - Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`. Import writes `msg_fts` from the cleaned body. `mailcrawl search` reads it.
 - Parse attachment bytes through `mailcrawl.extract`. `text/plain` and `text/html` are extracted. Other types stay behind that interface. No external binary is required.
 - Apply rules 0 to 8 with `mailcrawl rules`. `rules_version` is `rules-v0`. The command prints counts only.
@@ -58,6 +61,67 @@ Phase 1 is read-only Python and it does all of the following:
 `mailcrawl.contract.classify_export` returns `ok` for a `mailcrawl.gog-export.v0` document that has the four required keys from section 6 point 4. It returns `unsupported_schema` when the schema label differs or any of those keys is missing. The key names belong to the fixture contract. They are not a map of live gog field names.
 
 `import gog-export` also reads a gog backup plaintext export when the directory has no `export.json`. The gogcli source writes `gmail/<account>/labels.json` and `gmail/<account>/messages/index.jsonl`. Each index record's `eml` value is a slash-separated path relative to the `gog backup export --out` directory. Pass that directory as `--dir`, or pass `gmail/<account>`. Paths that leave the export directory are rejected. A missing `.eml` file is `missing_file` and exits 1. A malformed record is `malformed_record` and exits 3. An unrecognized directory is `unsupported_schema` and exits 3. None of those errors include a message body or an address. A native gog import of a real thehive export was verified on the Mac at commit `32b936c`. The export had 25 messages. The first import counted 25 new, 0 duplicates, and 0 errors. The second import counted 0 new, 25 duplicates, and 0 errors. Two searches each returned 13 hits. Both searches returned the same `gmail_message_id` values. The database stayed at 25 messages. The synthetic fixture under `testdata/fixtures/gog-export/native/` is still the behavior this repository checks.
+
+### 4.1 Takeout mbox import
+The plan is a large initial archive from a Google Takeout mbox, then incremental imports through the gog API. That split keeps API quota and cost down.
+
+```
+mailcrawl --json import mbox <file> --alias <thehive|vcl|personal> [--labels <labels.json>] [--taxonomy <catalogue.json>]
+```
+
+`--alias` and `--account` are synonyms on both import commands. `pessoal` still selects `personal`. The import is read-only toward the file and toward Gmail. It reads one message at a time and never loads the whole file. It writes schema v2 through the `import gog-export` writer, so body cleaning, attachment parsing, headers, and FTS are the same. There is no new migration. A file whose first non-blank line is not an mbox `From ` line is `unsupported_schema` and exits 3. A missing file is `missing_file` and exits 1. The JSON result adds `n_refused` and `n_reconciled` to the existing counts on both import commands.
+
+**Unverified Takeout format.** The separator shape `From <decimal>@<host> <date>`, the header names `X-GM-MSGID`, `X-GM-THRID`, `X-Gmail-Message-ID`, and `X-Gmail-Labels`, the decimal encoding of those ids, the label names Takeout writes, and the `>From ` escaping are taken from the approved plan. None of them is verified on real mail. Reconciliation with gog API ids is not proven on real mail. These rules stay pending until a sanitized real Takeout sample is checked. The parser is tolerant. A missing or odd value falls back to the next rule and never stops the import.
+
+Splitting. A message starts at a line that begins with `From ` when that line is the first line of the file or follows a blank line. A body line that matches `>+From ` loses one `>`. The blank line before the next separator is dropped.
+
+Message identity. `gmail_message_id` is lowercase hex with no padding, the same form as gog API ids. The first value that parses wins:
+
+1. `X-GM-MSGID`, read as decimal.
+2. `X-Gmail-Message-ID`. An all-digit value is read as decimal. A value with hex letters, or a `0x` prefix, is read as hex.
+3. The decimal number before `@` on the `From ` separator line.
+
+An id must be between 1 and 2^64 − 1. When no Gmail id parses, the key is `rfc822:` plus the SHA-256 of the `Message-ID` header with surrounding spaces and angle brackets removed. When there is no `Message-ID` either, the message is refused and counted in `n_refused`. A refused message is never merged. The ledger records its byte offset and the reason.
+
+An `rfc822:` row is never merged with a gog API row automatically. It keeps `rfc822_message_id`, which is the key for a later reconciliation. That merge is future work and needs approval.
+
+Thread identity. `X-GM-THRID`, read as decimal and stored as lowercase hex. Without it the thread is provisional, `mbox:` plus the SHA-256 of a root id. The root is the first `<…>` id in `References`, else in `In-Reply-To`, else the message's own `Message-ID`, else its key.
+
+`raw_sha256` is computed over the message with the Takeout parts removed: the `From ` separator line and every `X-GM-*` and `X-Gmail-Labels` header, folded lines included. `X-Gmail-Message-ID` stays in the hashed bytes. `raw_path` is `mbox:<absolute file path>#<byte offset of the separator>`. `internal_date` is the `Date` header, else the separator date, else 0.
+
+Labels. `X-Gmail-Labels` is a comma-separated list. Names may be quoted. Each name maps in this order:
+
+1. A system name maps through the fixed table below, without regard to case. The label row uses the system id as both id and name, as gog `labels.json` does.
+2. `Opened`, `Archived`, `Aberto`, `Aberta`, `Arquivado`, and `Arquivada` are Takeout state markers with no Gmail label id. They are dropped.
+3. A user name that matches a label name exactly, either in the file passed with `--labels` (a gog `labels.json`) or in a non-provisional label already in the account database, uses that label id.
+4. Any other name is a provisional user label with id `mbox:<name>`.
+
+| Gmail id | Names (EN and PT) |
+| --- | --- |
+| `INBOX` | Inbox, Caixa de entrada |
+| `SENT` | Sent, Sent Mail, Enviados, Enviadas, E-mails enviados |
+| `STARRED` | Starred, Com estrela |
+| `IMPORTANT` | Important, Importante |
+| `UNREAD` | Unread, Não lido, Não lidos, Não lida, Não lidas |
+| `DRAFT` | Draft, Drafts, Rascunho, Rascunhos |
+| `SPAM` | Spam |
+| `TRASH` | Trash, Lixo, Lixeira, Reciclagem |
+| `CHAT` | Chat, Chats |
+| `CATEGORY_PERSONAL` | Category Personal, Categoria Pessoal |
+| `CATEGORY_SOCIAL` | Category Social, Categoria Social, Categoria Redes sociais |
+| `CATEGORY_PROMOTIONS` | Category Promotions, Categoria Promoções |
+| `CATEGORY_UPDATES` | Category Updates, Categoria Atualizações |
+| `CATEGORY_FORUMS` | Category Forums, Categoria Fóruns |
+
+Each Gmail id in the table also maps to itself. The Portuguese names are a guess until a real sample is checked.
+
+Reimport and reconciliation. The key stays `(account_id, gmail_message_id)`, so a second import of the same file adds no rows and refreshes labels. Later imports follow these rules:
+
+- A gog import that meets an mbox row with the same id keeps the row. When the hashes match it counts `n_dup`. When they differ it counts `n_reconciled` and appends `{gmail_message_id, kept_raw_sha256, seen_raw_sha256}` to the ledger. In both cases it replaces the message's labels with the gog label ids. It moves the message from a provisional `mbox:` thread to the real thread id. There is never a second message row.
+- A gog import whose `labels.json` has a label named `<name>` replaces the provisional label `mbox:<name>` everywhere, on messages that the gog export does not cover too.
+- A provisional thread with no messages, no decision, and no mute is deleted at the end of an import.
+- An mbox import that meets a row from another source counts `n_dup` and leaves the row and its labels alone.
+- Two gog imports whose bytes differ for one id still count `n_error` and keep the stored row, as before.
 
 ## 5. Phase 1 proof
 A phase 1 change is done when, on a clean Linux runner with no network credentials and a temporary `HOME`, this exits 0:
@@ -83,6 +147,7 @@ make check && scripts/proof.sh
 13. The v0 metadata attachment is `skipped` with reason `no_bytes`. The native text attachment is `ok`. The native octet-stream attachment is `unsupported` and is not searchable. OCR thresholds 25 and 60 run only when a backend is supplied.
 14. `mailcrawl rules` on a synthetic account prints counts. A `STARRED` thread is `needs_review` under rule `0`. A plain thread is `reply` under rule `5`. A second run does not add a decision. The output has no message body.
 15. On that same account, `mailcrawl stats` prints 2 messages, 2 threads, 2 senders, and month `2023-11` with count 2. `mailcrawl dry-run` prints state counts `needs_review` 1 and `reply` 1, rule counts `0` 1 and `5` 1, label `STARRED` once, sender ids `1` and `2` once each, and month `2023-11` with count 2. Neither command prints a message body or an address. The decision count stays 2. No `plans` table is created.
+16. The synthetic Takeout mbox imports 5 messages and refuses 1. A second import adds nothing. A gog import of two of those messages afterwards keeps 5 rows, counts 1 duplicate and 1 reconciled, and leaves no provisional label.
 
 ## 6. Closed decisions
 These points are closed.
@@ -107,7 +172,7 @@ These points are closed.
 18. No language model runs on the crawl. The first matching rule wins. There is no Gmail write, no network, and no `gog`.
 
 ## 7. Scope
-**In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, schema v2, body cleaning, the attachment parser interface, rules 0 to 8, `stats`, dry-run counts, `init`, idempotent `import gog-export` for the fixture contract and for a gog backup plaintext export, FTS search over the cleaned body, and the phase 1 proof.
+**In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, schema v2, body cleaning, the attachment parser interface, rules 0 to 8, `stats`, dry-run counts, `init`, idempotent `import gog-export` for the fixture contract and for a gog backup plaintext export, a streaming `import mbox` for a Takeout mbox, FTS search over the cleaned body, and the phase 1 proof.
 
 **Out of scope:** Embeddings, label apply, Gmail writes, running `gog`, a language model on the crawl path, a full thehive backup, cache deletion, markdown-only gog exports, and the Go port stay out. Section 4 records a 25-message thehive smoke import. A full mailbox import is not this revision.
 
@@ -169,5 +234,7 @@ The phase plan leaves these items unspecified. They are undecided.
 - Privacy classes.
 - Go port.
 - Markdown-only gog exports.
+- Merging an `rfc822:` mbox row with a gog API row by `rfc822_message_id`. That merge needs approval.
+- The Takeout mbox format in section 4.1, until a sanitized real sample is checked.
 
 Section 6 point 4 still rejects a record with no `eml` path.

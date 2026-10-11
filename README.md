@@ -40,6 +40,16 @@ A record without an `eml` path is rejected, so a markdown-only export is not imp
 
 The native reader matches the gogcli exporter and the synthetic fixture in `testdata/fixtures/gog-export/native/`. A real thehive export was verified on the Mac at commit `32b936c` as a 25-message smoke. A full mailbox import is not this revision.
 
+## Import a Takeout mbox
+
+`import mbox` reads a Google Takeout mbox one message at a time, so a multi-gigabyte file is fine. It writes through the same code as `import gog-export`. The plan is one large Takeout archive first, then incremental gog imports.
+
+```
+python3 -m mailcrawl --json import mbox <file> --alias personal [--labels <labels.json>] [--taxonomy <catalogue.json>]
+```
+
+`--alias` and `--account` mean the same thing. The key is the Gmail message id in lowercase hex, read from the Takeout headers or the `From` line. A message with no Gmail id is keyed on its `Message-ID`. A message with neither is refused and counted in `n_refused`. A later gog import of the same id keeps the row, refreshes its labels, and replaces the provisional `mbox:` label and thread ids. The Takeout format is not verified on real mail yet. [The spec](docs/SPEC.md) section 4.1 has the rules.
+
 ## How agents use it
 
 The JSON CLI is `python3 -m mailcrawl`. Search returns untrusted message text. A later phase plans a read-only MCP server. `skills/mailcrawl/SKILL.md` states the boundary.
