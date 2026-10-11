@@ -1,0 +1,25 @@
+---
+description: pstack per-role model choices (overrides skill defaults)
+alwaysApply: true
+---
+# pstack model configuration. One line per role. Delete a line to fall back to the skill default.
+# `inherit-parent` or `auto` as a value: the role runs on the parent chat model (omit Task `model`). Alias entries in a panel list still count toward its fan-out.
+# budget: small (medium)
+# Pro+: Cursor pool = Composer + Grok; Other Models = Claude (Haiku cheap, Opus quality). No Fable, no Sol. Shared across all of Vitor's Projects (2026-10-08).
+feature, refactoring: composer-2.5-fast
+bug-fix: claude-haiku-5-5-medium
+perf-issue: grok-4.7-medium-fast
+hillclimb: composer-2.5-fast
+judgment and prose: claude-opus-5-5-medium
+hardest tasks: claude-opus-5-5-medium
+how explorer: claude-haiku-5-5-medium
+how explainer: claude-opus-5-5-medium
+why investigators: grok-4.7-medium-fast
+why synthesizer: claude-opus-5-5-medium
+reflect tooling: composer-2.5-fast
+reflect judgment, divergent, synthesizer: claude-opus-5-5-medium
+arena runners: composer-2.5-fast, claude-haiku-5-5-medium, grok-4.7-medium-fast
+arena cross-judge pool: claude-opus-5-5-medium, grok-4.7-medium-fast
+swarm workers: composer-2.5-fast
+architect runners: composer-2.5-fast, claude-haiku-5-5-medium, grok-4.7-medium-fast
+interrogate reviewers: claude-haiku-5-5-medium, composer-2.5-fast
