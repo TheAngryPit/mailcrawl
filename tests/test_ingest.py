@@ -64,11 +64,23 @@ class ImportFixtureTest(unittest.TestCase):
             self.assertEqual(second.n_dup, 2)
             self.assertEqual(ordered_row_dump_hash(conn), digest)
 
-            body = conn.execute(
-                "SELECT body_text FROM messages WHERE gmail_message_id = 'fixture-001'"
-            ).fetchone()[0]
-            self.assertIn("> quoted line stays", body)
-            self.assertIn("-- \nAda Fixture", body)
+            raw, body = conn.execute(
+                """
+                SELECT body_text_raw, body_text FROM messages
+                WHERE gmail_message_id = 'fixture-001'
+                """
+            ).fetchone()
+            self.assertIn("> quoted line stays", raw)
+            self.assertIn("-- \nAda Fixture", raw)
+            self.assertEqual(body, "This body is fake fixture text.")
+            quoted = conn.execute(
+                "SELECT rowid FROM msg_fts WHERE msg_fts MATCH 'quoted'"
+            ).fetchone()
+            self.assertIsNone(quoted)
+            kept = conn.execute(
+                "SELECT rowid FROM msg_fts WHERE msg_fts MATCH 'fake'"
+            ).fetchone()
+            self.assertIsNotNone(kept)
 
             norm = conn.execute(
                 "SELECT subject_norm FROM threads WHERE gmail_thread_id = 'thread-002'"

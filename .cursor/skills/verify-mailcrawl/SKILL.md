@@ -1,6 +1,6 @@
 ---
 name: verify-mailcrawl
-description: Verify mailcrawl repo health (required docs, CI wiring, secrets and forbidden paths, SPEC integrity), drive the scaffold headless proof, and drive native gog import on the synthetic fixture. Use before shipping doc or CI changes, or when proving make check, scripts/proof.sh, or import of a gog export that has no export.json.
+description: Verify mailcrawl repo health (required docs, CI wiring, secrets and forbidden paths, SPEC integrity), drive the scaffold headless proof, drive native gog import on the synthetic fixture, and drive body cleaning (raw text kept, cleaned text indexed). Use before shipping doc or CI changes, or when proving make check, scripts/proof.sh, import of a gog export that has no export.json, or quote stripping.
 ---
 
 # verify-mailcrawl
@@ -18,6 +18,8 @@ make check && scripts/proof.sh
 That run writes `proof/summary.json` and `proof/*.log` (gitignored). It covers the phase 1 checks in [docs/SPEC.md](../../../docs/SPEC.md) section **5**, including import, FTS search, and the JSON CLI against synthetic fixtures.
 
 Native gog import, a directory with `labels.json` and `messages/index.jsonl` and no `export.json`, is a separate drive. See [native-gog-import](./features/native-gog-import.md).
+
+Body cleaning stores `body_text_raw`, indexes the cleaned `body_text`, and migrates to schema v2. See [body-clean](./features/body-clean.md).
 
 ## Launch
 
@@ -69,6 +71,12 @@ To drive native gog import:
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature native-gog-import
 ```
 
+To drive body cleaning:
+
+```bash
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature body-clean
+```
+
 ## Evidence
 
 Capture proof outside gitignored `proof/` so cleanup does not erase it.
@@ -101,6 +109,7 @@ test -f "$EVIDENCE_DIR/summary.txt" && test -f "$EVIDENCE_DIR/doctor.log"
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" doctor
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature scaffold-headless-proof
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature native-gog-import
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature body-clean
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" cleanup
 ```
 

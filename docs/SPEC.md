@@ -1,11 +1,11 @@
 # mailcrawl: spec v0
 
-Status: phase 1 is in the tree. Schema v1, idempotent import, FTS search, and the JSON CLI. Repo: `TheAngryPit/mailcrawl`. License: MIT.
+Status: schema v2 is in the tree. Idempotent import, cleaned `body_text`, FTS search, and the JSON CLI. Repo: `TheAngryPit/mailcrawl`. License: MIT.
 
 **Local-only.** mailcrawl archives mail that is already on disk. It does not open a network connection, does not read credentials, and does not write to Gmail. Unknown export shapes fail closed.
 
 ## 1. What it is
-A local-first, read-only archive of your mail. Phase 1 is a Python prototype: a SQLite schema, an idempotent import of a gog export, FTS5, a JSON CLI, and fixture tests. This revision adds schema v1, an idempotent import of the v0 fixture contract, FTS search, a JSON CLI, and a reader for a gog backup plaintext export.
+A local-first, read-only archive of your mail. The prototype is Python: a SQLite schema, an idempotent import of a gog export, FTS5, a JSON CLI, and fixture tests. This revision adds schema v2, keeps the original body beside the cleaned body, and indexes only the cleaned text.
 
 No servers, no cloud copy, no writes back to Gmail. The program never runs `gog`. No language model runs on the crawl path.
 
@@ -27,7 +27,7 @@ scripts/proof.sh                 # scaffold proof, temp HOME, no network
 mailcrawl/contract.py            # v0 fixture contract
 mailcrawl/gognative.py           # gog backup plaintext export
 mailcrawl/eml.py                 # RFC822 parse for that export
-mailcrawl/schema.py              # schema v1 DDL
+mailcrawl/schema.py              # schema v2 DDL
 mailcrawl/store.py               # open one account database and migrate it
 mailcrawl/ingest.py              # idempotent gog-export import
 mailcrawl/search.py              # FTS search
@@ -43,9 +43,9 @@ Phase 1 language is Python. A Go port is later, after the prototype settles. Thi
 ## 4. Phase 1 contract
 Phase 1 is read-only Python and it does all of the following:
 
-- Create SQLite schema v1 for one local archive. `mailcrawl/schema.py` migrates an empty database to `user_version` 1.
+- Create SQLite schema v2 for one local archive. `mailcrawl/schema.py` migrates an empty database to `user_version` 2. A database at `user_version=1` gains `body_text_raw`, a cleaned `body_text`, a rebuilt `msg_fts`, and the empty tables `decisions`, `sender_decisions`, and `thread_mutes`.
 - Import a gog export idempotently on `(account_id, gmail_message_id)`. `mailcrawl import gog-export` does that for the fixture contract and for a gog backup plaintext export.
-- Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`. Import writes `msg_fts`. `mailcrawl search` reads it.
+- Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`. Import writes `msg_fts` from the cleaned body. `mailcrawl search` reads it.
 - Speak JSON on the CLI. `init`, `import`, and `search` accept `--json` before the command.
 - Test against synthetic fixtures only.
 
@@ -73,39 +73,44 @@ make check && scripts/proof.sh
 9. Source fixture hashes are unchanged after import and search.
 10. A `mailcrawl.gog-export.v0` document that lacks any of the four required keys fails closed with `unsupported_schema`.
 11. The synthetic native gog export imports, a second import counts every row as a duplicate, and `search reuniao` finds `reunião` in that export.
+12. For the v0 fixture message that contains a `>` quote and a `-- ` signature, `body_text_raw` keeps both, `body_text` keeps only the sentence above them, and `search quoted` does not return that message. `search fake` does.
 
 ## 6. Closed decisions
 These points are closed.
 
-1. Schema v1 (`user_version=1`) contains only the tables ingest and FTS write. Those tables are `accounts`, `labels`, `senders`, `threads`, `messages`, `headers`, `message_labels`, `attachments`, `cursors`, `import_runs`, `ledger`, and `msg_fts`. Decisions, plans, embeddings, and clips arrive in a later migration when code writes them. v1 does not create empty tables for them.
+1. Schema v1 (`user_version=1`) contained the ingest and FTS tables `accounts`, `labels`, `senders`, `threads`, `messages`, `headers`, `message_labels`, `attachments`, `cursors`, `import_runs`, `ledger`, and `msg_fts`. A database at `user_version=1` migrates to schema v2. Schema v2 adds `body_text_raw` and the empty tables `decisions`, `sender_decisions`, and `thread_mutes`. It does not create `plans`, `proposals`, embeddings, or clips.
 2. The account alias is `personal`. `pessoal` is an optional CLI input alias that selects `personal`. The database file is `personal.db`.
 3. `provenance_hash` is the SHA-256 of five lines. The lines are `gog`, the stable alias, `gmail_message_id`, `raw_sha256`, and the mailcrawl version. The hash does not use `account_id`. The version is the package semver plus a short git SHA when git can see one, for example `0.1.0+abc1234`.
 4. The fixture contract stays `mailcrawl.gog-export.v0`. The four required keys are message id, thread id, label ids, and date. A document that lacks any of those four fails closed with `unsupported_schema`. Other listed fields are optional and stay NULL when the export omits them. Unknown keys go to one raw JSON field. Fixture key names belong to this contract. They are not gog field names. The gog plaintext export is a second layout, read from gogcli `gmailExportIndexEntry` and `gmailbackup.Label`. Index fields are `id`, `threadId`, `historyId`, `internalDate`, `labelIds`, `sizeEstimate`, `subject`, `from`, `to`, `cc`, `date`, and `eml`. `to` and `cc` are arrays of strings. `internalDate` is unix milliseconds and is stored as unix seconds. `labels.json` is an array. Each entry uses `id`, `name`, and `type` (`system` or `user`). Message ids, thread ids, and label names are stored as written. A record needs `id`, `threadId`, and either `internalDate` or `date`, plus an `eml` path. `labelIds` may be absent. Unknown index keys go to the same raw JSON field. `markdown` and `attachments` are known and are not a second body. Markdown-only records, which have no `eml`, are rejected.
-5. `body_text` is the `text/plain` part. When the message has no plain part, `body_text` is the HTML part converted to text. The stored text includes quotations and signatures. Quote and signature stripping is phase 2. Phase 2 keeps this original text.
-6. `msg_fts` indexes `subject`, `body_text`, `from_hdr`, and `attachment_text`. The tokenizer is `unicode61 remove_diacritics 2`. `attachment_text` stays empty, and `extract_status` stays `pending`, unless the MIME part is real text. A text part stores the decoded text with `extract_status` `ok`. Binary parts are not decoded as text. Addresses in the local index stay on the machine.
+5. `body_text_raw` is the phase 1 text, untouched. That text is the `text/plain` part, or the HTML part converted to text when the message has no plain part. `body_text` is that text after cleaning. Cleaning removes a line that starts with `>` once leading spaces are ignored. It also cuts from the first clear marker through the end of the text. The markers are a line `On … wrote:`, a line `Em … escreveu:`, a line `-----Original Message-----`, an Outlook header block that starts at `From:` or `De:` when `Sent:` or `Enviada:` appears within the next eight lines, and a signature that starts at a line that is exactly `-- ` (two dashes and a space). A line that is `--` with no space stays. Patterns are Portuguese and English only. When unsure, do not cut. The `.eml` file at `raw_path` stays the source of truth. A v2 migration copies the old `body_text` into `body_text_raw` and then cleans `body_text`.
+6. `msg_fts` indexes `subject`, the cleaned `body_text`, `from_hdr`, and `attachment_text`. It does not index `body_text_raw`. The tokenizer is `unicode61 remove_diacritics 2`. `attachment_text` stays empty, and `extract_status` stays `pending`, unless the MIME part is real text. A text part stores the decoded text with `extract_status` `ok`. Binary parts are not decoded as text. Addresses in the local index stay on the machine.
 7. `init` creates one database per alias, named `<alias>.db`. It does not create `index.db` or `reads.db`.
 8. Real label names and `taxonomy-account-maps.json` stay off this repository. Tests load `testdata/catalogue/taxonomy.synthetic.json`. A real catalogue is a local file passed with `--taxonomy` or the config key `taxonomy`.
 9. `headers` stores an allow-list, in lower case. The names are `list-unsubscribe`, `list-unsubscribe-post`, `list-id`, `precedence`, `auto-submitted`, `x-mailer`, `feedback-id`, `message-id`, `in-reply-to`, `references`, `reply-to`, `return-path`, `authentication-results`, and `received-spf`. Other headers are dropped.
 10. `snippet` and `gmail_history_id` are NULL when the export omits them. `subject_norm` trims the subject, removes a leading run of `Re:`, `Fwd:`, and `Fw:` without regard to case, and collapses whitespace. It does not fold accents.
+11. Attachment parsing handles `text/plain` and `text/html` only. PDF, OCR, Office, `ics`, `attachment_fields`, and image embeddings stay behind an interface with no required implementation. An unsupported type is `unsupported`. A missing backend is `skipped`. A row with no `file_sha256` is `skipped` with reason `no_bytes`. OCR thresholds are v0 constants: fewer than 25 characters per page tries OCR, and `ocr_conf` below 60 is `low_confidence`. Those thresholds are exercised only when a binary exists. This revision does not add that interface yet.
+12. Rules match the keys and axes of the catalogue loaded from a local file. The repository ships a synthetic catalogue with those axes and fictional leaves. Real label names never appear in code or tests. They stay in a local file outside Git.
+13. Guards run first. A guard can only force `needs_review` or block `noise` and `resolved`. Later rules choose the other states. `STARRED` and `IMPORTANT` are Gmail system label ids.
+14. These definitions are v0, tunable, and marked v0 in code. A human participant is a sender whose origin label is human. When that label is missing, the sender has no `List-Unsubscribe`, no `Precedence` of `bulk` or `list`, and no `Auto-Submitted` other than `no`. The label beats the header. Unrecognized Account & Security means a sender with no `sender_decisions` row. The read-list is `sender_decisions.route = 'read'`. There is no extra domain file. `read_later_expiry_days` is 30, and expiry is tested on fixtures. Open questions, concrete tasks, and closing language are short clue lists in Portuguese and English. They live in a configuration file, not in the engine. The minimum question clues are a `?` at the end of a sentence outside a quote, or a start of `can you`, `could you`, `podes`, `consegues`, or `pode`. The minimum task clues are `please`, `por favor`, `preciso que`, `need you to`, and `can you send`. The minimum closing clues are `thanks`, `obrigado`, `cumprimentos`, `best regards`, `perfect`, and `combinado`. That list is not final. The client plus-three-business-days path is unimplemented. Everyone uses plus seven days. `sender_decisions.client_sla_days` exists and is NULL by default. `sender_decisions.route` may be `imbox`, `feed`, `paper_trail`, or `read`. Priority comes from `sender_decisions.priority`. When that row is missing, priority is NULL.
+15. Coverage is the fraction of threads with a current decision. `needs_review` counts as covered. The report is counts by `next_state` and by `rule_id`. A sample of 100 and a 2% threshold are not a fixture gate.
+16. Dry-run prints counts only: state, label, sender, month, and rule. It does not write a plan file and it does not touch Gmail. Plans are phase 4.
+17. `rules_version` is `rules-v0`. A change to a rule, a constant, or a list increments it. `evidence` stores ids and rule or label names only, never email text.
+18. No language model runs on the crawl. The first matching rule wins. There is no Gmail write, no network, and no `gog`.
 
 ## 7. Scope
-**In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, schema v1, `init`, idempotent `import gog-export` for the fixture contract and for a gog backup plaintext export, FTS search, and the phase 1 proof.
+**In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, schema v2, body cleaning, `init`, idempotent `import gog-export` for the fixture contract and for a gog backup plaintext export, FTS search over the cleaned body, and the phase 1 proof.
 
-**Out of scope:** embeddings, label apply, Gmail writes, running `gog`, a language model on the crawl path, markdown-only gog exports, and the Go port. Section 8 lists later phases. Those phases are planned and out of this revision. Section 4 records a 25-message thehive smoke import. A full mailbox import is phase 2, not this revision.
+**Out of scope:** the attachment interface, rules 0 to 8, `stats`, and dry-run counts are closed in section 6 and land in later phase 2 revisions. Embeddings, label apply, Gmail writes, running `gog`, a language model on the crawl path, a full thehive backup, cache deletion, markdown-only gog exports, and the Go port stay out. Section 4 records a 25-message thehive smoke import. A full mailbox import is not this revision.
 
 ## 8. Later phases
-Status: PLANNED. This section is out of the current scope. Sections 4 to 7 describe the work this repository does now. The phases below are not requirements of this revision.
+Body cleaning and schema v2 are in this revision. Sections 4 to 7 describe that work. The rest of phase 2 is specified in section 6 points 11 to 18 and is not implemented here.
 
 An inference stays marked as still to be decided. An open approval stays marked as still to be decided.
 
-Deterministic triage in phase 2 uses rules 0 to 8 and no model. No language model runs on the crawl path.
+### Phase 2. Cleaned text, parser interface, rules, and counts
+Body cleaning is done. The remaining work is the attachment parser and OCR behind an interface, deterministic rules 0 to 8 with `rules_version` `rules-v0` and no model, and `stats` plus dry-run counts. Dry-run prints counts only. It writes no plan file and it does not touch Gmail.
 
-### Phase 2. Full thehive backup and export
-The work is a full thehive backup and export, the parser and OCR, rules 0 to 8, `stats`, and dry-run counts. The dry-run writes nothing.
-
-Acceptance is coverage of 100% of Gmail threads. The known 404 stays outside that coverage. Acceptance also includes a coverage report and a review of 100 sample decisions.
-
-An error under 2% on that sample is an inference. It is still to be decided. The full thehive backup needs Pit's approval. The cache-deletion policy needs Pit's approval. Both approvals are still to be decided.
+A full thehive backup is not part of phase 2. Cache deletion is not part of phase 2. A sample of 100 and an error under 2% are not a fixture gate. Coverage is the counts in section 6 point 15.
 
 ### Phase 3. Embeddings
 The local baseline is EmbeddingGemma 2, stored with sqlite-vec at 256 or 768 dimensions. The choice of model and dimension is still open. `mailcrawl embed` is a separate step outside the crawl path.

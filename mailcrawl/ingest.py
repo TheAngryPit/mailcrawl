@@ -18,7 +18,7 @@ from mailcrawl.contract import (
 )
 from mailcrawl.gognative import load_native
 from mailcrawl.paths import UsageError
-from mailcrawl.textnorm import parse_address, subject_norm
+from mailcrawl.textnorm import clean_body, parse_address, subject_norm
 from mailcrawl.version import mailcrawl_version, provenance_hash
 
 
@@ -216,15 +216,17 @@ def _upsert_message(
     sender_id, address = _ensure_sender(conn, account_id, message.from_hdr)
     is_from_me = 1 if address is not None and address == me else 0
     prov = provenance_hash(alias, message.gmail_message_id, message.raw_sha256, version)
+    raw_body = message.body_text
+    cleaned = clean_body(raw_body)
     inserted = conn.execute(
         """
         INSERT INTO messages(
           account_id, gmail_message_id, thread_pk, gmail_history_id, internal_date,
           rfc822_message_id, in_reply_to, references_hdr, sender_id,
           from_hdr, to_hdr, cc_hdr, bcc_hdr, reply_to_hdr,
-          subject, snippet, body_text, size_bytes, is_from_me,
+          subject, snippet, body_text_raw, body_text, size_bytes, is_from_me,
           raw_path, raw_sha256, raw_json, auth_results, provenance_hash, imported_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(account_id, gmail_message_id) DO NOTHING
         RETURNING msg_pk
         """,
@@ -245,7 +247,8 @@ def _upsert_message(
             message.reply_to_hdr,
             message.subject,
             message.snippet,
-            message.body_text,
+            raw_body,
+            cleaned,
             message.size_bytes,
             is_from_me,
             message.raw_path,
@@ -298,7 +301,7 @@ def _write_children(
         (
             msg_pk,
             message.subject or "",
-            message.body_text or "",
+            clean_body(message.body_text) or "",
             message.from_hdr or "",
             attachment_text,
         ),

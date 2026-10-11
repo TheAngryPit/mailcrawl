@@ -196,6 +196,49 @@ if not any("reunião" in (hit.get("snippet") or "") for hit in hits):
     raise SystemExit(1)
 PY
 
+log "check: cleaned body is indexed and the raw quote is not"
+quoted_out="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json search quoted --account personal
+)"
+echo "${quoted_out}" | tee "${PROOF_DIR}/search-quoted.log"
+fake_out="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json search fake --account personal
+)"
+echo "${fake_out}" | tee "${PROOF_DIR}/search-fake.log"
+DB_PATH="${DB}" QUOTED_JSON="${quoted_out}" FAKE_JSON="${fake_out}" python3 <<'PY' || fail "cleaned body still indexes the quote"
+import json, os, sqlite3
+quoted = json.loads(os.environ["QUOTED_JSON"])
+fake = json.loads(os.environ["FAKE_JSON"])
+if quoted.get("hits"):
+    raise SystemExit("quoted search returned hits")
+ids = [hit.get("gmail_message_id") for hit in fake.get("hits") or []]
+if "fixture-001" not in ids:
+    raise SystemExit("fake search missed fixture-001")
+conn = sqlite3.connect(os.environ["DB_PATH"])
+try:
+    raw, body = conn.execute(
+        "SELECT body_text_raw, body_text FROM messages WHERE gmail_message_id = 'fixture-001'"
+    ).fetchone()
+    if "> quoted line stays" not in raw or "-- \nAda Fixture" not in raw:
+        raise SystemExit("raw body dropped the quote or signature")
+    if body != "This body is fake fixture text.":
+        raise SystemExit("cleaned body is not the kept sentence")
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version != 2:
+        raise SystemExit(f"user_version {version}")
+    names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    for table in ("decisions", "sender_decisions", "thread_mutes"):
+        if table not in names:
+            raise SystemExit(f"missing {table}")
+    for banned in ("plans", "proposals", "embeddings", "clips"):
+        if banned in names:
+            raise SystemExit(f"unexpected {banned}")
+finally:
+    conn.close()
+PY
+
 log "check: native gog export imports without export.json"
 NATIVE="${REPO_ROOT}/testdata/fixtures/gog-export/native"
 (
@@ -293,6 +336,7 @@ doc = {
         "import_count_matches_manifest",
         "reimport_row_dump_hash",
         "search_reuniao",
+        "body_text_cleaned",
         "native_gog_export",
         "missing_required_key_unsupported_schema",
         "fixture_sha256_unchanged",
