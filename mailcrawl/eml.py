@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import binascii
 import email
 import hashlib
 from email import policy
@@ -29,7 +30,36 @@ def eml_record(
     fallback: dict[str, str | None] | None = None,
 ) -> MessageRec:
     """Build a message record from RFC822 bytes. Header values beat ``fallback``."""
-    parsed = email.message_from_bytes(raw, policy=policy.default)
+    return parsed_record(
+        email.message_from_bytes(raw, policy=policy.default),
+        raw_sha256=hashlib.sha256(raw).hexdigest(),
+        size_bytes=len(raw) if size_bytes is None else size_bytes,
+        gmail_message_id=gmail_message_id,
+        gmail_thread_id=gmail_thread_id,
+        label_ids=label_ids,
+        internal_date=internal_date,
+        raw_path=raw_path,
+        gmail_history_id=gmail_history_id,
+        raw_json=raw_json,
+        fallback=fallback,
+    )
+
+
+def parsed_record(
+    parsed: EmailMessage,
+    *,
+    raw_sha256: str,
+    size_bytes: int,
+    gmail_message_id: str,
+    gmail_thread_id: str,
+    label_ids: tuple[str, ...],
+    internal_date: int,
+    raw_path: str,
+    gmail_history_id: str | None = None,
+    raw_json: str | None = None,
+    fallback: dict[str, str | None] | None = None,
+) -> MessageRec:
+    """Build a message record from a parsed message whose raw bytes were hashed while streaming."""
     body, headers, parts = view_message(parsed)
     spare = fallback or {}
     return MessageRec(
@@ -50,9 +80,9 @@ def eml_record(
         headers=tuple(sorted(headers.items())),
         attachments=parts,
         raw_json=raw_json,
-        raw_sha256=hashlib.sha256(raw).hexdigest(),
+        raw_sha256=raw_sha256,
         raw_path=raw_path,
-        size_bytes=len(raw) if size_bytes is None else size_bytes,
+        size_bytes=size_bytes,
         in_reply_to=headers.get("in-reply-to"),
         references_hdr=headers.get("references"),
         auth_results=headers.get("authentication-results"),
@@ -138,18 +168,35 @@ def header_text(message: EmailMessage, name: str) -> str | None:
     return text
 
 
+def _payload(part: Message) -> bytes | None:
+    """Decode base64 straight from the stored text.
+
+    ``get_payload(decode=True)`` re-encodes the text, splits it into lines, and
+    joins it again before decoding, which peaks near six times the attachment.
+    Anything the fast path rejects goes through the standard library unchanged.
+    """
+    if str(part.get("content-transfer-encoding", "")).lower() == "base64":
+        text = part.get_payload()
+        if isinstance(text, str):
+            try:
+                return binascii.a2b_base64(text)
+            except (binascii.Error, ValueError):
+                pass
+    payload = part.get_payload(decode=True)
+    return payload if isinstance(payload, bytes) else None
+
+
 def _attachment(part: Message) -> AttachmentRec:
     filename = part.get_filename()
     mime_type = part.get_content_type()
-    payload = part.get_payload(decode=True)
-    payload_bytes = payload if isinstance(payload, bytes) else None
+    payload_bytes = _payload(part)
     size = len(payload_bytes) if payload_bytes is not None else None
     content_id = _content_id(part.get("content-id"))
     inline = 1 if part.get_content_disposition() == "inline" else 0
     parsed = parse_attachment(
         mime_type,
         payload_bytes,
-        decoded_text=_text_content(part),
+        decoded_text=_decoded_text(part, payload_bytes),
     )
     return AttachmentRec(
         filename,
@@ -179,6 +226,16 @@ def _text_content(part: Message) -> str | None:
     if not isinstance(content, str):
         return None
     return content
+
+
+def _decoded_text(part: Message, payload: bytes | None) -> str | None:
+    """``get_content()`` for a text part, without decoding the transfer encoding a second time."""
+    if part.get_content_maintype() != "text" or payload is None:
+        return None
+    try:
+        return payload.decode(str(part.get_param("charset", "ASCII")), errors="replace")
+    except (LookupError, TypeError):
+        return None
 
 
 def _content_id(value: object) -> str | None:
