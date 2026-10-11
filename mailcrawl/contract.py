@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from email import policy
 from pathlib import Path
 
+from mailcrawl.extract import PARSER_VERSION
 from mailcrawl.schema import HEADER_ALLOW
 from mailcrawl.textnorm import html_to_text, parse_date
 
@@ -100,6 +101,12 @@ class AttachmentRec:
     extract_status: str = "pending"
     content_id: str | None = None
     is_inline: int = 0
+    extract_method: str | None = None
+    file_sha256: str | None = None
+    ocr_status: str = "not_needed"
+    ocr_conf: float | None = None
+    page_count: int | None = None
+    parser_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -376,6 +383,10 @@ def _attachments(
                 mime_type=_optional_str(item.get("example_mime")),
                 size_bytes=size if isinstance(size, int) else None,
                 attachment_id=_optional_str(item.get("example_attachment_id")),
+                extract_status="skipped",
+                extract_method="no_bytes",
+                ocr_status="not_needed",
+                parser_version=PARSER_VERSION,
             )
         )
         extra = {key: val for key, val in item.items() if key not in ATTACHMENT_KNOWN}

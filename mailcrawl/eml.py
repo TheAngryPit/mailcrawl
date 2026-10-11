@@ -5,6 +5,7 @@ from __future__ import annotations
 from email.message import EmailMessage, Message
 
 from mailcrawl.contract import AttachmentRec
+from mailcrawl.extract import parse_attachment
 from mailcrawl.schema import HEADER_ALLOW
 from mailcrawl.textnorm import html_to_text
 
@@ -90,43 +91,31 @@ def _attachment(part: Message) -> AttachmentRec:
     filename = part.get_filename()
     mime_type = part.get_content_type()
     payload = part.get_payload(decode=True)
-    size = len(payload) if isinstance(payload, bytes) else None
+    payload_bytes = payload if isinstance(payload, bytes) else None
+    size = len(payload_bytes) if payload_bytes is not None else None
     content_id = _content_id(part.get("content-id"))
     inline = 1 if part.get_content_disposition() == "inline" else 0
-    text = _attachment_text(part)
-    if text:
-        return AttachmentRec(
-            filename,
-            mime_type,
-            size,
-            None,
-            text,
-            "ok",
-            content_id,
-            inline,
-        )
+    parsed = parse_attachment(
+        mime_type,
+        payload_bytes,
+        decoded_text=_text_content(part),
+    )
     return AttachmentRec(
         filename,
         mime_type,
         size,
         None,
-        None,
-        "pending",
+        parsed.extracted_text,
+        parsed.extract_status,
         content_id,
         inline,
+        parsed.extract_method,
+        parsed.file_sha256,
+        parsed.ocr_status,
+        parsed.ocr_conf,
+        parsed.page_count,
+        parsed.parser_version,
     )
-
-
-def _attachment_text(part: Message) -> str | None:
-    if part.get_content_maintype() != "text":
-        return None
-    text = _text_content(part)
-    if text is None or not text.strip():
-        return None
-    if part.get_content_type() == "text/html":
-        converted = html_to_text(text)
-        return converted or None
-    return text
 
 
 def _text_content(part: Message) -> str | None:

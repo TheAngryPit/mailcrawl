@@ -122,7 +122,8 @@ class NativeImportTest(unittest.TestCase):
 
             parts = conn.execute(
                 """
-                SELECT filename, mime_type, attachments.size_bytes, extract_status, extracted_text
+                SELECT filename, mime_type, attachments.size_bytes, extract_status,
+                       extracted_text, file_sha256, extract_method
                 FROM attachments
                 JOIN messages ON messages.msg_pk = attachments.msg_pk
                 WHERE messages.gmail_message_id = 'msg-parts'
@@ -134,8 +135,11 @@ class NativeImportTest(unittest.TestCase):
             text = parts[1]
             self.assertEqual(binary["mime_type"], "application/octet-stream")
             self.assertEqual(binary["size_bytes"], 17)
-            self.assertEqual(binary["extract_status"], "pending")
+            self.assertEqual(binary["extract_status"], "unsupported")
             self.assertIsNone(binary["extracted_text"])
+            self.assertIsNone(binary["extract_method"])
+            self.assertEqual(len(binary["file_sha256"]), 64)
+            self.assertEqual(len(text["file_sha256"]), 64)
             self.assertEqual(text["extract_status"], "ok")
             self.assertIn("attachmenttoken", text["extracted_text"])
             body = conn.execute(

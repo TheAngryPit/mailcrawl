@@ -285,6 +285,62 @@ if doc.get("n_dup") != 3 or doc.get("n_new") != 0:
     raise SystemExit(1)
 PY
 
+log "check: attachment parser skips missing bytes and unknown types"
+PERSONAL_DB="${DB}" HIVE_DB="${DATA_DIR}/thehive.db" python3 - <<'PY' || fail "attachment parser statuses drifted"
+import os, sqlite3
+from mailcrawl.extract import BackendRead, parse_attachment
+
+personal = sqlite3.connect(os.environ["PERSONAL_DB"])
+try:
+    row = personal.execute(
+        "SELECT extract_status, extract_method, file_sha256 FROM attachments"
+    ).fetchone()
+finally:
+    personal.close()
+if row != ("skipped", "no_bytes", None):
+    raise SystemExit(f"v0 attachment {row}")
+
+hive = sqlite3.connect(os.environ["HIVE_DB"])
+try:
+    rows = {
+        name: (status, method, digest, text)
+        for name, status, method, digest, text in hive.execute(
+            """
+            SELECT filename, extract_status, extract_method, file_sha256, extracted_text
+            FROM attachments
+            """
+        )
+    }
+    marker = hive.execute(
+        "SELECT count(*) FROM msg_fts WHERE msg_fts MATCH 'ZZBINMARKERZZ'"
+    ).fetchone()[0]
+finally:
+    hive.close()
+if rows["note.txt"][0] != "ok" or "attachmenttoken" not in (rows["note.txt"][3] or ""):
+    raise SystemExit(f"text attachment {rows.get('note.txt')}")
+if rows["blob.bin"][0] != "unsupported" or rows["blob.bin"][3] is not None:
+    raise SystemExit(f"binary attachment {rows.get('blob.bin')}")
+if not rows["note.txt"][2] or not rows["blob.bin"][2]:
+    raise SystemExit("missing file_sha256")
+if marker != 0:
+    raise SystemExit("binary bytes were indexed")
+
+class Present:
+    def available(self, kind: str) -> bool:
+        return True
+    def read(self, kind: str, payload: bytes) -> BackendRead:
+        return BackendRead("x" * 24, 1, 59.0)
+
+low = parse_attachment("application/pdf", b"%PDF", backend=Present())
+if low.ocr_status != "low_confidence" or low.extract_status != "ok":
+    raise SystemExit(f"threshold {low}")
+missing = parse_attachment("application/pdf", b"%PDF")
+if missing.extract_status != "skipped" or missing.ocr_status != "not_needed":
+    raise SystemExit(f"default backend {missing}")
+if missing.extract_method != "pdf":
+    raise SystemExit(f"default method {missing.extract_method}")
+PY
+
 log "check: missing required keys fail closed"
 for key in example_message_id example_thread_id example_label_ids example_date; do
   broken="$(mktemp -d)"
@@ -338,6 +394,7 @@ doc = {
         "search_reuniao",
         "body_text_cleaned",
         "native_gog_export",
+        "attachment_parse",
         "missing_required_key_unsupported_schema",
         "fixture_sha256_unchanged",
     ],
