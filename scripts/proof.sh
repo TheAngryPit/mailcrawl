@@ -431,6 +431,51 @@ PY
 )"
 [[ "${DECISIONS}" == "2" ]] || fail "rules rerun added decisions"
 
+log "check: stats and dry-run print counts"
+stats_out="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json stats --account vcl
+)"
+dry_out="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json dry-run --account vcl
+)"
+echo "${stats_out}" | tee "${PROOF_DIR}/stats.log"
+echo "${dry_out}" | tee "${PROOF_DIR}/dry-run.log"
+printf '%s%s' "${stats_out}" "${dry_out}" | grep -q secretbodyqx && fail "counts included message text"
+printf '%s%s' "${stats_out}" "${dry_out}" | grep -q '@' && fail "counts included an address"
+STATS_JSON="${stats_out}" DRY_JSON="${dry_out}" python3 <<'PY' || fail "stats or dry-run counts drifted"
+import json, os
+stats = json.loads(os.environ["STATS_JSON"])
+dry = json.loads(os.environ["DRY_JSON"])
+if stats.get("messages") != 2 or stats.get("threads") != 2 or stats.get("senders") != 2:
+    raise SystemExit(stats)
+if stats.get("by_month") != {"2023-11": 2}:
+    raise SystemExit(stats.get("by_month"))
+if dry.get("by_state") != {"needs_review": 1, "reply": 1}:
+    raise SystemExit(dry.get("by_state"))
+if dry.get("by_rule") != {"0": 1, "5": 1}:
+    raise SystemExit(dry.get("by_rule"))
+if dry.get("by_label") != {"STARRED": 1}:
+    raise SystemExit(dry.get("by_label"))
+if dry.get("by_sender") != {"1": 1, "2": 1}:
+    raise SystemExit(dry.get("by_sender"))
+if dry.get("by_month") != {"2023-11": 2}:
+    raise SystemExit(dry.get("by_month"))
+PY
+DECISIONS_AFTER="$(python3 - "${VCL_DB}" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+print(conn.execute("SELECT count(*) FROM decisions").fetchone()[0])
+plans = conn.execute(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plans'"
+).fetchone()
+if plans is not None:
+    raise SystemExit("plans table exists")
+PY
+)"
+[[ "${DECISIONS_AFTER}" == "2" ]] || fail "stats or dry-run changed decisions"
+
 log "check: missing required keys fail closed"
 for key in example_message_id example_thread_id example_label_ids example_date; do
   broken="$(mktemp -d)"
@@ -486,6 +531,7 @@ doc = {
         "native_gog_export",
         "attachment_parse",
         "rules_v0",
+        "stats_dry_run",
         "missing_required_key_unsupported_schema",
         "fixture_sha256_unchanged",
     ],

@@ -23,6 +23,10 @@ rules_runnable() {
   [[ -f "$REPO_ROOT/testdata/rules/rules-v0.json" ]]
 }
 
+stats_runnable() {
+  rules_runnable
+}
+
 attachment_parse_runnable() {
   body_clean_runnable && native_fixture_runnable
 }
@@ -493,6 +497,117 @@ PY
   trap - EXIT
 }
 
+drive_stats_dry_run() {
+  if ! stats_runnable; then
+    log "stats dry-run: not runnable"
+    return 2
+  fi
+  mkdir -p "$SCRATCH_DIR"
+  local home
+  home="$(mktemp -d "$SCRATCH_DIR/stats-home.XXXXXX")"
+  STATS_HOME="$home"
+  trap 'rm -rf "$STATS_HOME"' EXIT
+  mailcrawl_in "$home" --json init --account vcl --email ada@example.com >/dev/null
+  local db="$home/.local/share/mailcrawl/vcl.db"
+  DB_PATH="$db" python3 - <<'PY'
+import os, sqlite3
+conn = sqlite3.connect(os.environ["DB_PATH"])
+conn.execute("PRAGMA foreign_keys = ON")
+account = conn.execute("SELECT account_id FROM accounts").fetchone()[0]
+now = 1700000000
+
+def add(number, body, starred):
+    conn.execute(
+        "INSERT INTO senders(account_id, address_norm, domain) VALUES (?, ?, 'example.com')",
+        (account, f"bao{number}@example.com"),
+    )
+    sender = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO threads(account_id, gmail_thread_id) VALUES (?, ?)",
+        (account, f"rules-{number}"),
+    )
+    thread = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO messages(
+          account_id, gmail_message_id, thread_pk, internal_date, sender_id,
+          body_text, is_from_me, raw_sha256, provenance_hash, imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, 'raw', 'prov', ?)
+        """,
+        (account, f"rules-msg-{number}", thread, now - 86400, sender, body, now),
+    )
+    if starred:
+        msg = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at) VALUES (?, 'STARRED', 'STARRED', 'system', ?)",
+            (account, now),
+        )
+        conn.execute(
+            "INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at) VALUES (?, ?, 'STARRED', ?)",
+            (msg, account, now),
+        )
+
+add(1, "secretbodyqx", True)
+add(2, "hello there", False)
+conn.commit()
+conn.close()
+PY
+  mailcrawl_in "$home" --json rules \
+    --account vcl \
+    --rules "$REPO_ROOT/testdata/rules/rules-v0.json" \
+    --now 1700000000 >/dev/null
+  local stats_out dry_out
+  stats_out="$(mailcrawl_in "$home" --json stats --account vcl)"
+  dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl)"
+  printf '%s\n%s\n' "$stats_out" "$dry_out"
+  if printf '%s%s' "$stats_out" "$dry_out" | grep -q secretbodyqx; then
+    log "stats dry-run: output included message text"
+    return 1
+  fi
+  if printf '%s%s' "$stats_out" "$dry_out" | grep -q '@'; then
+    log "stats dry-run: output included an address"
+    return 1
+  fi
+  STATS_JSON="$stats_out" DRY_JSON="$dry_out" python3 - <<'PY' || {
+import json, os, sys
+stats = json.loads(os.environ["STATS_JSON"])
+dry = json.loads(os.environ["DRY_JSON"])
+ok = (
+    stats.get("messages") == 2
+    and stats.get("threads") == 2
+    and stats.get("senders") == 2
+    and stats.get("by_month") == {"2023-11": 2}
+    and dry.get("by_state") == {"needs_review": 1, "reply": 1}
+    and dry.get("by_rule") == {"0": 1, "5": 1}
+    and dry.get("by_label") == {"STARRED": 1}
+    and dry.get("by_sender") == {"1": 1, "2": 1}
+    and dry.get("by_month") == {"2023-11": 2}
+)
+sys.exit(0 if ok else 1)
+PY
+    log "stats dry-run: counts drifted"
+    return 1
+  }
+  local count
+  count="$(python3 - "$db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+print(conn.execute("SELECT count(*) FROM decisions").fetchone()[0])
+plans = conn.execute(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plans'"
+).fetchone()
+if plans is not None:
+    raise SystemExit("plans")
+PY
+)"
+  if [[ "$count" != "2" ]]; then
+    log "stats dry-run: decision count changed"
+    return 1
+  fi
+  rm -rf "$STATS_HOME"
+  trap - EXIT
+}
+
 cmd_doctor() {
   mkdir -p "$EVIDENCE_DIR"
   {
@@ -527,6 +642,11 @@ cmd_doctor() {
     else
       log "rules v0: not runnable (missing testdata/rules/rules-v0.json)"
     fi
+    if stats_runnable; then
+      log "stats dry-run: runnable"
+    else
+      log "stats dry-run: not runnable (missing testdata/rules/rules-v0.json)"
+    fi
     log "doctor ok"
   } | tee "$EVIDENCE_DIR/doctor.log"
 }
@@ -551,6 +671,7 @@ cmd_drive() {
       body-clean) drive_body_clean || drive_code=$? ;;
       attachment-parse) drive_attachment_parse || drive_code=$? ;;
       rules-v0) drive_rules_v0 || drive_code=$? ;;
+      stats-dry-run) drive_stats_dry_run || drive_code=$? ;;
       *)
         log "unknown feature: $feature"
         drive_code=1

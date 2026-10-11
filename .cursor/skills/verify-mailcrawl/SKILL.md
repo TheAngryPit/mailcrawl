@@ -1,6 +1,6 @@
 ---
 name: verify-mailcrawl
-description: Verify mailcrawl repo health (required docs, CI wiring, secrets and forbidden paths, SPEC integrity), drive the scaffold headless proof, drive native gog import, drive body cleaning, drive attachment parsing, and drive rules v0. Use before shipping doc or CI changes, or when proving make check, scripts/proof.sh, a gog export with no export.json, quote stripping, attachment status, or rule counts.
+description: Verify mailcrawl repo health (required docs, CI wiring, secrets and forbidden paths, SPEC integrity), drive the scaffold headless proof, drive native gog import, drive body cleaning, drive attachment parsing, drive rules v0, and drive stats and dry-run counts. Use before shipping doc or CI changes, or when proving make check, scripts/proof.sh, a gog export with no export.json, quote stripping, attachment status, rule counts, or read-only counts.
 ---
 
 # verify-mailcrawl
@@ -24,6 +24,8 @@ Body cleaning stores `body_text_raw`, indexes the cleaned `body_text`, and migra
 Attachment parsing extracts text parts and leaves every other type behind an interface. See [attachment-parse](./features/attachment-parse.md).
 
 Rules 0 to 8 print counts and do not print message text. See [rules-v0](./features/rules-v0.md).
+
+`stats` and `dry-run` print counts and do not write a plan file. See [stats-dry-run](./features/stats-dry-run.md).
 
 ## Launch
 
@@ -93,6 +95,12 @@ To drive rules:
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature rules-v0
 ```
 
+To drive stats and dry-run:
+
+```bash
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature stats-dry-run
+```
+
 ## Evidence
 
 Capture proof outside gitignored `proof/` so cleanup does not erase it.
@@ -128,6 +136,7 @@ test -f "$EVIDENCE_DIR/summary.txt" && test -f "$EVIDENCE_DIR/doctor.log"
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature body-clean
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature attachment-parse
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature rules-v0
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature stats-dry-run
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" cleanup
 ```
 

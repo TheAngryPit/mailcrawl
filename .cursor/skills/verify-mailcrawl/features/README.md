@@ -23,6 +23,7 @@ This directory is the maintained source for verifying mailcrawl. Recipes exercis
 - Body cleaning is runnable when `testdata/fixtures/gog-export/v0/export.json` exists. Doctor reports `body clean: runnable` only in that case.
 - Attachment parsing is runnable when that v0 fixture exists and the native fixture is runnable. Doctor reports `attachment parse: runnable` only in that case.
 - Rules are runnable when `testdata/rules/rules-v0.json` exists. Doctor reports `rules v0: runnable` only in that case.
+- Stats and dry-run are runnable when that rules file exists. Doctor reports `stats dry-run: runnable` only in that case.
 
 ## Feature entry contract
 
@@ -38,3 +39,4 @@ Each feature file uses exactly four H2 sections: `Sub-features`, `How to get to 
 - [body-clean](./body-clean.md). Keep `body_text_raw`, index the cleaned `body_text`, and leave schema v2 empty of plans.
 - [attachment-parse](./attachment-parse.md). Extract text parts, skip a missing hash, and leave PDF, OCR, Office, and `ics` behind an interface.
 - [rules-v0](./rules-v0.md). Apply rules 0 to 8 and print counts. `rules_version` is `rules-v0`.
+- [stats-dry-run](./stats-dry-run.md). Print archive counts and current-decision counts. No plan file and no Gmail.

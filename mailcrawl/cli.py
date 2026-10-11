@@ -1,9 +1,10 @@
-"""JSON CLI for init, import, and search."""
+"""JSON CLI for init, import, search, rules, stats, and dry-run."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import import_gog_export
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
+from mailcrawl.report import dry_run, stats
 from mailcrawl.rules import apply_rules, load_rules
 from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
@@ -34,6 +36,10 @@ def main(argv: list[str] | None = None) -> int:
             return _search(args)
         if args.command == "rules":
             return _rules(args)
+        if args.command == "stats":
+            return _stats(args)
+        if args.command == "dry-run":
+            return _dry_run(args)
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
@@ -84,6 +90,12 @@ def _parser() -> argparse.ArgumentParser:
     rules.add_argument("--account", required=True)
     rules.add_argument("--rules", required=True)
     rules.add_argument("--now", type=int)
+
+    counts = sub.add_parser("stats")
+    counts.add_argument("--account", required=True)
+
+    preview = sub.add_parser("dry-run")
+    preview.add_argument("--account", required=True)
     return parser
 
 
@@ -184,6 +196,34 @@ def _rules(args: argparse.Namespace) -> int:
         },
     )
     return 0
+
+
+def _stats(args: argparse.Namespace) -> int:
+    conn = _account_db(args)
+    try:
+        counted = stats(conn)
+    finally:
+        conn.close()
+    _emit(args, {**counted, "ok": True})
+    return 0
+
+
+def _dry_run(args: argparse.Namespace) -> int:
+    conn = _account_db(args)
+    try:
+        counted = dry_run(conn)
+    finally:
+        conn.close()
+    _emit(args, {**counted, "ok": True})
+    return 0
+
+
+def _account_db(args: argparse.Namespace) -> sqlite3.Connection:
+    alias = canonical_alias(args.account)
+    db_path = data_dir(args.home) / f"{alias}.db"
+    if not db_path.is_file():
+        raise UsageError("account is not initialized")
+    return connect(db_path)
 
 
 def _init_aliases(args: argparse.Namespace) -> list[str]:
