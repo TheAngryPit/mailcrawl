@@ -1,0 +1,10 @@
+From: Bao Fixture <bao@example.com>
+Subject: Boletim
+Date: Thu, 02 Apr 2026 11:00:00 +0000
+Message-ID: <msg-html@example.com>
+In-Reply-To: <msg-plain@example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+
+<p>boletim</p><blockquote>cita=C3=A7=C3=A3o fica</blockquote>

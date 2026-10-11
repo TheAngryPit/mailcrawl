@@ -96,6 +96,10 @@ class AttachmentRec:
     mime_type: str | None
     size_bytes: int | None
     attachment_id: str | None
+    extracted_text: str | None = None
+    extract_status: str = "pending"
+    content_id: str | None = None
+    is_inline: int = 0
 
 
 @dataclass(frozen=True)
