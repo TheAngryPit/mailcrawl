@@ -19,6 +19,10 @@ scaffold_proof_runnable() {
   [[ -f "$REPO_ROOT/Makefile" && -f "$REPO_ROOT/scripts/proof.sh" ]]
 }
 
+body_clean_runnable() {
+  [[ -f "$REPO_ROOT/testdata/fixtures/gog-export/v0/export.json" ]]
+}
+
 native_fixture_runnable() {
   local native="$REPO_ROOT/testdata/fixtures/gog-export/native"
   local taxonomy="$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json"
@@ -196,6 +200,113 @@ sys.exit(0 if ok else 1)
   trap - EXIT
 }
 
+drive_body_clean() {
+  if ! body_clean_runnable; then
+    log "body clean: not runnable"
+    return 2
+  fi
+  mkdir -p "$SCRATCH_DIR"
+  local home
+  home="$(mktemp -d "$SCRATCH_DIR/body-home.XXXXXX")"
+  BODY_HOME="$home"
+  trap 'rm -rf "$BODY_HOME"' EXIT
+  local export_dir="$REPO_ROOT/testdata/fixtures/gog-export/v0"
+  local taxonomy="$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json"
+  local db="$home/.local/share/mailcrawl/personal.db"
+
+  mailcrawl_in "$home" --json init --account personal --email ada@example.com
+
+  local import_out
+  import_out="$(mailcrawl_in "$home" --json import gog-export \
+    --account personal \
+    --dir "$export_dir" \
+    --taxonomy "$taxonomy")"
+  printf '%s\n' "$import_out"
+  printf '%s' "$import_out" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+ok = doc.get("ok") is True and doc.get("n_new") == 2 and doc.get("n_error") == 0
+sys.exit(0 if ok else 1)
+' || {
+    log "body clean: v0 import failed"
+    return 1
+  }
+
+  local quoted_out fake_out
+  quoted_out="$(mailcrawl_in "$home" --json search quoted --account personal)"
+  fake_out="$(mailcrawl_in "$home" --json search fake --account personal)"
+  printf '%s\n' "$quoted_out"
+  printf '%s\n' "$fake_out"
+  DB_PATH="$db" QUOTED_JSON="$quoted_out" FAKE_JSON="$fake_out" python3 - <<'PY' || {
+import json, os, sqlite3, sys
+quoted = json.loads(os.environ["QUOTED_JSON"])
+fake = json.loads(os.environ["FAKE_JSON"])
+if quoted.get("hits"):
+    sys.exit("quoted search returned hits")
+ids = [hit.get("gmail_message_id") for hit in fake.get("hits") or []]
+if "fixture-001" not in ids:
+    sys.exit("fake search missed fixture-001")
+conn = sqlite3.connect(os.environ["DB_PATH"])
+try:
+    raw, body = conn.execute(
+        "SELECT body_text_raw, body_text FROM messages WHERE gmail_message_id = 'fixture-001'"
+    ).fetchone()
+    if "> quoted line stays" not in raw or "-- \nAda Fixture" not in raw:
+        sys.exit("raw body dropped the quote or signature")
+    if body != "This body is fake fixture text.":
+        sys.exit("cleaned body is not the kept sentence")
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version != 2:
+        sys.exit(f"user_version {version}")
+    names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    for table in ("decisions", "sender_decisions", "thread_mutes"):
+        if table not in names:
+            sys.exit(f"missing {table}")
+    for banned in ("plans", "proposals", "embeddings", "clips"):
+        if banned in names:
+            sys.exit(f"unexpected {banned}")
+finally:
+    conn.close()
+PY
+    log "body clean: cleaned index check failed"
+    return 1
+  }
+
+  local html_dir="$home/html-export"
+  mkdir -p "$html_dir"
+  cat >"$html_dir/export.json" <<'JSON'
+{
+  "schema": "mailcrawl.gog-export.v0",
+  "example_manifest": {"messages": 1},
+  "example_messages": [
+    {
+      "example_message_id": "html-clean-001",
+      "example_thread_id": "thread-html-clean",
+      "example_label_ids": ["INBOX"],
+      "example_date": 1760054400,
+      "example_from": "Ada Fixture <ada@example.com>",
+      "example_html": "<p>Keep linhawordqx</p><blockquote>citacao quotewordqx</blockquote>"
+    }
+  ]
+}
+JSON
+  mailcrawl_in "$home" --json import gog-export --account personal --dir "$html_dir" >/dev/null
+  local html_out
+  html_out="$(mailcrawl_in "$home" --json search quotewordqx --account personal)"
+  printf '%s\n' "$html_out"
+  printf '%s' "$html_out" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+ids = [hit.get("gmail_message_id") for hit in doc.get("hits") or []]
+sys.exit(0 if "html-clean-001" in ids else 1)
+' || {
+    log "body clean: html blockquote was cut"
+    return 1
+  }
+  rm -rf "$BODY_HOME"
+  trap - EXIT
+}
+
 cmd_doctor() {
   mkdir -p "$EVIDENCE_DIR"
   {
@@ -214,6 +325,11 @@ cmd_doctor() {
       log "native gog import: runnable"
     else
       log "native gog import: not runnable (missing native fixture, missing taxonomy, or export.json is present)"
+    fi
+    if body_clean_runnable; then
+      log "body clean: runnable"
+    else
+      log "body clean: not runnable (missing v0 export.json)"
     fi
     log "doctor ok"
   } | tee "$EVIDENCE_DIR/doctor.log"
@@ -236,6 +352,7 @@ cmd_drive() {
       spec-integrity) drive_spec_integrity || drive_code=$? ;;
       scaffold-headless-proof) drive_scaffold_headless_proof || drive_code=$? ;;
       native-gog-import) drive_native_gog_import || drive_code=$? ;;
+      body-clean) drive_body_clean || drive_code=$? ;;
       *)
         log "unknown feature: $feature"
         drive_code=1

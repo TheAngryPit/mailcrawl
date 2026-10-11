@@ -77,7 +77,7 @@ class ScaffoldFixtureTest(unittest.TestCase):
             "`pessoal` is an optional CLI input alias",
             "The hash does not use `account_id`",
             "mailcrawl.gog-export.v0",
-            "Quote and signature stripping is phase 2",
+            "When unsure, do not cut",
             "from_hdr",
             "does not create `index.db` or `reads.db`",
             "taxonomy-account-maps.json",

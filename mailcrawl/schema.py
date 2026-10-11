@@ -1,6 +1,6 @@
-"""SQLite schema v1. Ingest and FTS tables only."""
+"""SQLite schema v2. Ingest, FTS, and the empty phase 2 decision tables."""
 
-USER_VERSION = 1
+USER_VERSION = 2
 
 TABLES = (
     "accounts",
@@ -14,6 +14,9 @@ TABLES = (
     "cursors",
     "import_runs",
     "ledger",
+    "decisions",
+    "sender_decisions",
+    "thread_mutes",
     "msg_fts",
 )
 
@@ -34,7 +37,7 @@ HEADER_ALLOW = (
     "received-spf",
 )
 
-SCHEMA_SQL = """
+_SCHEMA_PREFIX = """
 CREATE TABLE IF NOT EXISTS accounts (
   account_id INTEGER PRIMARY KEY,
   alias TEXT NOT NULL UNIQUE CHECK (alias IN ('thehive','vcl','personal')),
@@ -101,6 +104,7 @@ CREATE TABLE IF NOT EXISTS messages (
   reply_to_hdr TEXT,
   subject TEXT,
   snippet TEXT,
+  body_text_raw TEXT,
   body_text TEXT,
   lang TEXT,
   size_bytes INTEGER,
@@ -205,6 +209,55 @@ BEGIN
   SELECT RAISE(ABORT, 'ledger is append-only');
 END;
 
+"""
+
+V2_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS decisions (
+  decision_id INTEGER PRIMARY KEY,
+  thread_pk INTEGER NOT NULL REFERENCES threads,
+  next_state TEXT NOT NULL CHECK (next_state IN (
+    'reply','action','waiting','read_later','reference','noise','needs_review','resolved'
+  )),
+  priority INTEGER CHECK (priority BETWEEN 0 AND 3),
+  owner TEXT CHECK (owner IN ('me','other','none')),
+  review_date INTEGER,
+  due_date INTEGER,
+  lane TEXT CHECK (lane IN ('imbox','feed','paper_trail','screened_out')),
+  pinned_aside INTEGER NOT NULL DEFAULT 0,
+  muted INTEGER NOT NULL DEFAULT 0,
+  confidence REAL,
+  source TEXT NOT NULL CHECK (source IN ('rule','embedding-cluster','llm','human','legacy-label')),
+  rule_id TEXT,
+  rules_version TEXT NOT NULL,
+  evidence TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  superseded_by INTEGER REFERENCES decisions(decision_id),
+  CHECK (next_state <> 'waiting' OR review_date IS NOT NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS decisions_current ON decisions(thread_pk) WHERE superseded_by IS NULL;
+
+CREATE TABLE IF NOT EXISTS sender_decisions (
+  sender_id INTEGER PRIMARY KEY REFERENCES senders,
+  status TEXT NOT NULL CHECK (status IN ('legacy','pending','approved','denied')),
+  route TEXT CHECK (route IN ('imbox','feed','paper_trail','read')),
+  scope TEXT NOT NULL DEFAULT 'sender' CHECK (scope IN ('sender','domain')),
+  bundle INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER,
+  client_sla_days INTEGER,
+  decided_by TEXT,
+  decided_at INTEGER,
+  note TEXT
+);
+
+CREATE TABLE IF NOT EXISTS thread_mutes (
+  thread_pk INTEGER PRIMARY KEY REFERENCES threads,
+  muted_at INTEGER NOT NULL,
+  until INTEGER,
+  reason TEXT
+);
+"""
+
+FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(
   subject,
   body_text,
@@ -214,3 +267,5 @@ CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(
   tokenize='unicode61 remove_diacritics 2'
 );
 """
+
+SCHEMA_SQL = _SCHEMA_PREFIX + V2_TABLES_SQL + FTS_SQL

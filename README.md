@@ -38,7 +38,7 @@ python3 -m mailcrawl --json import gog-export --account thehive --dir <export> -
 
 A record without an `eml` path is rejected, so a markdown-only export is not imported. `internalDate` is unix milliseconds and is stored as unix seconds. `to` and `cc` are arrays of strings. Header values from the `.eml` file win over the index when both exist. Text attachment parts are searchable. Binary parts keep `extract_status` `pending` and are not indexed as text. Headers outside the allow-list in the spec are dropped.
 
-The native reader matches the gogcli exporter and the synthetic fixture in `testdata/fixtures/gog-export/native/`. A real thehive export was verified on the Mac at commit `32b936c` as a 25-message smoke, and a full mailbox import stays phase 2.
+The native reader matches the gogcli exporter and the synthetic fixture in `testdata/fixtures/gog-export/native/`. A real thehive export was verified on the Mac at commit `32b936c` as a 25-message smoke. A full mailbox import is not this revision.
 
 ## How agents use it
 

@@ -9,6 +9,13 @@ from html.parser import HTMLParser
 _PREFIX = re.compile(r"^(?:re|fwd|fw)\s*:\s*", re.IGNORECASE)
 _SPACE = re.compile(r"\s+")
 _BREAK_TAGS = {"p", "br", "div", "tr", "blockquote", "li", "h1", "h2", "h3"}
+_ON_WROTE = re.compile(r"^On .+ wrote:\s*$", re.IGNORECASE)
+_EM_ESCREVEU = re.compile(r"^Em .+ escreveu:\s*$", re.IGNORECASE)
+_HEADER_FROM = re.compile(r"^(?:From|De):", re.IGNORECASE)
+_HEADER_SENT = re.compile(r"^(?:Sent|Enviada):", re.IGNORECASE)
+_ORIGINAL_MESSAGE = "-----Original Message-----"
+_SIGNATURE = "-- "
+_OUTLOOK_WINDOW = 8
 
 
 def subject_norm(subject: str | None) -> str | None:
@@ -62,6 +69,42 @@ class _TextExtractor(HTMLParser):
 
     def handle_data(self, data: str) -> None:
         self.parts.append(data)
+
+
+def clean_body(text: str | None) -> str | None:
+    if text is None:
+        return None
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    cut = _suffix_cut(lines)
+    if cut is not None:
+        lines = lines[:cut]
+    kept = [line for line in lines if not line.lstrip().startswith(">")]
+    cleaned = "\n".join(kept)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _suffix_cut(lines: list[str]) -> int | None:
+    for index, line in enumerate(lines):
+        if line == _SIGNATURE:
+            return index
+        stripped = line.strip()
+        if stripped == _ORIGINAL_MESSAGE:
+            return index
+        if _ON_WROTE.match(stripped) or _EM_ESCREVEU.match(stripped):
+            return index
+        if _HEADER_FROM.match(stripped) and _sent_within(lines, index):
+            return index
+    return None
+
+
+def _sent_within(lines: list[str], index: int) -> bool:
+    end = min(len(lines), index + 1 + _OUTLOOK_WINDOW)
+    for follower in lines[index + 1 : end]:
+        if _HEADER_SENT.match(follower.strip()):
+            return True
+    return False
 
 
 def html_to_text(html: str) -> str:
