@@ -9,21 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
+from mailcrawl.taxonomy import CATEGORIES, header_is_automated
 
 RULES_VERSION = "rules-v0"
 _DAY = 86400
-_KEY_ROLES = (
-    "human",
-    "automated",
-    "newsletter",
-    "job_alert",
-    "notification",
-    "finance",
-    "purchase",
-    "contract",
-    "account_security",
-    "brief",
-)
+_KEY_ROLES = CATEGORIES
 
 
 @dataclass(frozen=True)
@@ -231,8 +221,8 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
             0,
             ({"type": "rule", "name": "2"},),
         )
-    if facts.has_key("finance") or facts.has_key("purchase"):
-        role = "finance" if facts.has_key("finance") else "purchase"
+    if facts.has_key("invoice_receipt") or facts.has_key("purchase_delivery"):
+        role = "invoice_receipt" if facts.has_key("invoice_receipt") else "purchase_delivery"
         return _outcome(
             "reference",
             "3",
@@ -355,6 +345,8 @@ def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfi
                 automated_label = True
             elif _header_human(conn, int(message["msg_pk"])):
                 header_human = True
+        if _header_automated(conn, int(message["msg_pk"])):
+            key_hits["automated"].append({"type": "header", "name": "automated"})
         if _listish(conn, int(message["msg_pk"])):
             listish = True
     last = messages[-1] if messages else None
@@ -369,8 +361,10 @@ def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfi
     priority = None
     if decision is not None and decision["priority"] is not None:
         priority = int(decision["priority"])
-    protected = approved_imbox or bool(key_hits["contract"] or key_hits["account_security"] or key_hits["finance"])
-    if key_hits["brief"] and (human_label or header_human):
+    protected = approved_imbox or bool(
+        key_hits["contract"] or key_hits["account_security"] or key_hits["invoice_receipt"]
+    )
+    if key_hits["correspondence"] and (human_label or header_human):
         protected = True
     human = human_label or (header_human and not automated_label)
     muted = False
@@ -418,6 +412,14 @@ def _message_labels(conn: sqlite3.Connection, msg_pk: int) -> list[dict[str, obj
             }
         )
     return labels
+
+
+def _header_automated(conn: sqlite3.Connection, msg_pk: int) -> bool:
+    rows = conn.execute(
+        "SELECT name, value FROM headers WHERE msg_pk = ?",
+        (msg_pk,),
+    ).fetchall()
+    return header_is_automated((str(row["name"]), str(row["value"])) for row in rows)
 
 
 def _header_human(conn: sqlite3.Connection, msg_pk: int) -> bool:

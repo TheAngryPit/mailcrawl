@@ -27,6 +27,10 @@ stats_runnable() {
   rules_runnable
 }
 
+taxonomy_runnable() {
+  [[ -f "$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json" ]]
+}
+
 attachment_parse_runnable() {
   body_clean_runnable && native_fixture_runnable
 }
@@ -787,6 +791,281 @@ PY
   trap - EXIT
 }
 
+drive_default_taxonomy() {
+  if ! taxonomy_runnable; then
+    log "default taxonomy: not runnable"
+    return 2
+  fi
+  mkdir -p "$SCRATCH_DIR"
+  local home
+  home="$(mktemp -d "$SCRATCH_DIR/taxonomy-home.XXXXXX")"
+  TAXONOMY_HOME="$home"
+  trap 'rm -rf "$TAXONOMY_HOME"' EXIT
+  local export_dir="$home/export"
+  mkdir -p "$export_dir"
+  cat >"$export_dir/export.json" <<'JSON'
+{
+  "schema": "mailcrawl.gog-export.v0",
+  "synthetic": true,
+  "example_manifest": {"messages": 5},
+  "example_labels": [
+    {"example_label_id": "CATEGORY_PROMOTIONS", "example_name": "CATEGORY_PROMOTIONS", "example_kind": "system"},
+    {"example_label_id": "CATEGORY_UPDATES", "example_name": "CATEGORY_UPDATES", "example_kind": "system"},
+    {"example_label_id": "CATEGORY_PERSONAL", "example_name": "CATEGORY_PERSONAL", "example_kind": "system"},
+    {"example_label_id": "Lshare", "example_name": "Example/Shared", "example_kind": "user"},
+    {"example_label_id": "Lhive", "example_name": "Example/HiveOnly", "example_kind": "user"},
+    {"example_label_id": "Lperson", "example_name": "Example/PersonalOnly", "example_kind": "user"},
+    {"example_label_id": "Lsyn", "example_name": "Example/Synthetic", "example_kind": "user"}
+  ],
+  "example_messages": [
+    {
+      "example_message_id": "tax-1",
+      "example_thread_id": "tax-thread-1",
+      "example_label_ids": ["CATEGORY_PROMOTIONS"],
+      "example_date": 1700000000,
+      "example_from": "Ada Fixture <ada1@example.com>",
+      "example_body": "synthetic taxonomy body",
+      "example_headers": {"list-unsubscribe": "<https://example.com/unsub>"}
+    },
+    {
+      "example_message_id": "tax-2",
+      "example_thread_id": "tax-thread-2",
+      "example_label_ids": ["CATEGORY_UPDATES"],
+      "example_date": 1700000000,
+      "example_from": "Ada Fixture <ada2@example.com>",
+      "example_body": "synthetic taxonomy body",
+      "example_headers": {"list-id": "<news.example.com>"}
+    },
+    {
+      "example_message_id": "tax-3",
+      "example_thread_id": "tax-thread-3",
+      "example_label_ids": ["CATEGORY_PERSONAL"],
+      "example_date": 1700000000,
+      "example_from": "Ada Fixture <ada3@example.com>",
+      "example_body": "synthetic taxonomy body",
+      "example_headers": {"precedence": "bulk"}
+    },
+    {
+      "example_message_id": "tax-4",
+      "example_thread_id": "tax-thread-4",
+      "example_label_ids": ["pseudo:archived"],
+      "example_date": 1700000000,
+      "example_from": "Ada Fixture <ada4@example.com>",
+      "example_body": "synthetic taxonomy body",
+      "example_headers": {"list-unsubscribe": "<https://example.com/pseudo>"}
+    },
+    {
+      "example_message_id": "tax-5",
+      "example_thread_id": "tax-thread-5",
+      "example_label_ids": ["INBOX"],
+      "example_date": 1700000000,
+      "example_from": "Ada Fixture <ada5@example.com>",
+      "example_body": "synthetic taxonomy body",
+      "example_headers": {"precedence": "list"}
+    }
+  ]
+}
+JSON
+
+  mailcrawl_in "$home" --json init --account personal --email ada@example.com >/dev/null
+  local stats_out dry_out
+  mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" >/dev/null
+  stats_out="$(mailcrawl_in "$home" --json stats --account personal)"
+  dry_out="$(mailcrawl_in "$home" --json dry-run --account personal)"
+  printf '%s\n%s\n' "$stats_out" "$dry_out"
+  if printf '%s%s' "$stats_out" "$dry_out" | grep -q 'synthetic taxonomy body'; then
+    log "default taxonomy: output included message text"
+    return 1
+  fi
+  STATS_JSON="$stats_out" DRY_JSON="$dry_out" DB_PATH="$home/.local/share/mailcrawl/personal.db" python3 - <<'PY' || {
+import json, os, sqlite3, sys
+stats = json.loads(os.environ["STATS_JSON"])
+dry = json.loads(os.environ["DRY_JSON"])
+empty = [
+    "account_security",
+    "contract",
+    "human",
+    "invoice_receipt",
+    "job_alert",
+    "purchase_delivery",
+]
+if stats.get("empty_no_override") != empty or dry.get("empty_no_override") != empty:
+    sys.exit(f"empty {stats.get('empty_no_override')}")
+counts = stats.get("by_category") or {}
+if counts.get("newsletter") != 1 or counts.get("notification") != 1 or counts.get("correspondence") != 1:
+    sys.exit(f"labels {counts}")
+if counts.get("automated") != 4 or counts.get("invoice_receipt") != 0:
+    sys.exit(f"automated {counts}")
+if dry.get("by_category") != counts:
+    sys.exit("dry-run categories drifted")
+conn = sqlite3.connect(os.environ["DB_PATH"])
+try:
+    rows = dict(conn.execute("SELECT gmail_label_id, catalogue_key FROM labels"))
+finally:
+    conn.close()
+if rows.get("CATEGORY_PROMOTIONS") != "newsletter":
+    sys.exit(rows)
+if "pseudo:archived" in rows:
+    sys.exit("pseudo label stored")
+print("default taxonomy generic signals ok")
+PY
+    log "default taxonomy: generic signals drifted"
+    return 1
+  }
+
+  local override="$home/override.json"
+  cat >"$override" <<'JSON'
+{
+  "default": {"newsletter": ["Example/Shared"]},
+  "thehive": {"invoice_receipt": ["Example/HiveOnly"]},
+  "pessoal": {"contract": ["Example/PersonalOnly"]}
+}
+JSON
+  mailcrawl_in "$home" --json init --account thehive --email ada@example.com >/dev/null
+  mailcrawl_in "$home" --json init --account pessoal --email ada@example.com >/dev/null
+  local hive_out person_out
+  hive_out="$(mailcrawl_in "$home" --json import gog-export --account thehive --dir "$export_dir" --taxonomy "$override")"
+  person_out="$(mailcrawl_in "$home" --json import gog-export --account pessoal --dir "$export_dir" --taxonomy "$override")"
+  printf '%s\n%s\n' "$hive_out" "$person_out"
+  HIVE_DB="$home/.local/share/mailcrawl/thehive.db" PERSON_DB="$home/.local/share/mailcrawl/personal.db" python3 - <<'PY' || {
+import os, sqlite3, sys
+def keys(path):
+    conn = sqlite3.connect(path)
+    try:
+        return dict(conn.execute("SELECT gmail_label_id, catalogue_key FROM labels"))
+    finally:
+        conn.close()
+hive = keys(os.environ["HIVE_DB"])
+person = keys(os.environ["PERSON_DB"])
+if hive.get("Lshare") != "newsletter" or hive.get("Lhive") != "invoice_receipt" or hive.get("Lperson") is not None:
+    sys.exit(f"thehive {hive}")
+if person.get("Lshare") != "newsletter" or person.get("Lperson") != "contract" or person.get("Lhive") is not None:
+    sys.exit(f"personal {person}")
+print("default taxonomy override ok")
+PY
+    log "default taxonomy: override drifted"
+    return 1
+  }
+
+  local bad code
+  bad="$home/bad.json"
+  printf '{' >"$bad"
+  code=0
+  mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" --taxonomy "$bad" >/dev/null || code=$?
+  [[ "$code" -eq 2 ]] || { log "default taxonomy: invalid JSON exited $code"; return 1; }
+  printf '[]' >"$bad"
+  code=0
+  mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" --taxonomy "$bad" >/dev/null || code=$?
+  [[ "$code" -eq 2 ]] || { log "default taxonomy: non-object exited $code"; return 1; }
+  printf '{"work": {}}' >"$bad"
+  code=0
+  mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" --taxonomy "$bad" >/dev/null || code=$?
+  [[ "$code" -eq 2 ]] || { log "default taxonomy: unknown account exited $code"; return 1; }
+  printf '{"default": {"not_a_category": ["Example/Shared"]}}' >"$bad"
+  code=0
+  mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" --taxonomy "$bad" >/dev/null || code=$?
+  [[ "$code" -eq 2 ]] || { log "default taxonomy: unknown category exited $code"; return 1; }
+  printf '{"default": {"newsletter": "Example/Shared"}}' >"$bad"
+  code=0
+  mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" --taxonomy "$bad" >/dev/null || code=$?
+  [[ "$code" -eq 2 ]] || { log "default taxonomy: non-list exited $code"; return 1; }
+  printf '{"default": {"newsletter": [1]}}' >"$bad"
+  code=0
+  mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" --taxonomy "$bad" >/dev/null || code=$?
+  [[ "$code" -eq 2 ]] || { log "default taxonomy: non-string exited $code"; return 1; }
+
+  printf '{"default": {"invoice_receipt": ["Example type/Missing"]}}' >"$bad"
+  local warn_out
+  warn_out="$(mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" --taxonomy "$bad")"
+  printf '%s\n' "$warn_out"
+  printf '%s' "$warn_out" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+ok = doc.get("ok") is True and doc.get("taxonomy_warnings") == 1 and doc.get("missing_labels") == ["Example type/Missing"]
+sys.exit(0 if ok else 1)
+' || { log "default taxonomy: missing label was not a warning"; return 1; }
+
+  local home_file="$home/.config/mailcrawl/taxonomy.json"
+  local config_file="$home/from-config.json"
+  local env_file="$home/from-env.json"
+  local flag_file="$home/from-flag.json"
+  local config="$home/config.toml"
+  mkdir -p "$home/.config/mailcrawl"
+  printf '%s\n' '{"default": {"correspondence": ["Example/Synthetic"]}}' >"$home_file"
+  printf '%s\n' '{"default": {"contract": ["Example/Synthetic"]}}' >"$config_file"
+  printf '%s\n' '{"default": {"account_security": ["Example/Synthetic"]}}' >"$env_file"
+  printf '%s\n' '{"default": {"job_alert": ["Example/Synthetic"]}}' >"$flag_file"
+  mailcrawl_in "$home" --json --config "$config" init --account vcl --email ada@example.com >/dev/null
+  cat >"$config" <<EOF
+taxonomy = "$config_file"
+
+[accounts.vcl]
+email = "ada@example.com"
+EOF
+  local lookup_db="$home/.local/share/mailcrawl/vcl.db"
+  mailcrawl_in "$home" --json --config "$config" import gog-export --account vcl --dir "$export_dir" >/dev/null
+  LOOKUP_DB="$lookup_db" WANT=contract python3 - <<'PY' || { log "default taxonomy: config lost to home"; return 1; }
+import os, sqlite3, sys
+conn = sqlite3.connect(os.environ["LOOKUP_DB"])
+try:
+    key = conn.execute("SELECT catalogue_key FROM labels WHERE gmail_label_id = 'Lsyn'").fetchone()[0]
+finally:
+    conn.close()
+if key != os.environ["WANT"]:
+    sys.exit(key)
+PY
+  local env_out
+  env_out="$(
+    cd "$REPO_ROOT"
+    env \
+      -u GOG_KEY \
+      HOME="$home" \
+      MAILCRAWL_TAXONOMY="$env_file" \
+      http_proxy=http://127.0.0.1:9 \
+      https_proxy=http://127.0.0.1:9 \
+      HTTP_PROXY=http://127.0.0.1:9 \
+      HTTPS_PROXY=http://127.0.0.1:9 \
+      ALL_PROXY=http://127.0.0.1:9 \
+      python3 -m mailcrawl --json --config "$config" import gog-export --account vcl --dir "$export_dir"
+  )"
+  printf '%s\n' "$env_out"
+  LOOKUP_DB="$lookup_db" WANT=account_security python3 - <<'PY' || { log "default taxonomy: env lost to config"; return 1; }
+import os, sqlite3, sys
+conn = sqlite3.connect(os.environ["LOOKUP_DB"])
+try:
+    key = conn.execute("SELECT catalogue_key FROM labels WHERE gmail_label_id = 'Lsyn'").fetchone()[0]
+finally:
+    conn.close()
+if key != os.environ["WANT"]:
+    sys.exit(key)
+PY
+  mailcrawl_in "$home" --json --config "$config" import gog-export --account vcl --dir "$export_dir" --taxonomy "$flag_file" >/dev/null
+  LOOKUP_DB="$lookup_db" WANT=job_alert python3 - <<'PY' || { log "default taxonomy: flag lost to env"; return 1; }
+import os, sqlite3, sys
+conn = sqlite3.connect(os.environ["LOOKUP_DB"])
+try:
+    key = conn.execute("SELECT catalogue_key FROM labels WHERE gmail_label_id = 'Lsyn'").fetchone()[0]
+finally:
+    conn.close()
+if key != os.environ["WANT"]:
+    sys.exit(key)
+PY
+  printf '%s\n' '[accounts.vcl]' 'email = "ada@example.com"' >"$config"
+  mailcrawl_in "$home" --json --config "$config" import gog-export --account vcl --dir "$export_dir" >/dev/null
+  LOOKUP_DB="$lookup_db" WANT=correspondence python3 - <<'PY' || { log "default taxonomy: home file was not used"; return 1; }
+import os, sqlite3, sys
+conn = sqlite3.connect(os.environ["LOOKUP_DB"])
+try:
+    key = conn.execute("SELECT catalogue_key FROM labels WHERE gmail_label_id = 'Lsyn'").fetchone()[0]
+finally:
+    conn.close()
+if key != os.environ["WANT"]:
+    sys.exit(key)
+PY
+  rm -rf "$TAXONOMY_HOME"
+  trap - EXIT
+}
+
 cmd_doctor() {
   mkdir -p "$EVIDENCE_DIR"
   {
@@ -831,6 +1110,11 @@ cmd_doctor() {
     else
       log "stats dry-run: not runnable (missing testdata/rules/rules-v0.json)"
     fi
+    if taxonomy_runnable; then
+      log "default taxonomy: runnable"
+    else
+      log "default taxonomy: not runnable (missing testdata/catalogue/taxonomy.synthetic.json)"
+    fi
     log "doctor ok"
   } | tee "$EVIDENCE_DIR/doctor.log"
 }
@@ -857,6 +1141,7 @@ cmd_drive() {
       attachment-parse) drive_attachment_parse || drive_code=$? ;;
       rules-v0) drive_rules_v0 || drive_code=$? ;;
       stats-dry-run) drive_stats_dry_run || drive_code=$? ;;
+      default-taxonomy) drive_default_taxonomy || drive_code=$? ;;
       *)
         log "unknown feature: $feature"
         drive_code=1

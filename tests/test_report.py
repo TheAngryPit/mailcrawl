@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -20,6 +21,10 @@ class StatsDryRunTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name)
+        self.old_home = os.environ.get("HOME")
+        self.old_taxonomy = os.environ.get("MAILCRAWL_TAXONOMY")
+        os.environ["HOME"] = str(self.home)
+        os.environ.pop("MAILCRAWL_TAXONOMY", None)
         self.db = init_account(self.home, "vcl", "ada@example.com")
         conn = connect(self.db)
         try:
@@ -30,6 +35,14 @@ class StatsDryRunTest(unittest.TestCase):
             conn.close()
 
     def tearDown(self) -> None:
+        if self.old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self.old_home
+        if self.old_taxonomy is None:
+            os.environ.pop("MAILCRAWL_TAXONOMY", None)
+        else:
+            os.environ["MAILCRAWL_TAXONOMY"] = self.old_taxonomy
         self.tmp.cleanup()
 
     def test_stats_and_dry_run_print_counts_only(self) -> None:
@@ -57,25 +70,53 @@ class StatsDryRunTest(unittest.TestCase):
             ["--json", "--home", str(self.home), "dry-run", "--account", "vcl"]
         )
 
+        categories = {
+            "account_security": 0,
+            "automated": 0,
+            "contract": 0,
+            "correspondence": 0,
+            "human": 0,
+            "invoice_receipt": 0,
+            "job_alert": 0,
+            "newsletter": 0,
+            "notification": 0,
+            "purchase_delivery": 0,
+        }
+        empty = [
+            "account_security",
+            "contract",
+            "human",
+            "invoice_receipt",
+            "job_alert",
+            "purchase_delivery",
+        ]
         self.assertEqual(
             stats,
             {
+                "by_category": categories,
                 "by_month": {"2023-11": 2},
+                "empty_no_override": empty,
                 "messages": 2,
+                "missing_labels": [],
                 "ok": True,
                 "senders": 2,
+                "taxonomy_warnings": 0,
                 "threads": 2,
             },
         )
         self.assertEqual(
             dry,
             {
+                "by_category": categories,
                 "by_label": {"STARRED": 1},
                 "by_month": {"2023-11": 2},
                 "by_rule": {"0": 1, "5": 1},
                 "by_sender": {"1": 1, "2": 1},
                 "by_state": {"needs_review": 1, "reply": 1},
+                "empty_no_override": empty,
+                "missing_labels": [],
                 "ok": True,
+                "taxonomy_warnings": 0,
             },
         )
         self.assertEqual(self._decision_count(), before)

@@ -1,6 +1,6 @@
 ---
 name: verify-mailcrawl
-description: Verify mailcrawl repo health (required docs, CI wiring, secrets and forbidden paths, SPEC integrity), drive the scaffold headless proof, drive native gog import, drive Takeout mbox import, drive body cleaning, drive attachment parsing, drive rules v0, and drive stats and dry-run counts. Use before shipping doc or CI changes, or when proving make check, scripts/proof.sh, a gog export with no export.json, an mbox import and its gog reconciliation, quote stripping, attachment status, rule counts, or read-only counts.
+description: Verify mailcrawl repo health (required docs, CI wiring, secrets and forbidden paths, SPEC integrity), drive the scaffold headless proof, drive native gog import, drive Takeout mbox import, drive body cleaning, drive attachment parsing, drive rules v0, drive stats and dry-run counts, and drive the default taxonomy. Use before shipping doc or CI changes, or when proving make check, scripts/proof.sh, a gog export with no export.json, an mbox import and its gog reconciliation, quote stripping, attachment status, rule counts, read-only counts, or category signals.
 ---
 
 # verify-mailcrawl
@@ -28,6 +28,8 @@ Attachment parsing extracts text parts and leaves every other type behind an int
 Rules 0 to 8 print counts and do not print message text. See [rules-v0](./features/rules-v0.md).
 
 `stats` and `dry-run` print counts and do not write a plan file. See [stats-dry-run](./features/stats-dry-run.md).
+
+The default taxonomy applies generic signals and reads one local override. See [default-taxonomy](./features/default-taxonomy.md).
 
 ## Launch
 
@@ -110,6 +112,12 @@ To drive stats and dry-run:
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature stats-dry-run
 ```
 
+To drive the default taxonomy:
+
+```bash
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature default-taxonomy
+```
+
 ## Evidence
 
 Capture proof outside gitignored `proof/` so cleanup does not erase it.
@@ -147,6 +155,7 @@ test -f "$EVIDENCE_DIR/summary.txt" && test -f "$EVIDENCE_DIR/doctor.log"
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature attachment-parse
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature rules-v0
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature stats-dry-run
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature default-taxonomy
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" cleanup
 ```
 

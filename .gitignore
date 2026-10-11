@@ -87,6 +87,10 @@ ocr-out/
 *.ocr.txt
 *.ocr.json
 
+# Local taxonomy override. The synthetic fixture under testdata/ stays tracked.
+*.local.json
+/taxonomy.json
+
 # Python
 __pycache__/
 *.py[cod]

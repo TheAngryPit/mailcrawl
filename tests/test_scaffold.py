@@ -63,8 +63,8 @@ class ScaffoldFixtureTest(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertEqual(document["schema"], "mailcrawl.taxonomy.synthetic")
         self.assertTrue(document["synthetic"])
+        self.assertIn("newsletter", document["default"])
         blob = json.dumps(document)
         self.assertNotIn("personal", blob)
         self.assertNotIn("pessoal", blob)

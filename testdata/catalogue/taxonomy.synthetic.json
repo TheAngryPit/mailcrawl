@@ -1,21 +1,22 @@
 {
-  "schema": "mailcrawl.taxonomy.synthetic",
   "synthetic": true,
-  "note": "Stand-in catalogue. The real taxonomy catalogue stays off git. Account alias is unresolved.",
-  "labels": [
-    {
-      "name": "Example/Synthetic",
-      "account": "example"
-    },
-    {"name": "Example origin/Person", "axis": "Sender origin", "key": "origin.person"},
-    {"name": "Example origin/Machine", "axis": "Sender origin", "key": "origin.machine"},
-    {"name": "Example type/Bulletin", "axis": "Content type", "key": "type.bulletin"},
-    {"name": "Example type/Listing", "axis": "Content type", "key": "type.listing"},
-    {"name": "Example type/Notice", "axis": "Content type", "key": "type.notice"},
-    {"name": "Example type/Receipt", "axis": "Content type", "key": "type.receipt"},
-    {"name": "Example type/Parcel", "axis": "Content type", "key": "type.parcel"},
-    {"name": "Example type/Agreement", "axis": "Content type", "key": "type.agreement"},
-    {"name": "Example type/Account", "axis": "Content type", "key": "type.account"},
-    {"name": "Example note/Brief", "axis": "Correspondence", "key": "note.brief"}
-  ]
+  "note": "Stand-in override. Real label names stay off git.",
+  "default": {
+    "human": ["Example origin/Person"],
+    "automated": ["Example origin/Machine"],
+    "newsletter": ["Example/Synthetic", "Example type/Bulletin"],
+    "job_alert": ["Example type/Listing"],
+    "notification": ["Example type/Notice"],
+    "invoice_receipt": ["Example type/Receipt"],
+    "purchase_delivery": ["Example type/Parcel"],
+    "account_security": ["Example type/Account"],
+    "contract": ["Example type/Agreement"],
+    "correspondence": ["Example note/Brief"]
+  },
+  "thehive": {
+    "invoice_receipt": ["Example type/Receipt"]
+  },
+  "vcl": {
+    "job_alert": ["Example type/Listing"]
+  }
 }

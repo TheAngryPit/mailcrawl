@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from mailcrawl.configfile import account_email, taxonomy_path, write_account
+from mailcrawl.configfile import account_email, write_account
 from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
@@ -18,6 +18,7 @@ from mailcrawl.report import dry_run, stats
 from mailcrawl.rules import apply_rules, load_rules
 from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
+from mailcrawl.taxonomy import load_taxonomy, missing_labels, present_label_names, resolve_taxonomy
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -98,9 +99,11 @@ def _parser() -> argparse.ArgumentParser:
 
     counts = sub.add_parser("stats")
     counts.add_argument("--account", required=True)
+    counts.add_argument("--taxonomy")
 
     preview = sub.add_parser("dry-run")
     preview.add_argument("--account", required=True)
+    preview.add_argument("--taxonomy")
     return parser
 
 
@@ -133,7 +136,9 @@ def _import(args: argparse.Namespace) -> int:
     alias = canonical_alias(args.account)
     cfg = config_path(args.config)
     email = account_email(cfg, alias)
-    catalogue = Path(args.taxonomy) if args.taxonomy else taxonomy_path(cfg)
+    catalogue = resolve_taxonomy(args.taxonomy, cfg)
+    if catalogue is not None:
+        load_taxonomy(catalogue)
     db_path = data_dir(args.home) / f"{alias}.db"
     conn = connect(db_path)
     try:
@@ -157,6 +162,7 @@ def _import(args: argparse.Namespace) -> int:
             )
         else:
             raise UsageError("unknown import command")
+        absent = _taxonomy_warnings(conn, alias, catalogue)
     finally:
         conn.close()
     _emit(
@@ -164,6 +170,7 @@ def _import(args: argparse.Namespace) -> int:
         {
             "account": alias,
             "database": str(db_path),
+            "missing_labels": absent,
             "n_dup": result.n_dup,
             "n_error": result.n_error,
             "n_new": result.n_new,
@@ -171,6 +178,7 @@ def _import(args: argparse.Namespace) -> int:
             "n_refused": result.n_refused,
             "n_seen": result.n_seen,
             "ok": True,
+            "taxonomy_warnings": len(absent),
         },
     )
     return 0
@@ -217,23 +225,34 @@ def _rules(args: argparse.Namespace) -> int:
 
 
 def _stats(args: argparse.Namespace) -> int:
-    conn = _account_db(args)
-    try:
-        counted = stats(conn)
-    finally:
-        conn.close()
-    _emit(args, {**counted, "ok": True})
+    _emit(args, {**_counted(args, stats), "ok": True})
     return 0
 
 
 def _dry_run(args: argparse.Namespace) -> int:
+    _emit(args, {**_counted(args, dry_run), "ok": True})
+    return 0
+
+
+def _counted(args: argparse.Namespace, report) -> dict[str, object]:
+    alias = canonical_alias(args.account)
+    catalogue = resolve_taxonomy(args.taxonomy, config_path(args.config))
+    loaded = None if catalogue is None else load_taxonomy(catalogue)
     conn = _account_db(args)
     try:
-        counted = dry_run(conn)
+        counted = report(conn, has_override=loaded is not None)
+        absent = [] if loaded is None else missing_labels(loaded, alias, present_label_names(conn))
     finally:
         conn.close()
-    _emit(args, {**counted, "ok": True})
-    return 0
+    counted["missing_labels"] = absent
+    counted["taxonomy_warnings"] = len(absent)
+    return counted
+
+
+def _taxonomy_warnings(conn, alias: str, catalogue: Path | None) -> list[str]:
+    if catalogue is None:
+        return []
+    return missing_labels(load_taxonomy(catalogue), alias, present_label_names(conn))
 
 
 def _account_db(args: argparse.Namespace) -> sqlite3.Connection:
