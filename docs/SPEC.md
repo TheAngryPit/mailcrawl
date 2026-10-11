@@ -71,7 +71,17 @@ mailcrawl --json import mbox <file> --alias <thehive|vcl|personal> [--labels <la
 
 `--alias` and `--account` are synonyms on both import commands. `pessoal` still selects `personal`. The import is read-only toward the file and toward Gmail. It reads one message at a time and never loads the whole file. It writes schema v2 through the `import gog-export` writer, so body cleaning, attachment parsing, headers, and FTS are the same. There is no new migration. A file whose first non-blank line is not an mbox `From ` line is `unsupported_schema` and exits 3. A missing file is `missing_file` and exits 1. The JSON result adds `n_refused` and `n_reconciled` to the existing counts on both import commands.
 
-**Unverified Takeout format.** The separator shape `From <decimal>@<host> <date>`, the header names `X-GM-MSGID`, `X-GM-THRID`, `X-Gmail-Message-ID`, and `X-Gmail-Labels`, the decimal encoding of those ids, the label names Takeout writes, and the `>From ` escaping are taken from the approved plan. None of them is verified on real mail. Reconciliation with gog API ids is not proven on real mail. These rules stay pending until a sanitized real Takeout sample is checked. The parser is tolerant. A missing or odd value falls back to the next rule and never stops the import.
+**Takeout format status.** A real thehive Takeout was imported locally on 2026-10-11. It had 2,055 messages. The import and a reimport were idempotent, and nothing was refused. A fact marked *observed on thehive, 2026-10-11* below was seen in that archive. Everything else is still unverified. The parser is tolerant. A missing or odd value falls back to the next rule and never stops the import.
+
+- *Observed on thehive, 2026-10-11.* The separator is `From <N>@<X> <X>`, with a decimal number before `@`. All 5 sampled separators had that shape. The file had 2,055 separators, and 2,055 messages were imported.
+- *Observed on thehive, 2026-10-11.* Takeout writes `X-GM-THRID`, `X-Gmail-Labels`, and `X-Gmail-Original-Message-ID`. It does not write `X-Gmail-Message-ID`. `X-GM-MSGID` was not reported either. Also present were `X-Gm-Features`, `X-Gm-Gg`, `X-Gm-Message-State`, `X-Gm-Phishy`, `X-Gm-Spam`, `X-Get-Message-Sender-Via`, `X-Google-DKIM-Signature`, `X-Google-Id`, `X-Google-Notification-Metadata`, `X-Google-Sender-Auth`, `X-Google-Smtp-Source`, `X-Google-Calendar-Notification`, and `x-gong-email-entity`.
+- *Observed on thehive, 2026-10-11.* 36 body lines started with `>From `. Line endings were mixed: 28,270,282 lines ended in CRLF and 724 in LF.
+- *Observed on thehive, 2026-10-11.* The Portuguese system label names marked observed in the table below.
+- *Unproven.* `X-Gmail-Original-Message-ID` is not a Gmail id. It may be the RFC 822 `Message-ID`. It is never used as a message id or a thread id until that is proven.
+- *Unproven.* Which `X-Gm-*`, `X-Gmail-*`, and `X-Google-*` headers Google also writes into delivered mail, and so into the Gmail API raw that gog saves as `.eml`. The hash rule below assumes gog's `.eml` has none of them. If it does carry one, the two hashes differ and the rules under Reimport and reconciliation apply.
+- *Unproven.* The line ending gog writes in `.eml`. The hash rule below assumes CRLF.
+- *Unproven.* Reconciliation between Takeout and gog on real mail. It needs a gog export of the same mailbox.
+- *Unverified.* The `X-GM-MSGID` and `X-Gmail-Message-ID` rules under Message identity come from the approved plan. Neither header was seen on thehive.
 
 Splitting. A message starts at a line that begins with `From ` when that line is the first line of the file or follows a blank line. A body line that matches `>+From ` loses one `>`. The blank line before the next separator is dropped.
 
@@ -87,7 +97,9 @@ An `rfc822:` row is never merged with a gog API row automatically. It keeps `rfc
 
 Thread identity. `X-GM-THRID`, read as decimal and stored as lowercase hex. Without it the thread is provisional, `mbox:` plus the SHA-256 of a root id. The root is the first `<…>` id in `References`, else in `In-Reply-To`, else the message's own `Message-ID`, else its key.
 
-`raw_sha256` is computed over the message with the Takeout parts removed: the `From ` separator line and every `X-GM-*` and `X-Gmail-Labels` header, folded lines included. `X-Gmail-Message-ID` stays in the hashed bytes. `raw_path` is `mbox:<absolute file path>#<byte offset of the separator>`. `internal_date` is the `Date` header, else the separator date, else 0.
+`raw_sha256` is computed over the message with the Takeout parts removed: the `From ` separator line and every header whose name starts with `X-Gm-`, `X-Gmail-`, or `X-Google-`, without regard to case, folded lines included. That covers `X-GM-THRID`, `X-Gmail-Labels`, `X-Gmail-Original-Message-ID`, and every `X-Gm-*` and `X-Google-*` header listed above. `X-Get-Message-Sender-Via` and `x-gong-email-entity` are kept, because they do not carry a Google prefix. Every line ending, CRLF or LF, becomes CRLF before hashing, so a file with mixed endings hashes the same as one with a single kind. The `>From ` unescape happens first. The parser reads the same bytes. Body text from either import loses its CR characters before body cleaning, so stored bodies and FTS do not depend on line endings. `raw_path` is `mbox:<absolute file path>#<byte offset of the separator>`. `internal_date` is the `Date` header, else the separator date, else 0.
+
+A database written by an earlier version hashed Takeout messages without these rules. A reimport of the same file into that database meets different hashes. It counts those messages in `n_error` and leaves the stored rows unchanged. Start from a fresh account database to get the new hashes.
 
 Labels. `X-Gmail-Labels` is a comma-separated list. Names may be quoted. Each name maps in this order:
 
@@ -96,24 +108,24 @@ Labels. `X-Gmail-Labels` is a comma-separated list. Names may be quoted. Each na
 3. A user name that matches a label name exactly, either in the file passed with `--labels` (a gog `labels.json`) or in a non-provisional label already in the account database, uses that label id.
 4. Any other name is a provisional user label with id `mbox:<name>`.
 
-| Gmail id | Names (EN and PT) |
-| --- | --- |
-| `INBOX` | Inbox, Caixa de entrada |
-| `SENT` | Sent, Sent Mail, Enviados, Enviadas, E-mails enviados |
-| `STARRED` | Starred, Com estrela |
-| `IMPORTANT` | Important, Importante |
-| `UNREAD` | Unread, Não lido, Não lidos, Não lida, Não lidas |
-| `DRAFT` | Draft, Drafts, Rascunho, Rascunhos |
-| `SPAM` | Spam |
-| `TRASH` | Trash, Lixo, Lixeira, Reciclagem |
-| `CHAT` | Chat, Chats |
-| `CATEGORY_PERSONAL` | Category Personal, Categoria Pessoal |
-| `CATEGORY_SOCIAL` | Category Social, Categoria Social, Categoria Redes sociais |
-| `CATEGORY_PROMOTIONS` | Category Promotions, Categoria Promoções |
-| `CATEGORY_UPDATES` | Category Updates, Categoria Atualizações |
-| `CATEGORY_FORUMS` | Category Forums, Categoria Fóruns |
+| Gmail id | Names (EN and PT) | PT on thehive, 2026-10-11 |
+| --- | --- | --- |
+| `INBOX` | Inbox, Caixa de Entrada | Caixa de Entrada observed |
+| `SENT` | Sent, Sent Mail, Enviados, Enviadas, E-mails enviados | not observed |
+| `STARRED` | Starred, Com estrela | not observed |
+| `IMPORTANT` | Important, Importante | Importante observed |
+| `UNREAD` | Unread, Não lido, Não lidos, Não lida, Não lidas | Não lidas observed |
+| `DRAFT` | Draft, Drafts, Rascunho, Rascunhos | Rascunhos observed |
+| `SPAM` | Spam | Spam observed |
+| `TRASH` | Trash, Lixo, Lixeira, Reciclagem | not observed |
+| `CHAT` | Chat, Chats | not observed |
+| `CATEGORY_PERSONAL` | Category Personal, Categoria Pessoal | Categoria Pessoal observed |
+| `CATEGORY_SOCIAL` | Category Social, Categoria Social, Categoria Redes sociais | not observed |
+| `CATEGORY_PROMOTIONS` | Category Promotions, Categoria Promoções | Categoria Promoções observed |
+| `CATEGORY_UPDATES` | Category Updates, Categoria Atualizações | Categoria Atualizações observed |
+| `CATEGORY_FORUMS` | Category Forums, Categoria Fóruns | not observed |
 
-Each Gmail id in the table also maps to itself. The Portuguese names are a guess until a real sample is checked.
+Each Gmail id in the table also maps to itself. Names are compared after Unicode NFC normalization. A Portuguese name marked not observed is a guess until a real sample shows it. The English names were not checked on real mail.
 
 Pseudo-labels. `pseudo:archived` means the message had no `INBOX` label when Takeout exported it. `pseudo:opened` means it had no `UNREAD` label. They come from Takeout only. They are not Gmail labels and are never sent to Gmail. The reserved `pseudo:` prefix on `labels.gmail_label_id` is what marks them as non-Gmail. The label row uses the id as its name and `kind` `system`. `kind` cannot carry a third value without rebuilding the `labels` table, so there is no migration. Rules 0 to 8 and dry-run read labels only through `mailcrawl.contract.GMAIL_LABEL_SQL`, which excludes `pseudo:` ids. Any later plan or Gmail write path must read labels the same way. A pseudo-label never gets catalogue fields. Only an mbox import writes or replaces a message's `pseudo:` labels. A gog import keeps them, ignores any `pseudo:` id in its own export, and does not count them toward `n_error` or `n_reconciled`, because `X-Gmail-Labels` is outside `raw_sha256`. Provisional `mbox:` label replacement leaves `pseudo:` rows alone. A pseudo-label is a Takeout snapshot. A later gog import does not recompute it from `INBOX` or `UNREAD`.
 
@@ -237,6 +249,6 @@ The phase plan leaves these items unspecified. They are undecided.
 - Go port.
 - Markdown-only gog exports.
 - Merging an `rfc822:` mbox row with a gog API row by `rfc822_message_id`. That merge needs approval.
-- The Takeout mbox format in section 4.1, until a sanitized real sample is checked.
+- The Takeout mbox facts in section 4.1 that are not marked observed on thehive, 2026-10-11, and Takeout versus gog reconciliation on real mail.
 
 Section 6 point 4 still rejects a record with no `eml` path.

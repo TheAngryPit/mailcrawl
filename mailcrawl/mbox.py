@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import re
+import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from email.header import decode_header, make_header
@@ -30,6 +31,7 @@ _GMAIL_ID_MAX = 1 << 64
 _SEPARATOR_ID = re.compile(rb"^From (\d+)@\S*")
 _SEPARATOR_REST = re.compile(rb"^From \S+\s+(.*?)\s*$")
 _ESCAPED_FROM = re.compile(rb"^>+From ")
+_TAKEOUT_HEADERS = ("x-gm-", "x-gmail-", "x-google-")
 _HEX = re.compile(r"[0-9a-f]+")
 _MESSAGE_ID = re.compile(r"<([^<>\s]+)>")
 _HEADER_END = re.compile(rb"\r?\n\r?\n")
@@ -135,7 +137,7 @@ def label_names(value: str | None) -> list[str]:
 
 
 def system_label(name: str) -> str | None:
-    return SYSTEM_LABELS.get(name.casefold())
+    return SYSTEM_LABELS.get(unicodedata.normalize("NFC", name).casefold())
 
 
 def thread_root(references: str | None, in_reply_to: str | None, own: str) -> str:
@@ -264,12 +266,19 @@ def _entries(handle: BinaryIO, digest: Callable[[bytes], None]) -> Iterator[tupl
             if not blank:
                 raise ExportInvalid("unsupported_schema", "file does not start with an mbox From line", 3)
         else:
-            lines.append(line[1:] if _ESCAPED_FROM.match(line) else line)
+            lines.append(_canonical(line[1:] if _ESCAPED_FROM.match(line) else line))
         previous_blank = blank
         offset += len(line)
     if separator is None:
         raise ExportInvalid("unsupported_schema", "file has no mbox From line", 3)
     yield start, separator, _join(lines)
+
+
+def _canonical(line: bytes) -> bytes:
+    """End every line with CRLF so the hash does not depend on the file's mixed endings."""
+    if line.endswith(b"\n"):
+        return line.rstrip(b"\r\n") + b"\r\n"
+    return line
 
 
 def _join(lines: list[bytes]) -> bytes:
@@ -279,7 +288,7 @@ def _join(lines: list[bytes]) -> bytes:
 
 
 def _strip_takeout(raw: bytes) -> tuple[bytes, _Takeout]:
-    """Drop ``X-GM-*`` and ``X-Gmail-Labels`` from the header block and read Takeout values."""
+    """Drop ``X-Gm-*``, ``X-Gmail-*``, and ``X-Google-*`` from the header block and read Takeout values."""
     found = _HEADER_END.search(raw)
     head, tail = (raw[: found.end()], raw[found.end() :]) if found else (raw, b"")
     kept: list[bytes] = []
@@ -295,7 +304,7 @@ def _strip_takeout(raw: bytes) -> tuple[bytes, _Takeout]:
             continue
         name, colon, rest = line.partition(b":")
         current = name.strip().decode("ascii", "replace").lower() if colon else ""
-        dropping = current.startswith("x-gm-") or current == "x-gmail-labels"
+        dropping = current.startswith(_TAKEOUT_HEADERS)
         capturing = current if current in _READ and current not in values else None
         if capturing is not None:
             values[capturing] = _header_text(rest)

@@ -86,10 +86,14 @@ def body_text(message: EmailMessage) -> str | None:
         elif isinstance(text, str) and kind == "text/html":
             html = text
     if plain is not None:
-        return plain
+        return _lf(plain)
     if html is not None:
-        return html_to_text(html)
+        return _lf(html_to_text(html))
     return None
+
+
+def _lf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def allow_headers(message: EmailMessage) -> dict[str, str]:
