@@ -98,6 +98,8 @@ Status: PLANNED. This section is out of the current scope. Sections 4 to 7 descr
 
 An inference stays marked as still to be decided. An open approval stays marked as still to be decided.
 
+Deterministic triage in phase 2 uses rules 0 to 8 and no model. No language model runs on the crawl path.
+
 ### Phase 2. Full thehive backup and export
 The work is a full thehive backup and export, the parser and OCR, rules 0 to 8, `stats`, and dry-run counts. The dry-run writes nothing.
 
@@ -106,7 +108,11 @@ Acceptance is coverage of 100% of Gmail threads. The known 404 stays outside tha
 An error under 2% on that sample is an inference. It is still to be decided. The full thehive backup needs Pit's approval. The cache-deletion policy needs Pit's approval. Both approvals are still to be decided.
 
 ### Phase 3. Embeddings
-The work is benchmarks B1 to B5, a choice of model and dimension, and clusters.
+The local baseline is EmbeddingGemma 2, stored with sqlite-vec at 256 or 768 dimensions. The choice of model and dimension is still open. `mailcrawl embed` is a separate step outside the crawl path.
+
+The fallback named in the plan is EmbeddingGemma 1. That fallback is an inference, and it is not benchmarked. It is still to be decided.
+
+The benchmarks are B1 retrieval, B2 label prediction, B3 scans, B4 cost, and B5 sanity. Clusters are part of this phase. Portuguese pt-PT quality is unverified. Speed on Pit's Mac is unverified. The full license text is unverified. Those three wait on benchmarks B1 to B5.
 
 Acceptance is decision rule G.6. The text of that rule is outside this spec.
 
@@ -134,7 +140,9 @@ Acceptance is that the inbox-zero definition in section J of an earlier plan hol
 Schedules and routines need approval. That approval is still to be decided.
 
 ### Phase 7. Optional local language model
-The work is advisory classification of `needs_review`.
+The work is a small local decision model. It is advisory only. It may suggest triage decisions and reply drafts for messages that deterministic rules leave in `needs_review`. It has no tools. It does not write to Gmail. Pit approves before any write.
+
+The concrete model is undefined. Pit mentioned a "laya decision model". That model is not identified yet.
 
 Acceptance is that the slice beats the rules baseline on an audit sample, and that it uses no tools.
 
