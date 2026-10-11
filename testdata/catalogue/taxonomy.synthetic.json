@@ -6,6 +6,16 @@
     {
       "name": "Example/Synthetic",
       "account": "example"
-    }
+    },
+    {"name": "Example origin/Person", "axis": "Sender origin", "key": "origin.person"},
+    {"name": "Example origin/Machine", "axis": "Sender origin", "key": "origin.machine"},
+    {"name": "Example type/Bulletin", "axis": "Content type", "key": "type.bulletin"},
+    {"name": "Example type/Listing", "axis": "Content type", "key": "type.listing"},
+    {"name": "Example type/Notice", "axis": "Content type", "key": "type.notice"},
+    {"name": "Example type/Receipt", "axis": "Content type", "key": "type.receipt"},
+    {"name": "Example type/Parcel", "axis": "Content type", "key": "type.parcel"},
+    {"name": "Example type/Agreement", "axis": "Content type", "key": "type.agreement"},
+    {"name": "Example type/Account", "axis": "Content type", "key": "type.account"},
+    {"name": "Example note/Brief", "axis": "Correspondence", "key": "note.brief"}
   ]
 }

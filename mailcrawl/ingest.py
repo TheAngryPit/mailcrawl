@@ -37,16 +37,28 @@ class ImportResult:
         self.n_error = n_error
 
 
-def load_catalogue_names(path: Path | None) -> set[str]:
+def load_catalogue_entries(path: Path | None) -> dict[str, dict[str, str | None]]:
     if path is None:
-        return set()
+        return {}
     document = json.loads(path.read_text(encoding="utf-8"))
-    names: set[str] = set()
+    entries: dict[str, dict[str, str | None]] = {}
     for label in document.get("labels") or []:
-        name = label.get("name") if isinstance(label, dict) else None
-        if isinstance(name, str) and name:
-            names.add(name)
-    return names
+        if not isinstance(label, dict):
+            continue
+        name = label.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        key = label.get("key")
+        axis = label.get("axis")
+        entries[name] = {
+            "key": key if isinstance(key, str) and key else None,
+            "axis": axis if isinstance(axis, str) and axis else None,
+        }
+    return entries
+
+
+def load_catalogue_names(path: Path | None) -> set[str]:
+    return set(load_catalogue_entries(path))
 
 
 def import_gog_export(
@@ -65,7 +77,7 @@ def import_gog_export(
     if account is None:
         raise UsageError("account is not initialized")
     account_id = int(account["account_id"])
-    catalogue = load_catalogue_names(taxonomy_path)
+    catalogue = load_catalogue_entries(taxonomy_path)
     version = mailcrawl_version()
     me = account_email.strip().lower()
     started = int(time.time())
@@ -177,18 +189,24 @@ def _upsert_label(
     conn: sqlite3.Connection,
     account_id: int,
     label: LabelRec,
-    catalogue: set[str],
+    catalogue: dict[str, dict[str, str | None]],
 ) -> None:
-    in_catalogue = 1 if label.name in catalogue else 0
-    catalogue_key = label.name if in_catalogue else None
+    entry = catalogue.get(label.name)
+    in_catalogue = 1 if entry is not None else 0
+    catalogue_key = None
+    axis = None
+    if entry is not None:
+        catalogue_key = entry["key"] or label.name
+        axis = entry["axis"]
     conn.execute(
         """
         INSERT INTO labels(
-          account_id, gmail_label_id, name, kind, in_catalogue, catalogue_key, seen_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 0)
+          account_id, gmail_label_id, name, kind, axis, in_catalogue, catalogue_key, seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
         ON CONFLICT(account_id, gmail_label_id) DO UPDATE SET
           name = excluded.name,
           kind = excluded.kind,
+          axis = excluded.axis,
           in_catalogue = excluded.in_catalogue,
           catalogue_key = excluded.catalogue_key
         """,
@@ -197,6 +215,7 @@ def _upsert_label(
             label.gmail_label_id,
             label.name,
             label.kind,
+            axis,
             in_catalogue,
             catalogue_key,
         ),

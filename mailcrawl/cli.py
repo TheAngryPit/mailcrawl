@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from mailcrawl.configfile import account_email, taxonomy_path, write_account
@@ -12,6 +13,7 @@ from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import import_gog_export
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
+from mailcrawl.rules import apply_rules, load_rules
 from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
 
@@ -30,6 +32,8 @@ def main(argv: list[str] | None = None) -> int:
             return _import(args)
         if args.command == "search":
             return _search(args)
+        if args.command == "rules":
+            return _rules(args)
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
@@ -42,6 +46,9 @@ def main(argv: list[str] | None = None) -> int:
     except ManifestMismatch as exc:
         _emit(args, {"detail": str(exc), "error": "manifest_mismatch", "ok": False})
         return 1
+    except ValueError as exc:
+        _emit(args, {"detail": str(exc), "error": "usage", "ok": False})
+        return 2
     except UsageError as exc:
         _emit(args, {"detail": str(exc), "error": "usage", "ok": False})
         return 2
@@ -72,6 +79,11 @@ def _parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search")
     search.add_argument("query")
     search.add_argument("--account", required=True)
+
+    rules = sub.add_parser("rules")
+    rules.add_argument("--account", required=True)
+    rules.add_argument("--rules", required=True)
+    rules.add_argument("--now", type=int)
     return parser
 
 
@@ -145,6 +157,32 @@ def _search(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     _emit(args, {"hits": hits, "ok": True, "query": args.query})
+    return 0
+
+
+def _rules(args: argparse.Namespace) -> int:
+    alias = canonical_alias(args.account)
+    db_path = data_dir(args.home) / f"{alias}.db"
+    if not db_path.is_file():
+        raise UsageError("account is not initialized")
+    config = load_rules(Path(args.rules))
+    now = int(time.time()) if args.now is None else args.now
+    conn = connect(db_path)
+    try:
+        report = apply_rules(conn, now=now, config=config)
+    finally:
+        conn.close()
+    _emit(
+        args,
+        {
+            "by_rule": report.by_rule,
+            "by_state": report.by_state,
+            "covered": report.covered,
+            "ok": True,
+            "rules_version": config.rules_version,
+            "threads": report.threads,
+        },
+    )
     return 0
 
 

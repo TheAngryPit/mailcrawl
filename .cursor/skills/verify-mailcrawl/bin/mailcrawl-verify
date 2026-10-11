@@ -19,6 +19,10 @@ scaffold_proof_runnable() {
   [[ -f "$REPO_ROOT/Makefile" && -f "$REPO_ROOT/scripts/proof.sh" ]]
 }
 
+rules_runnable() {
+  [[ -f "$REPO_ROOT/testdata/rules/rules-v0.json" ]]
+}
+
 attachment_parse_runnable() {
   body_clean_runnable && native_fixture_runnable
 }
@@ -391,6 +395,104 @@ PY
   trap - EXIT
 }
 
+drive_rules_v0() {
+  if ! rules_runnable; then
+    log "rules v0: not runnable"
+    return 2
+  fi
+  mkdir -p "$SCRATCH_DIR"
+  local home
+  home="$(mktemp -d "$SCRATCH_DIR/rules-home.XXXXXX")"
+  RULES_HOME="$home"
+  trap 'rm -rf "$RULES_HOME"' EXIT
+  mailcrawl_in "$home" --json init --account vcl --email ada@example.com >/dev/null
+  local db="$home/.local/share/mailcrawl/vcl.db"
+  DB_PATH="$db" python3 - <<'PY'
+import os, sqlite3
+conn = sqlite3.connect(os.environ["DB_PATH"])
+conn.execute("PRAGMA foreign_keys = ON")
+account = conn.execute("SELECT account_id FROM accounts").fetchone()[0]
+now = 1700000000
+
+def add(number, body, starred):
+    conn.execute(
+        "INSERT INTO senders(account_id, address_norm, domain) VALUES (?, ?, 'example.com')",
+        (account, f"bao{number}@example.com"),
+    )
+    sender = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO threads(account_id, gmail_thread_id) VALUES (?, ?)",
+        (account, f"rules-{number}"),
+    )
+    thread = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO messages(
+          account_id, gmail_message_id, thread_pk, internal_date, sender_id,
+          body_text, is_from_me, raw_sha256, provenance_hash, imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 0, 'raw', 'prov', ?)
+        """,
+        (account, f"rules-msg-{number}", thread, now - 86400, sender, body, now),
+    )
+    if starred:
+        msg = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.execute(
+            "INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at) VALUES (?, 'STARRED', 'STARRED', 'system', ?)",
+            (account, now),
+        )
+        conn.execute(
+            "INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at) VALUES (?, ?, 'STARRED', ?)",
+            (msg, account, now),
+        )
+
+add(1, "secretbodyqx", True)
+add(2, "hello there", False)
+conn.commit()
+conn.close()
+PY
+  local rules_out
+  rules_out="$(mailcrawl_in "$home" --json rules \
+    --account vcl \
+    --rules "$REPO_ROOT/testdata/rules/rules-v0.json" \
+    --now 1700000000)"
+  printf '%s\n' "$rules_out"
+  if printf '%s' "$rules_out" | grep -q secretbodyqx; then
+    log "rules v0: output included message text"
+    return 1
+  fi
+  printf '%s' "$rules_out" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+ok = (
+    doc.get("rules_version") == "rules-v0"
+    and doc.get("threads") == 2
+    and doc.get("covered") == 2
+    and doc.get("by_state") == {"needs_review": 1, "reply": 1}
+    and doc.get("by_rule") == {"0": 1, "5": 1}
+)
+sys.exit(0 if ok else 1)
+' || {
+    log "rules v0: counts drifted"
+    return 1
+  }
+  mailcrawl_in "$home" --json rules \
+    --account vcl \
+    --rules "$REPO_ROOT/testdata/rules/rules-v0.json" \
+    --now 1700000000 >/dev/null
+  local count
+  count="$(python3 - "$db" <<'PY'
+import sqlite3, sys
+print(sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM decisions").fetchone()[0])
+PY
+)"
+  if [[ "$count" != "2" ]]; then
+    log "rules v0: rerun added decisions"
+    return 1
+  fi
+  rm -rf "$RULES_HOME"
+  trap - EXIT
+}
+
 cmd_doctor() {
   mkdir -p "$EVIDENCE_DIR"
   {
@@ -420,6 +522,11 @@ cmd_doctor() {
     else
       log "attachment parse: not runnable (missing v0 export or native fixture)"
     fi
+    if rules_runnable; then
+      log "rules v0: runnable"
+    else
+      log "rules v0: not runnable (missing testdata/rules/rules-v0.json)"
+    fi
     log "doctor ok"
   } | tee "$EVIDENCE_DIR/doctor.log"
 }
@@ -443,6 +550,7 @@ cmd_drive() {
       native-gog-import) drive_native_gog_import || drive_code=$? ;;
       body-clean) drive_body_clean || drive_code=$? ;;
       attachment-parse) drive_attachment_parse || drive_code=$? ;;
+      rules-v0) drive_rules_v0 || drive_code=$? ;;
       *)
         log "unknown feature: $feature"
         drive_code=1

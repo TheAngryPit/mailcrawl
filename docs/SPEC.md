@@ -28,6 +28,7 @@ mailcrawl/contract.py            # v0 fixture contract
 mailcrawl/gognative.py           # gog backup plaintext export
 mailcrawl/eml.py                 # RFC822 parse for that export
 mailcrawl/extract.py             # attachment parser interface
+mailcrawl/rules.py               # rules 0–8, no model
 mailcrawl/schema.py              # schema v2 DDL
 mailcrawl/store.py               # open one account database and migrate it
 mailcrawl/ingest.py              # idempotent gog-export import
@@ -48,6 +49,7 @@ Phase 1 is read-only Python and it does all of the following:
 - Import a gog export idempotently on `(account_id, gmail_message_id)`. `mailcrawl import gog-export` does that for the fixture contract and for a gog backup plaintext export.
 - Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`. Import writes `msg_fts` from the cleaned body. `mailcrawl search` reads it.
 - Parse attachment bytes through `mailcrawl.extract`. `text/plain` and `text/html` are extracted. Other types stay behind that interface. No external binary is required.
+- Apply rules 0 to 8 with `mailcrawl rules`. `rules_version` is `rules-v0`. The command prints counts only.
 - Speak JSON on the CLI. `init`, `import`, and `search` accept `--json` before the command.
 - Test against synthetic fixtures only.
 
@@ -77,6 +79,7 @@ make check && scripts/proof.sh
 11. The synthetic native gog export imports, a second import counts every row as a duplicate, and `search reuniao` finds `reunião` in that export.
 12. For the v0 fixture message that contains a `>` quote and a `-- ` signature, `body_text_raw` keeps both, `body_text` keeps only the sentence above them, and `search quoted` does not return that message. `search fake` does.
 13. The v0 metadata attachment is `skipped` with reason `no_bytes`. The native text attachment is `ok`. The native octet-stream attachment is `unsupported` and is not searchable. OCR thresholds 25 and 60 run only when a backend is supplied.
+14. `mailcrawl rules` on a synthetic account prints counts. A `STARRED` thread is `needs_review` under rule `0`. A plain thread is `reply` under rule `5`. A second run does not add a decision. The output has no message body.
 
 ## 6. Closed decisions
 These points are closed.
@@ -101,17 +104,17 @@ These points are closed.
 18. No language model runs on the crawl. The first matching rule wins. There is no Gmail write, no network, and no `gog`.
 
 ## 7. Scope
-**In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, schema v2, body cleaning, the attachment parser interface, `init`, idempotent `import gog-export` for the fixture contract and for a gog backup plaintext export, FTS search over the cleaned body, and the phase 1 proof.
+**In this revision:** spec, README, security policy, contributing guide, `make check`, CI, synthetic fixtures, schema v2, body cleaning, the attachment parser interface, rules 0 to 8, `init`, idempotent `import gog-export` for the fixture contract and for a gog backup plaintext export, FTS search over the cleaned body, and the phase 1 proof.
 
-**Out of scope:** rules 0 to 8, `stats`, and dry-run counts are closed in section 6 and land in later phase 2 revisions. Embeddings, label apply, Gmail writes, running `gog`, a language model on the crawl path, a full thehive backup, cache deletion, markdown-only gog exports, and the Go port stay out. Section 4 records a 25-message thehive smoke import. A full mailbox import is not this revision.
+**Out of scope:** `stats` and dry-run counts are closed in section 6 and land in a later phase 2 revision. Embeddings, label apply, Gmail writes, running `gog`, a language model on the crawl path, a full thehive backup, cache deletion, markdown-only gog exports, and the Go port stay out. Section 4 records a 25-message thehive smoke import. A full mailbox import is not this revision.
 
 ## 8. Later phases
-Body cleaning, schema v2, and the attachment interface are in this revision. Sections 4 to 7 describe that work. Rules 0 to 8 and dry-run counts stay specified in section 6 and are not implemented here.
+Body cleaning, schema v2, the attachment interface, and rules 0 to 8 are in this revision. Sections 4 to 7 describe that work. `stats` and dry-run counts stay specified in section 6 and are not implemented here.
 
 An inference stays marked as still to be decided. An open approval stays marked as still to be decided.
 
 ### Phase 2. Cleaned text, parser interface, rules, and counts
-Body cleaning and the attachment interface are done. The remaining work is deterministic rules 0 to 8 with `rules_version` `rules-v0` and no model, and `stats` plus dry-run counts. Dry-run prints counts only. It writes no plan file and it does not touch Gmail.
+Body cleaning, the attachment interface, and rules 0 to 8 are done. `rules_version` is `rules-v0`. There is no model. The remaining work is `stats` and dry-run counts. Dry-run prints counts only. It writes no plan file and it does not touch Gmail.
 
 A full thehive backup is not part of phase 2. Cache deletion is not part of phase 2. A sample of 100 and an error under 2% are not a fixture gate. Coverage is the counts in section 6 point 15.
 

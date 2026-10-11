@@ -1,0 +1,23 @@
+{
+  "schema": "mailcrawl.rules.v0",
+  "synthetic": true,
+  "rules_version": "rules-v0",
+  "read_later_expiry_days": 30,
+  "review_days": 7,
+  "unrecognized_days": 7,
+  "keys": {
+    "human": "origin.person",
+    "automated": "origin.machine",
+    "newsletter": "type.bulletin",
+    "job_alert": "type.listing",
+    "notification": "type.notice",
+    "finance": "type.receipt",
+    "purchase": "type.parcel",
+    "contract": "type.agreement",
+    "account_security": "type.account",
+    "brief": "note.brief"
+  },
+  "question": ["can you", "could you", "podes", "consegues", "pode"],
+  "task": ["please", "por favor", "preciso que", "need you to", "can you send"],
+  "closing": ["thanks", "obrigado", "cumprimentos", "best regards", "perfect", "combinado"]
+}

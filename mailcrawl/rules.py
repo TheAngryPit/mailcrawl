@@ -1,0 +1,589 @@
+"""Deterministic rules 0–8. No model. First match wins."""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from dataclasses import dataclass
+from pathlib import Path
+
+RULES_VERSION = "rules-v0"
+_DAY = 86400
+_KEY_ROLES = (
+    "human",
+    "automated",
+    "newsletter",
+    "job_alert",
+    "notification",
+    "finance",
+    "purchase",
+    "contract",
+    "account_security",
+    "brief",
+)
+
+
+@dataclass(frozen=True)
+class RulesConfig:
+    rules_version: str
+    read_later_expiry_days: int
+    review_days: int
+    unrecognized_days: int
+    keys: dict[str, str]
+    question: tuple[str, ...]
+    task: tuple[str, ...]
+    closing: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Coverage:
+    threads: int
+    covered: int
+    by_state: dict[str, int]
+    by_rule: dict[str, int]
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    next_state: str
+    rule_id: str
+    lane: str
+    priority: int | None
+    review_date: int | None
+    muted: int
+    evidence: tuple[dict[str, object], ...]
+
+
+def load_rules(path: Path) -> RulesConfig:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    version = document.get("rules_version")
+    if version != RULES_VERSION:
+        raise ValueError(f"rules_version {version}")
+    keys = document.get("keys")
+    if not isinstance(keys, dict):
+        raise ValueError("rules file needs keys")
+    mapped = {role: str(keys[role]) for role in _KEY_ROLES}
+    return RulesConfig(
+        rules_version=version,
+        read_later_expiry_days=int(document["read_later_expiry_days"]),
+        review_days=int(document["review_days"]),
+        unrecognized_days=int(document["unrecognized_days"]),
+        keys=mapped,
+        question=_phrases(document.get("question")),
+        task=_phrases(document.get("task")),
+        closing=_phrases(document.get("closing")),
+    )
+
+
+def apply_rules(conn: sqlite3.Connection, *, now: int, config: RulesConfig) -> Coverage:
+    threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
+    for thread in threads:
+        thread_pk = int(thread[0])
+        _apply_thread(conn, thread_pk, now, config)
+    conn.commit()
+    return coverage_counts(conn)
+
+
+def coverage_counts(conn: sqlite3.Connection) -> Coverage:
+    threads = int(conn.execute("SELECT count(*) FROM threads").fetchone()[0])
+    rows = conn.execute(
+        """
+        SELECT next_state, rule_id FROM decisions
+        WHERE superseded_by IS NULL
+        """
+    ).fetchall()
+    by_state: dict[str, int] = {}
+    by_rule: dict[str, int] = {}
+    for state, rule_id in rows:
+        by_state[str(state)] = by_state.get(str(state), 0) + 1
+        by_rule[str(rule_id)] = by_rule.get(str(rule_id), 0) + 1
+    return Coverage(threads, len(rows), by_state, by_rule)
+
+
+def _phrases(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("rules file needs a phrase list")
+    phrases: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("rules phrase must be text")
+        phrases.append(item.strip().lower())
+    return tuple(phrases)
+
+
+def _apply_thread(
+    conn: sqlite3.Connection,
+    thread_pk: int,
+    now: int,
+    config: RulesConfig,
+) -> None:
+    facts = _load(conn, thread_pk, now, config)
+    current = conn.execute(
+        """
+        SELECT decision_id, thread_pk, next_state, rule_id, lane, priority,
+               review_date, muted, created_at
+        FROM decisions
+        WHERE thread_pk = ? AND superseded_by IS NULL
+        """,
+        (thread_pk,),
+    ).fetchone()
+    if current is not None:
+        outcome = _transition(current, facts, now, config)
+        if outcome is None:
+            return
+        _supersede(conn, current, outcome, now, config.rules_version)
+        return
+    outcome = _classify(facts, now, config)
+    _insert_decision(conn, thread_pk, outcome, now, config.rules_version, None)
+
+
+def _transition(current: sqlite3.Row, facts: "_Facts", now: int, config: RulesConfig) -> _Outcome | None:
+    state = str(current["next_state"])
+    created = int(current["created_at"])
+    if state == "waiting" and _reply_after(facts, created):
+        return _outcome(
+            "reply",
+            "t-reply",
+            "imbox",
+            facts.priority if _priority_ok(facts.priority) else None,
+            None,
+            0,
+            ({"type": "rule", "name": "t-reply"},),
+        )
+    review = current["review_date"]
+    if state == "waiting" and review is not None and now >= int(review):
+        return _outcome(
+            "needs_review",
+            "t-overdue",
+            "imbox",
+            None,
+            None,
+            0,
+            ({"type": "rule", "name": "t-overdue"},),
+        )
+    expiry = created + config.read_later_expiry_days * _DAY
+    if state == "read_later" and now >= expiry:
+        if facts.protected:
+            return _outcome(
+                "needs_review",
+                "t-expiry",
+                "imbox",
+                None,
+                None,
+                0,
+                ({"type": "rule", "name": "t-expiry"}, {"type": "guard", "name": "protected"}),
+            )
+        return _outcome(
+            "noise",
+            "t-expiry",
+            "feed",
+            None,
+            None,
+            0,
+            ({"type": "rule", "name": "t-expiry"},),
+        )
+    return None
+
+
+def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
+    if facts.starred:
+        return _outcome(
+            "needs_review",
+            "0",
+            "imbox",
+            None,
+            None,
+            0,
+            _labels(facts.star_labels) + ({"type": "rule", "name": "0"},),
+        )
+    protected = facts.protected
+    if facts.muted or facts.denied:
+        if not protected:
+            return _outcome(
+                "noise",
+                "1",
+                "screened_out",
+                None,
+                None,
+                1 if facts.muted else 0,
+                ({"type": "rule", "name": "1"},),
+            )
+    if facts.on_read_list and facts.has_key("newsletter"):
+        return _outcome(
+            "read_later",
+            "2-read",
+            "feed",
+            None,
+            now + config.read_later_expiry_days * _DAY,
+            0,
+            _labels(facts.keys.get("newsletter", ())) + ({"type": "rule", "name": "2-read"},),
+        )
+    if _structural_noise(facts) and not protected:
+        return _outcome(
+            "noise",
+            "2",
+            "feed",
+            None,
+            None,
+            0,
+            ({"type": "rule", "name": "2"},),
+        )
+    if facts.has_key("finance") or facts.has_key("purchase"):
+        role = "finance" if facts.has_key("finance") else "purchase"
+        return _outcome(
+            "reference",
+            "3",
+            "paper_trail",
+            None,
+            None,
+            0,
+            _labels(facts.keys.get(role, ())) + ({"type": "rule", "name": "3"},),
+        )
+    if facts.has_key("account_security"):
+        fresh = facts.last_at is not None and (now - facts.last_at) < config.unrecognized_days * _DAY
+        if facts.sender_known is False and fresh:
+            return _outcome(
+                "needs_review",
+                "4",
+                "imbox",
+                None,
+                None,
+                0,
+                _labels(facts.keys.get("account_security", ())) + ({"type": "rule", "name": "4"},),
+            )
+        return _outcome(
+            "reference",
+            "4",
+            "paper_trail",
+            None,
+            None,
+            0,
+            _labels(facts.keys.get("account_security", ())) + ({"type": "rule", "name": "4"},),
+        )
+    if facts.human and not facts.last_from_me:
+        priority = facts.priority if _priority_ok(facts.priority) else None
+        evidence: tuple[dict[str, object], ...] = ({"type": "rule", "name": "5"},)
+        if facts.sender_id is not None:
+            evidence = ({"type": "sender", "id": facts.sender_id},) + evidence
+        return _outcome("reply", "5", "imbox", priority, None, 0, evidence)
+    if facts.last_from_me and (_question(facts.body, config) or _task(facts.body, config)):
+        return _outcome(
+            "waiting",
+            "6",
+            "imbox",
+            None,
+            now + config.review_days * _DAY,
+            0,
+            ({"type": "rule", "name": "6"},),
+        )
+    if not facts.last_from_me and _task(facts.body, config):
+        return _outcome("action", "7", "imbox", None, None, 0, ({"type": "rule", "name": "7"},))
+    if _closing(facts.body, config) and not _question(facts.body, config) and not _task(facts.body, config):
+        if not protected:
+            return _outcome("resolved", "8", "imbox", None, None, 0, ({"type": "rule", "name": "8"},))
+    return _outcome("needs_review", "else", "imbox", None, None, 0, ({"type": "rule", "name": "else"},))
+
+
+def _structural_noise(facts: "_Facts") -> bool:
+    if facts.human or not facts.has_key("automated"):
+        return False
+    noisy = facts.has_key("newsletter") or facts.has_key("job_alert") or facts.has_key("notification")
+    return noisy and facts.listish
+
+
+@dataclass
+class _Facts:
+    starred: bool
+    star_labels: tuple[dict[str, object], ...]
+    protected: bool
+    muted: bool
+    denied: bool
+    on_read_list: bool
+    human: bool
+    last_from_me: bool
+    last_at: int | None
+    body: str
+    sender_id: int | None
+    sender_known: bool
+    priority: int | None
+    keys: dict[str, tuple[dict[str, object], ...]]
+    listish: bool
+
+    def has_key(self, role: str) -> bool:
+        return bool(self.keys.get(role))
+
+
+def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfig) -> _Facts:
+    messages = conn.execute(
+        """
+        SELECT msg_pk, sender_id, is_from_me, internal_date, body_text
+        FROM messages
+        WHERE thread_pk = ?
+        ORDER BY internal_date, msg_pk
+        """,
+        (thread_pk,),
+    ).fetchall()
+    mute = conn.execute(
+        "SELECT until FROM thread_mutes WHERE thread_pk = ?",
+        (thread_pk,),
+    ).fetchone()
+    key_hits: dict[str, list[dict[str, object]]] = {role: [] for role in _KEY_ROLES}
+    star_labels: list[dict[str, object]] = []
+    listish = False
+    human_label = False
+    automated_label = False
+    header_human = False
+    external_senders: list[int] = []
+    for message in messages:
+        labels = _message_labels(conn, int(message["msg_pk"]))
+        for label in labels:
+            if label["id"] in ("STARRED", "IMPORTANT"):
+                star_labels.append(label)
+            for role, key in config.keys.items():
+                if label["key"] == key:
+                    key_hits[role].append(label)
+        if not message["is_from_me"] and message["sender_id"] is not None:
+            sender_id = int(message["sender_id"])
+            external_senders.append(sender_id)
+            sender_keys = {label["key"] for label in labels}
+            if config.keys["human"] in sender_keys:
+                human_label = True
+            elif config.keys["automated"] in sender_keys:
+                automated_label = True
+            elif _header_human(conn, int(message["msg_pk"])):
+                header_human = True
+        if _listish(conn, int(message["msg_pk"])):
+            listish = True
+    last = messages[-1] if messages else None
+    sender_id = external_senders[-1] if external_senders else None
+    decision = _sender_decision(conn, sender_id)
+    known = decision is not None
+    denied = bool(decision and decision["status"] == "denied")
+    on_read_list = bool(decision and decision["route"] == "read")
+    approved_imbox = bool(
+        decision and decision["status"] == "approved" and decision["route"] == "imbox"
+    )
+    priority = None
+    if decision is not None and decision["priority"] is not None:
+        priority = int(decision["priority"])
+    protected = approved_imbox or bool(key_hits["contract"] or key_hits["account_security"] or key_hits["finance"])
+    if key_hits["brief"] and (human_label or header_human):
+        protected = True
+    human = human_label or (header_human and not automated_label)
+    muted = False
+    if mute is not None and (mute["until"] is None or int(mute["until"]) >= now):
+        muted = True
+    return _Facts(
+        starred=bool(star_labels),
+        star_labels=tuple(star_labels),
+        protected=protected,
+        muted=muted,
+        denied=denied,
+        on_read_list=on_read_list,
+        human=human,
+        last_from_me=bool(last and last["is_from_me"]),
+        last_at=None if last is None or last["internal_date"] is None else int(last["internal_date"]),
+        body="" if last is None or last["body_text"] is None else str(last["body_text"]),
+        sender_id=sender_id,
+        sender_known=known,
+        priority=priority,
+        keys={role: tuple(items) for role, items in key_hits.items()},
+        listish=listish,
+    )
+
+
+def _message_labels(conn: sqlite3.Connection, msg_pk: int) -> list[dict[str, object]]:
+    rows = conn.execute(
+        """
+        SELECT labels.gmail_label_id, labels.name, labels.catalogue_key
+        FROM message_labels
+        JOIN labels
+          ON labels.account_id = message_labels.account_id
+         AND labels.gmail_label_id = message_labels.gmail_label_id
+        WHERE message_labels.msg_pk = ?
+        """,
+        (msg_pk,),
+    ).fetchall()
+    labels: list[dict[str, object]] = []
+    for row in rows:
+        labels.append(
+            {
+                "type": "label",
+                "id": row["gmail_label_id"],
+                "name": row["name"],
+                "key": row["catalogue_key"],
+            }
+        )
+    return labels
+
+
+def _header_human(conn: sqlite3.Connection, msg_pk: int) -> bool:
+    rows = conn.execute(
+        "SELECT name, value FROM headers WHERE msg_pk = ?",
+        (msg_pk,),
+    ).fetchall()
+    found = {str(row["name"]).lower(): str(row["value"]) for row in rows}
+    if "list-unsubscribe" in found:
+        return False
+    precedence = found.get("precedence", "").strip().lower()
+    if re.search(r"(?<!\w)(bulk|list)(?!\w)", precedence):
+        return False
+    auto = found.get("auto-submitted")
+    if auto is not None and auto.strip().lower() != "no":
+        return False
+    return True
+
+
+def _listish(conn: sqlite3.Connection, msg_pk: int) -> bool:
+    rows = conn.execute(
+        "SELECT name, value FROM headers WHERE msg_pk = ?",
+        (msg_pk,),
+    ).fetchall()
+    for row in rows:
+        name = str(row["name"]).lower()
+        value = str(row["value"]).strip().lower()
+        if name in ("list-unsubscribe", "list-id"):
+            return True
+        if name == "precedence" and re.search(r"(?<!\w)(bulk|list)(?!\w)", value):
+            return True
+    return False
+
+
+def _sender_decision(conn: sqlite3.Connection, sender_id: int | None) -> sqlite3.Row | None:
+    if sender_id is None:
+        return None
+    return conn.execute(
+        """
+        SELECT status, route, priority FROM sender_decisions
+        WHERE sender_id = ?
+        """,
+        (sender_id,),
+    ).fetchone()
+
+
+def _reply_after(facts: _Facts, created_at: int) -> bool:
+    return False if facts.last_at is None else (not facts.last_from_me and facts.last_at > created_at)
+
+
+def _question(body: str, config: RulesConfig) -> bool:
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.endswith("?"):
+            return True
+        lowered = stripped.lower()
+        for phrase in config.question:
+            if lowered == phrase or lowered.startswith(phrase + " "):
+                return True
+    return False
+
+
+def _task(body: str, config: RulesConfig) -> bool:
+    return any(_phrase_in(body, phrase) for phrase in config.task)
+
+
+def _closing(body: str, config: RulesConfig) -> bool:
+    return any(_phrase_in(body, phrase) for phrase in config.closing)
+
+
+def _phrase_in(body: str, phrase: str) -> bool:
+    pattern = r"(?<!\w)" + re.escape(phrase.lower()) + r"(?!\w)"
+    return re.search(pattern, body.lower()) is not None
+
+
+def _priority_ok(priority: int | None) -> bool:
+    return priority is not None and 0 <= priority <= 3
+
+
+def _labels(items: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ...]:
+    cleaned: list[dict[str, object]] = []
+    for item in items:
+        cleaned.append({"type": "label", "id": item.get("id"), "name": item.get("name")})
+    return tuple(cleaned)
+
+
+def _outcome(
+    state: str,
+    rule_id: str,
+    lane: str,
+    priority: int | None,
+    review_date: int | None,
+    muted: int,
+    evidence: tuple[dict[str, object], ...],
+) -> _Outcome:
+    return _Outcome(state, rule_id, lane, priority, review_date, muted, evidence)
+
+
+def _supersede(
+    conn: sqlite3.Connection,
+    current: sqlite3.Row,
+    outcome: _Outcome,
+    now: int,
+    rules_version: str,
+) -> None:
+    if _same(current, outcome):
+        return
+    old_id = int(current["decision_id"])
+    conn.execute(
+        "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+        (old_id, old_id),
+    )
+    new_id = _insert_decision(
+        conn,
+        int(current["thread_pk"]),
+        outcome,
+        now,
+        rules_version,
+        None,
+    )
+    conn.execute(
+        "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+        (new_id, old_id),
+    )
+
+
+def _same(current: sqlite3.Row, outcome: _Outcome) -> bool:
+    priority = current["priority"]
+    review = current["review_date"]
+    return (
+        str(current["next_state"]) == outcome.next_state
+        and str(current["rule_id"]) == outcome.rule_id
+        and str(current["lane"]) == outcome.lane
+        and priority == outcome.priority
+        and review == outcome.review_date
+        and int(current["muted"]) == outcome.muted
+    )
+
+
+def _insert_decision(
+    conn: sqlite3.Connection,
+    thread_pk: int,
+    outcome: _Outcome,
+    now: int,
+    rules_version: str,
+    superseded_by: int | None,
+) -> int:
+    evidence = json.dumps(list(outcome.evidence), sort_keys=True, separators=(",", ":"))
+    row = conn.execute(
+        """
+        INSERT INTO decisions(
+          thread_pk, next_state, priority, review_date, lane, muted,
+          source, rule_id, rules_version, evidence, created_at, superseded_by
+        ) VALUES (?, ?, ?, ?, ?, ?, 'rule', ?, ?, ?, ?, ?)
+        RETURNING decision_id
+        """,
+        (
+            thread_pk,
+            outcome.next_state,
+            outcome.priority,
+            outcome.review_date,
+            outcome.lane,
+            outcome.muted,
+            outcome.rule_id,
+            rules_version,
+            evidence,
+            now,
+            superseded_by,
+        ),
+    ).fetchone()
+    return int(row["decision_id"])
