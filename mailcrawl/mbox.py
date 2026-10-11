@@ -102,6 +102,8 @@ def gmail_hex(value: str | bytes | None, *, decimal_only: bool) -> str | None:
     if value is None:
         return None
     text = (value.decode("ascii", "replace") if isinstance(value, bytes) else value).strip().lower()
+    if len(text) > 24:
+        return None
     if text.isascii() and text.isdigit():
         number = int(text)
     elif decimal_only:
@@ -120,7 +122,10 @@ def gmail_hex(value: str | bytes | None, *, decimal_only: bool) -> str | None:
 def label_names(value: str | None) -> list[str]:
     if not value:
         return []
-    row = next(csv.reader([value], skipinitialspace=True), [])
+    try:
+        row = next(csv.reader([value], skipinitialspace=True), [])
+    except csv.Error:
+        row = value.split(",")
     return [name.strip() for name in row if name.strip()]
 
 

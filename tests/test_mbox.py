@@ -289,6 +289,7 @@ class MboxParserTest(unittest.TestCase):
         self.assertIsNone(gmail_hex(str(1 << 64), decimal_only=True))
         self.assertIsNone(gmail_hex("not-a-number", decimal_only=False))
         self.assertIsNone(gmail_hex("", decimal_only=False))
+        self.assertIsNone(gmail_hex("9" * 5000, decimal_only=True))
 
     def test_label_names_and_system_table(self) -> None:
         self.assertEqual(
