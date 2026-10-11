@@ -5,6 +5,8 @@ from __future__ import annotations
 import datetime
 import sqlite3
 
+from mailcrawl.contract import GMAIL_LABEL_SQL
+
 
 def stats(conn: sqlite3.Connection) -> dict[str, object]:
     messages = int(conn.execute("SELECT count(*) FROM messages").fetchone()[0])
@@ -47,14 +49,14 @@ def dry_run(conn: sqlite3.Connection) -> dict[str, object]:
         by_rule[rule_id] = by_rule.get(rule_id, 0) + 1
         thread_pk = int(row["thread_pk"])
         for (name,) in conn.execute(
-            """
+            f"""
             SELECT DISTINCT labels.name
             FROM message_labels
             JOIN messages ON messages.msg_pk = message_labels.msg_pk
             JOIN labels
               ON labels.account_id = message_labels.account_id
              AND labels.gmail_label_id = message_labels.gmail_label_id
-            WHERE messages.thread_pk = ?
+            WHERE messages.thread_pk = ? AND {GMAIL_LABEL_SQL}
             ORDER BY labels.name
             """,
             (thread_pk,),

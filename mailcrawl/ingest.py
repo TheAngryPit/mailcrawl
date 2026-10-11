@@ -15,6 +15,7 @@ from mailcrawl.contract import (
     LabelRec,
     MessageRec,
     infer_kind,
+    is_pseudo_label,
     parse_export,
 )
 from mailcrawl.gognative import load_labels, load_native
@@ -157,7 +158,8 @@ def _ingest(
     try:
         for item in items:
             if isinstance(item, LabelRec):
-                _upsert_label(conn, account_id, item, catalogue)
+                if source == "mbox" or not is_pseudo_label(item.gmail_label_id):
+                    _upsert_label(conn, account_id, item, catalogue)
                 continue
             if isinstance(item, Refused):
                 refused.append({"offset": item.offset, "reason": item.reason})
@@ -279,8 +281,9 @@ def _upsert_label(
     label: LabelRec,
     catalogue: dict[str, dict[str, str | None]],
 ) -> None:
+    pseudo = is_pseudo_label(label.gmail_label_id)
     provisional = PROVISIONAL + label.name
-    adopting = label.gmail_label_id != provisional and conn.execute(
+    adopting = not pseudo and label.gmail_label_id != provisional and conn.execute(
         "SELECT 1 FROM labels WHERE account_id = ? AND gmail_label_id = ? AND name = ?",
         (account_id, provisional, label.name),
     ).fetchone() is not None
@@ -289,7 +292,7 @@ def _upsert_label(
             "UPDATE labels SET name = gmail_label_id WHERE account_id = ? AND gmail_label_id = ?",
             (account_id, provisional),
         )
-    entry = catalogue.get(label.name)
+    entry = None if pseudo else catalogue.get(label.name)
     in_catalogue = 1 if entry is not None else 0
     catalogue_key = None
     axis = None
@@ -402,7 +405,7 @@ def _upsert_message(
     ).fetchone()
     if inserted is not None:
         msg_pk = int(inserted["msg_pk"])
-        _write_children(conn, account_id, msg_pk, message)
+        _write_children(conn, account_id, msg_pk, message, source)
         return "new", None
     existing = conn.execute(
         """
@@ -423,7 +426,7 @@ def _upsert_message(
     else:
         return "conflict", kept_sha
     msg_pk = int(existing["msg_pk"])
-    _replace_labels(conn, account_id, msg_pk, message)
+    _replace_labels(conn, account_id, msg_pk, message, source)
     current = str(existing["gmail_thread_id"])
     incoming = message.gmail_thread_id
     if current != incoming and current.startswith(PROVISIONAL) and not incoming.startswith(PROVISIONAL):
@@ -436,13 +439,14 @@ def _write_children(
     account_id: int,
     msg_pk: int,
     message: MessageRec,
+    source: str,
 ) -> None:
     for name, value in message.headers:
         conn.execute(
             "INSERT INTO headers(msg_pk, name, value) VALUES (?, ?, ?)",
             (msg_pk, name, value),
         )
-    _replace_labels(conn, account_id, msg_pk, message)
+    _replace_labels(conn, account_id, msg_pk, message, source)
     for attachment in message.attachments:
         _insert_attachment(conn, msg_pk, attachment)
     attachment_text = "\n".join(
@@ -468,9 +472,17 @@ def _replace_labels(
     account_id: int,
     msg_pk: int,
     message: MessageRec,
+    source: str,
 ) -> None:
-    conn.execute("DELETE FROM message_labels WHERE msg_pk = ?", (msg_pk,))
+    """Only an mbox import writes or replaces ``pseudo:`` labels. Other sources keep them."""
+    from_mbox = source == "mbox"
+    conn.execute(
+        "DELETE FROM message_labels WHERE msg_pk = ? AND (? OR gmail_label_id NOT LIKE 'pseudo:%')",
+        (msg_pk, from_mbox),
+    )
     for label_id in message.label_ids:
+        if is_pseudo_label(label_id) and not from_mbox:
+            continue
         conn.execute(
             """
             INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)

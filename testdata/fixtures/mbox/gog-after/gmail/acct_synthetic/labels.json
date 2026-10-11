@@ -43,5 +43,10 @@
     "id": "Label_nova",
     "name": "Etiqueta Nova",
     "type": "user"
+  },
+  {
+    "id": "Label_opened",
+    "name": "Opened",
+    "type": "user"
   }
 ]

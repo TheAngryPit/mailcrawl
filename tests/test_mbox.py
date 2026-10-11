@@ -118,18 +118,29 @@ class MboxImportTest(unittest.TestCase):
         self.assertEqual(plain["internal_date"], 1767258000)
         self.assertEqual(
             self.labels_of(PLAIN),
-            ["CATEGORY_UPDATES", "IMPORTANT", "INBOX", "mbox:Example/Synthetic", "mbox:Projetos, Exemplo"],
+            [
+                "CATEGORY_UPDATES",
+                "IMPORTANT",
+                "INBOX",
+                "mbox:Example/Synthetic",
+                "mbox:Projetos, Exemplo",
+                "pseudo:opened",
+            ],
         )
         self.assertEqual(
-            self.labels_of(HTML), ["INBOX", "STARRED", "UNREAD", "mbox:Etiqueta Nova"]
+            self.labels_of(HTML), ["STARRED", "UNREAD", "mbox:Etiqueta Nova", "pseudo:archived"]
         )
-        self.assertEqual(self.labels_of(PARTS), ["SENT", "mbox:Projetos, Exemplo"])
+        self.assertEqual(self.labels_of(PARTS), ["SENT", "mbox:Projetos, Exemplo", "pseudo:archived"])
         self.assertEqual(self.row(PARTS)["gmail_thread_id"], PLAIN)
         self.assertIsNone(self.row("3e7"))
         kinds = dict(self.conn.execute("SELECT gmail_label_id, kind FROM labels").fetchall())
         self.assertEqual(kinds["mbox:Etiqueta Nova"], "user")
         self.assertEqual(kinds["UNREAD"], "system")
+        self.assertEqual((kinds["pseudo:opened"], kinds["pseudo:archived"]), ("system", "system"))
         self.assertNotIn("mbox:Opened", kinds)
+        self.assertNotIn("mbox:Aberto", kinds)
+        odd = "rfc822:" + hashlib.sha256(b"mbox-odd@example.com").hexdigest()
+        self.assertEqual(self.labels_of(odd), ["pseudo:opened"])
 
     def test_raw_sha256_drops_takeout_parts(self) -> None:
         self.mbox()
@@ -195,9 +206,15 @@ class MboxImportTest(unittest.TestCase):
             (2, 0, 1, 1, 0),
         )
         self.assertEqual(self.conn.execute("SELECT count(*) FROM messages").fetchone()[0], 5)
-        self.assertEqual(self.labels_of(PLAIN), ["INBOX", "Label_proj", "Label_synthetic"])
-        self.assertEqual(self.labels_of(HTML), ["INBOX", "Label_nova"])
-        self.assertEqual(self.labels_of(PARTS), ["Label_proj", "SENT"])
+        self.assertEqual(
+            self.labels_of(PLAIN), ["INBOX", "Label_proj", "Label_synthetic", "pseudo:opened"]
+        )
+        self.assertEqual(self.labels_of(HTML), ["INBOX", "Label_nova", "pseudo:archived"])
+        self.assertEqual(self.labels_of(PARTS), ["Label_proj", "SENT", "pseudo:archived"])
+        names = dict(self.conn.execute("SELECT gmail_label_id, name FROM labels").fetchall())
+        self.assertEqual(names["Label_opened"], "Opened")
+        self.assertEqual(names["pseudo:opened"], "pseudo:opened")
+        self.assertEqual(names["pseudo:archived"], "pseudo:archived")
         html = self.row(HTML)
         self.assertEqual(html["gmail_thread_id"], HTML)
         self.assertEqual(html["raw_sha256"], kept)

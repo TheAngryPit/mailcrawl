@@ -17,7 +17,7 @@ from email.header import decode_header, make_header
 from pathlib import Path
 from typing import BinaryIO
 
-from mailcrawl.contract import LabelRec, MessageRec
+from mailcrawl.contract import PSEUDO_LABEL, LabelRec, MessageRec
 from mailcrawl.eml import eml_record
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.textnorm import parse_date
@@ -77,9 +77,14 @@ SYSTEM_LABELS: dict[str, str] = {
 }
 SYSTEM_LABELS.update({label_id.lower(): label_id for label_id in set(SYSTEM_LABELS.values())})
 
-TAKEOUT_ONLY = frozenset(
-    {"opened", "archived", "aberto", "aberta", "arquivado", "arquivada"}
-)
+PSEUDO_LABELS: dict[str, str] = {
+    "opened": PSEUDO_LABEL + "opened",
+    "aberto": PSEUDO_LABEL + "opened",
+    "aberta": PSEUDO_LABEL + "opened",
+    "archived": PSEUDO_LABEL + "archived",
+    "arquivado": PSEUDO_LABEL + "archived",
+    "arquivada": PSEUDO_LABEL + "archived",
+}
 
 
 @dataclass(frozen=True)
@@ -232,8 +237,9 @@ class MboxSource:
             label_id = system_label(name)
             if label_id is not None:
                 found.append(LabelRec(label_id, label_id, "system"))
-            elif name.casefold() in TAKEOUT_ONLY:
-                continue
+            elif name.casefold() in PSEUDO_LABELS:
+                pseudo = PSEUDO_LABELS[name.casefold()]
+                found.append(LabelRec(pseudo, pseudo, "system"))
             elif name in self._known:
                 found.append(self._known[name])
             else:

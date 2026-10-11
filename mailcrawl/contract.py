@@ -21,6 +21,10 @@ from mailcrawl.textnorm import html_to_text, parse_date
 UNSUPPORTED_SCHEMA = "unsupported_schema"
 CONTRACT_V0 = "mailcrawl.gog-export.v0"
 
+PSEUDO_LABEL = "pseudo:"
+# Every read of labels for rules, plans, or a Gmail write adds this predicate.
+GMAIL_LABEL_SQL = "labels.gmail_label_id NOT LIKE 'pseudo:%'"
+
 MESSAGE_REQUIRED = (
     "example_message_id",
     "example_thread_id",
@@ -176,6 +180,11 @@ def parse_export(document: object, root: Path | None = None) -> ExportDocument:
         messages=messages,
         raw_json=_raw_json(unknown),
     )
+
+
+def is_pseudo_label(label_id: str) -> bool:
+    """A Takeout-only label id. It is never a Gmail label and is never sent to Gmail."""
+    return label_id.startswith(PSEUDO_LABEL)
 
 
 def infer_kind(label_id: str) -> str:
