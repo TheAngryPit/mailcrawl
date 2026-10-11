@@ -40,6 +40,8 @@ for f in \
   testdata/fixtures/gog-export/v0/export.json \
   testdata/fixtures/gog-export/v0/note.eml \
   testdata/fixtures/gog-export/unknown/export.json \
+  testdata/fixtures/gog-export/native/gmail/acct_synthetic/labels.json \
+  testdata/fixtures/gog-export/native/gmail/acct_synthetic/messages/index.jsonl \
   testdata/catalogue/taxonomy.synthetic.json
 do
   [[ -f "${REPO_ROOT}/${f}" ]] || fail "missing fixture ${f}"
@@ -194,6 +196,52 @@ if not any("reunião" in (hit.get("snippet") or "") for hit in hits):
     raise SystemExit(1)
 PY
 
+log "check: native gog export imports without export.json"
+NATIVE="${REPO_ROOT}/testdata/fixtures/gog-export/native"
+(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json init --account thehive --email ada@example.com
+) | tee "${PROOF_DIR}/native-init.log"
+native_out="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json import gog-export \
+    --account thehive \
+    --dir "${NATIVE}" \
+    --taxonomy "${TAXONOMY}"
+)"
+echo "${native_out}" | tee "${PROOF_DIR}/native-import.log"
+NATIVE_JSON="${native_out}" python3 <<'PY' || fail "native import count is not 3"
+import json, os
+doc = json.loads(os.environ["NATIVE_JSON"])
+if doc.get("n_seen") != 3 or doc.get("n_new") != 3 or doc.get("n_error") != 0:
+    raise SystemExit(1)
+PY
+native_search="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json search reuniao --account thehive
+)"
+echo "${native_search}" | tee "${PROOF_DIR}/native-search.log"
+SEARCH_JSON="${native_search}" python3 <<'PY' || fail "native search reuniao missed reunião"
+import json, os
+doc = json.loads(os.environ["SEARCH_JSON"])
+hits = doc.get("hits") or []
+if not any("reunião" in (hit.get("snippet") or "") for hit in hits):
+    raise SystemExit(1)
+PY
+native_again="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --json import gog-export \
+    --account thehive \
+    --dir "${NATIVE}"
+)"
+echo "${native_again}" | tee "${PROOF_DIR}/native-reimport.log"
+REIMPORT_JSON="${native_again}" python3 <<'PY' || fail "native reimport was not a duplicate"
+import json, os
+doc = json.loads(os.environ["REIMPORT_JSON"])
+if doc.get("n_dup") != 3 or doc.get("n_new") != 0:
+    raise SystemExit(1)
+PY
+
 log "check: missing required keys fail closed"
 for key in example_message_id example_thread_id example_label_ids example_date; do
   broken="$(mktemp -d)"
@@ -245,6 +293,7 @@ doc = {
         "import_count_matches_manifest",
         "reimport_row_dump_hash",
         "search_reuniao",
+        "native_gog_export",
         "missing_required_key_unsupported_schema",
         "fixture_sha256_unchanged",
     ],
