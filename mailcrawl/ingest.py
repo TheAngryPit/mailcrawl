@@ -16,6 +16,7 @@ from mailcrawl.contract import (
     infer_kind,
     parse_export,
 )
+from mailcrawl.gognative import load_native
 from mailcrawl.paths import UsageError
 from mailcrawl.textnorm import parse_address, subject_norm
 from mailcrawl.version import mailcrawl_version, provenance_hash
@@ -56,11 +57,7 @@ def import_gog_export(
     taxonomy_path: Path | None,
     account_email: str,
 ) -> ImportResult:
-    export_path = export_dir / "export.json"
-    raw_file = export_path.read_bytes()
-    manifest_sha = hashlib.sha256(raw_file).hexdigest()
-    document = json.loads(raw_file.decode("utf-8"))
-    parsed = parse_export(document, export_dir)
+    parsed, manifest_sha = _load_export(export_dir)
     account = conn.execute(
         "SELECT account_id FROM accounts WHERE alias = ?",
         (alias,),
@@ -156,6 +153,15 @@ def import_gog_export(
         n_dup=n_dup,
         n_error=n_error,
     )
+
+
+def _load_export(export_dir: Path) -> tuple[ExportDocument, str]:
+    export_path = export_dir / "export.json"
+    if export_path.is_file():
+        raw_file = export_path.read_bytes()
+        document = json.loads(raw_file.decode("utf-8"))
+        return parse_export(document, export_dir), hashlib.sha256(raw_file).hexdigest()
+    return load_native(export_dir)
 
 
 def _label_map(parsed: ExportDocument) -> dict[str, LabelRec]:
@@ -281,12 +287,21 @@ def _write_children(
     _replace_labels(conn, account_id, msg_pk, message)
     for attachment in message.attachments:
         _insert_attachment(conn, msg_pk, attachment)
+    attachment_text = "\n".join(
+        item.extracted_text for item in message.attachments if item.extracted_text
+    )
     conn.execute(
         """
         INSERT INTO msg_fts(rowid, subject, body_text, from_hdr, attachment_text)
-        VALUES (?, ?, ?, ?, '')
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (msg_pk, message.subject or "", message.body_text or "", message.from_hdr or ""),
+        (
+            msg_pk,
+            message.subject or "",
+            message.body_text or "",
+            message.from_hdr or "",
+            attachment_text,
+        ),
     )
 
 
@@ -315,8 +330,9 @@ def _insert_attachment(
     conn.execute(
         """
         INSERT INTO attachments(
-          msg_pk, filename, mime_type, size_bytes, gmail_attachment_id, extract_status
-        ) VALUES (?, ?, ?, ?, ?, 'pending')
+          msg_pk, filename, mime_type, size_bytes, gmail_attachment_id,
+          content_id, is_inline, extract_status, extracted_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             msg_pk,
@@ -324,6 +340,10 @@ def _insert_attachment(
             attachment.mime_type,
             attachment.size_bytes,
             attachment.attachment_id,
+            attachment.content_id,
+            attachment.is_inline,
+            attachment.extract_status,
+            attachment.extracted_text,
         ),
     )
 

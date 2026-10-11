@@ -1,0 +1,27 @@
+From: Ada Fixture <ada@example.com>
+To: Bao Fixture <bao@example.com>
+Subject: Parts
+Date: Thu, 02 Apr 2026 12:00:00 +0000
+Message-ID: <msg-parts@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="bound-synthetic"
+
+--bound-synthetic
+Content-Type: text/plain; charset="utf-8"
+
+Plain body stays.
+
+--bound-synthetic
+Content-Type: text/plain; charset="utf-8"
+Content-Disposition: attachment; filename="note.txt"
+
+attachmenttoken
+
+--bound-synthetic
+Content-Type: application/octet-stream
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="blob.bin"
+
+//5aWkJJTk1BUktFUlpaAAE=
+
+--bound-synthetic--

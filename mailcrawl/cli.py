@@ -9,6 +9,7 @@ from pathlib import Path
 
 from mailcrawl.configfile import account_email, taxonomy_path, write_account
 from mailcrawl.contract import ExportRejected, ManifestMismatch
+from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import import_gog_export
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
 from mailcrawl.search import search_messages
@@ -32,6 +33,9 @@ def main(argv: list[str] | None = None) -> int:
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
+    except ExportInvalid as exc:
+        _emit(args, {"detail": str(exc), "error": exc.error, "ok": False})
+        return exc.exit_code
     except UnsupportedSchema:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3

@@ -1,0 +1,16 @@
+[
+  {
+    "id": "INBOX",
+    "labelListVisibility": "labelShow",
+    "messageListVisibility": "show",
+    "name": "INBOX",
+    "type": "system"
+  },
+  {
+    "id": "Label_synthetic",
+    "labelListVisibility": "labelShow",
+    "messageListVisibility": "show",
+    "name": "Example/Synthetic",
+    "type": "user"
+  }
+]
