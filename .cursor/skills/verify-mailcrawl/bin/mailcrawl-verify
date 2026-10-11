@@ -657,6 +657,33 @@ conn.close()
     return 1
   fi
 
+  local stripped="$home/no-pseudo.mbox"
+  SRC="$fixture/takeout.mbox" DEST="$stripped" python3 - <<'PY'
+import os
+from pathlib import Path
+text = Path(os.environ["SRC"]).read_text(encoding="utf-8")
+text = text.replace("X-Gmail-Labels: Aberto\n", "")
+for name in (",Opened", "Arquivada,", ",Archived"):
+    text = text.replace(name, "")
+Path(os.environ["DEST"]).write_text(text, encoding="utf-8")
+PY
+  mailcrawl_in "$home" --json init --account vcl --email ada@example.com >/dev/null
+  mailcrawl_in "$home" --json import mbox "$stripped" --alias vcl >/dev/null
+  local rules_out base_rules_out dry_out base_dry_out
+  rules_out="$(mailcrawl_in "$home" --json rules --account personal --rules "$REPO_ROOT/testdata/rules/rules-v0.json" --now 1767700000)"
+  base_rules_out="$(mailcrawl_in "$home" --json rules --account vcl --rules "$REPO_ROOT/testdata/rules/rules-v0.json" --now 1767700000)"
+  dry_out="$(mailcrawl_in "$home" --json dry-run --account personal)"
+  base_dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl)"
+  printf '%s\n%s\n%s\n%s\n' "$rules_out" "$base_rules_out" "$dry_out" "$base_dry_out"
+  if [[ "$rules_out" != "$base_rules_out" || "$dry_out" != "$base_dry_out" ]]; then
+    log "mbox import: pseudo-labels changed rules or dry-run output"
+    return 1
+  fi
+  if printf '%s' "$rules_out$dry_out" | grep -q 'pseudo:'; then
+    log "mbox import: rules or dry-run printed a pseudo-label"
+    return 1
+  fi
+
   local token_out attach_out
   token_out="$(mailcrawl_in "$home" --json search mboxtoken --account personal)"
   attach_out="$(mailcrawl_in "$home" --json search anexotoken --account personal)"
@@ -699,6 +726,23 @@ try:
     ).fetchone()[0]
     if thread != "1886e1a4667f4002":
         sys.exit(f"provisional thread not replaced: {thread}")
+    pseudo = conn.execute(
+        """
+        SELECT messages.gmail_message_id, message_labels.gmail_label_id FROM message_labels
+        JOIN messages ON messages.msg_pk = message_labels.msg_pk
+        WHERE message_labels.gmail_label_id LIKE 'pseudo:%'
+        ORDER BY 1, 2
+        """
+    ).fetchall()
+    want = [
+        ("18867251edfa0001", "pseudo:opened"),
+        ("1886e1a4667f4002", "pseudo:archived"),
+        ("18873038f7ce4003", "pseudo:archived"),
+    ]
+    if [row for row in pseudo if not row[0].startswith("rfc822:")] != want or len(pseudo) != 4:
+        sys.exit(f"pseudo-labels after the gog import {pseudo}")
+    if conn.execute("SELECT name FROM labels WHERE gmail_label_id = 'Label_opened'").fetchone() != ("Opened",):
+        sys.exit("gog user label Opened missing")
 finally:
     conn.close()
 print("mbox import ok")

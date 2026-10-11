@@ -37,7 +37,7 @@ Each feature file uses exactly four H2 sections: `Sub-features`, `How to get to 
 - [spec-integrity](./spec-integrity.md) — SPEC hash unchanged across the run.
 - [scaffold-headless-proof](./scaffold-headless-proof.md) — section 5 scaffold proof via `make check && scripts/proof.sh`.
 - [native-gog-import](./native-gog-import.md). Import a synthetic gog export that has no `export.json`.
-- [mbox-import](./mbox-import.md). Stream a synthetic Takeout mbox, reimport it, and reconcile it with a gog export of the same messages.
+- [mbox-import](./mbox-import.md). Stream a synthetic Takeout mbox, reimport it, keep its `pseudo:` labels out of rules, and reconcile it with a gog export of the same messages.
 - [body-clean](./body-clean.md). Keep `body_text_raw`, index the cleaned `body_text`, and leave schema v2 empty of plans.
 - [attachment-parse](./attachment-parse.md). Extract text parts, skip a missing hash, and leave PDF, OCR, Office, and `ics` behind an interface.
 - [rules-v0](./rules-v0.md). Apply rules 0 to 8 and print counts. `rules_version` is `rules-v0`.

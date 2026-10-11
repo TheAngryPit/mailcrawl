@@ -478,7 +478,7 @@ PY
 )"
 [[ "${DECISIONS_AFTER}" == "2" ]] || fail "stats or dry-run changed decisions"
 
-log "check: Takeout mbox imports, reimports, and reconciles with a gog export"
+log "check: Takeout mbox imports, reimports, and reconciles with a gog export, keeping pseudo-labels"
 MBOX_DATA="${HOME}/mbox-data"
 mbox_cli() {
   (
@@ -508,6 +508,8 @@ try:
         raise SystemExit("message rows")
     if conn.execute("SELECT count(*) FROM labels WHERE gmail_label_id LIKE 'mbox:%'").fetchone()[0]:
         raise SystemExit("provisional labels left")
+    if conn.execute("SELECT count(*) FROM message_labels WHERE gmail_label_id LIKE 'pseudo:%'").fetchone()[0] != 4:
+        raise SystemExit("pseudo-labels did not survive the gog import")
 finally:
     conn.close()
 PY
