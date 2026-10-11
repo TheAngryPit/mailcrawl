@@ -1,3 +1,5 @@
+X-Get-Message-Sender-Via: relay.example.com: authenticated_id: bao@example.com
+x-gong-email-entity: synthetic-entity
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: =?utf-8?q?Reuni=C3=A3o_de_arquivo?=
@@ -8,3 +10,4 @@ Content-Type: text/plain; charset="utf-8"
 Content-Transfer-Encoding: 8bit
 
 A reunião do arquivo mboxtoken fica no índice.
+From the minutes crlftoken.

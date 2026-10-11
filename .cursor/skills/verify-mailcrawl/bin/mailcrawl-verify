@@ -684,17 +684,19 @@ PY
     return 1
   fi
 
-  local token_out attach_out
+  local token_out attach_out crlf_out
   token_out="$(mailcrawl_in "$home" --json search mboxtoken --account personal)"
   attach_out="$(mailcrawl_in "$home" --json search anexotoken --account personal)"
-  printf '%s\n%s\n' "$token_out" "$attach_out"
+  crlf_out="$(mailcrawl_in "$home" --json search crlftoken --account personal)"
+  printf '%s\n%s\n%s\n' "$token_out" "$attach_out" "$crlf_out"
 
   local gog_out
   gog_out="$(mailcrawl_in "$home" --json import gog-export --alias personal --dir "$fixture/gog-after")"
   printf '%s\n' "$gog_out"
 
-  FIRST="$first_out" AGAIN="$again_out" TOKEN="$token_out" ATTACH="$attach_out" GOG="$gog_out" DB_PATH="$db" python3 - <<'PY' || {
-import json, os, sqlite3, sys
+  FIRST="$first_out" AGAIN="$again_out" TOKEN="$token_out" ATTACH="$attach_out" GOG="$gog_out" CRLF="$crlf_out" DB_PATH="$db" \
+    EML="$fixture/gog-after/gmail/acct_synthetic/messages/2026/01/m1.eml" python3 - <<'PY' || {
+import hashlib, json, os, sqlite3, sys
 first = json.loads(os.environ["FIRST"])
 again = json.loads(os.environ["AGAIN"])
 gog = json.loads(os.environ["GOG"])
@@ -709,12 +711,22 @@ if ids("TOKEN") != ["18867251edfa0001"]:
     sys.exit(f"mboxtoken hits {ids('TOKEN')}")
 if ids("ATTACH") != ["18873038f7ce4003"]:
     sys.exit(f"anexotoken hits {ids('ATTACH')}")
+if ids("CRLF") != ["18867251edfa0001"]:
+    sys.exit(f"crlftoken hits {ids('CRLF')}")
 if (gog["n_new"], gog["n_dup"], gog["n_reconciled"], gog["n_error"]) != (0, 1, 1, 0):
     sys.exit(f"gog after mbox {gog}")
 conn = sqlite3.connect(os.environ["DB_PATH"])
 try:
     if conn.execute("SELECT count(*) FROM messages").fetchone()[0] != 5:
         sys.exit("message rows changed")
+    sha, body = conn.execute(
+        "SELECT raw_sha256, body_text_raw FROM messages WHERE gmail_message_id = '18867251edfa0001'"
+    ).fetchone()
+    with open(os.environ["EML"], "rb") as handle:
+        if sha != hashlib.sha256(handle.read()).hexdigest():
+            sys.exit("mixed-ending Takeout message does not hash like its CRLF gog .eml")
+    if "\r" in body:
+        sys.exit("body_text_raw kept a CR")
     if conn.execute("SELECT count(*) FROM labels WHERE gmail_label_id LIKE 'mbox:%'").fetchone()[0]:
         sys.exit("provisional labels left")
     thread = conn.execute(

@@ -7,12 +7,14 @@ import subprocess
 import sys
 import tempfile
 import tracemalloc
+import unicodedata
 import unittest
 from pathlib import Path
 
 from mailcrawl.contract import MessageRec
 from mailcrawl.ingest import import_gog_export, import_mbox
 from mailcrawl.mbox import MboxSource, Refused, gmail_hex, label_names, system_label
+from mailcrawl.textnorm import clean_body
 from mailcrawl.store import connect, init_account, ordered_row_dump_hash
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -183,6 +185,13 @@ class MboxImportTest(unittest.TestCase):
         self.assertEqual(self.search("anexotoken"), [PARTS])
         self.assertEqual(self.search("reuniao"), [PLAIN, PARTS])
         self.assertEqual(self.search("htmltoken"), [HTML])
+        plain = self.row(PLAIN)
+        self.assertNotIn("\r", plain["body_text_raw"])
+        self.assertEqual(
+            plain["body_text"],
+            "A reunião do arquivo mboxtoken fica no índice.\nFrom the minutes crlftoken.",
+        )
+        self.assertEqual(self.search("crlftoken"), [PLAIN])
 
     def test_reimport_adds_nothing(self) -> None:
         self.mbox()
@@ -329,6 +338,79 @@ class MboxParserTest(unittest.TestCase):
         messages = [item for item in found if isinstance(item, MessageRec)]
         self.assertEqual([m.gmail_message_id for m in messages], ["18867251edfa0001", "18867251edfa0002"])
         self.assertEqual(messages[1].label_ids, ("UNREAD",))
+
+    def test_observed_pt_system_labels(self) -> None:
+        observed = {
+            "Caixa de Entrada": "INBOX",
+            "Categoria Atualizações": "CATEGORY_UPDATES",
+            "Categoria Pessoal": "CATEGORY_PERSONAL",
+            "Categoria Promoções": "CATEGORY_PROMOTIONS",
+            "Importante": "IMPORTANT",
+            "Não lidas": "UNREAD",
+            "Rascunhos": "DRAFT",
+            "Spam": "SPAM",
+        }
+        not_observed = {
+            "Enviados": "SENT",
+            "Com estrela": "STARRED",
+            "Lixo": "TRASH",
+            "Categoria Social": "CATEGORY_SOCIAL",
+            "Categoria Fóruns": "CATEGORY_FORUMS",
+        }
+        for name, label_id in {**observed, **not_observed}.items():
+            self.assertEqual(system_label(name), label_id, name)
+            self.assertEqual(system_label(unicodedata.normalize("NFD", name)), label_id, name)
+
+    def test_line_endings_and_from_escaping_do_not_change_hash_or_body(self) -> None:
+        lines = [
+            b"From 1767225600000000001@xxx Thu Jan 01 00:00:00 +0000 2026",
+            b"Message-ID: <endings@example.com>",
+            b"Subject: endings",
+            b"Content-Type: text/plain; charset=utf-8",
+            b"",
+            b"First line.",
+            b">From the archive.",
+            b">>From quoted twice.",
+            b"-- ",
+            b"Sig",
+        ]
+        variants = {
+            "lf": b"\n".join(lines) + b"\n",
+            "crlf": b"\r\n".join(lines) + b"\r\n",
+            "mixed": b"".join(line + (b"\n" if i % 3 else b"\r\n") for i, line in enumerate(lines)),
+        }
+        records = {}
+        for name, text in variants.items():
+            (message,) = self.items(text)
+            assert isinstance(message, MessageRec)
+            records[name] = message
+        expected_raw = b"\r\n".join(
+            [line.replace(b">From", b"From", 1) for line in lines[1:]]
+        ) + b"\r\n"
+        for name, message in records.items():
+            self.assertEqual(message.raw_sha256, hashlib.sha256(expected_raw).hexdigest(), name)
+            self.assertEqual(
+                message.body_text,
+                "First line.\nFrom the archive.\n>From quoted twice.\n-- \nSig\n",
+                name,
+            )
+            self.assertEqual(clean_body(message.body_text or ""), "First line.\nFrom the archive.", name)
+
+    def test_x_gmail_original_message_id_is_not_an_id(self) -> None:
+        (refused,) = self.items(
+            b"From nobody Thu Jan 01 00:00:00 2026\r\n"
+            b"X-Gmail-Original-Message-ID: <only-original@example.com>\r\n"
+            b"Subject: no id\r\n\r\nbody\r\n"
+        )
+        self.assertIsInstance(refused, Refused)
+        (message,) = self.items(
+            b"From nobody Thu Jan 01 00:00:00 2026\r\n"
+            b"X-Gmail-Original-Message-ID: <original@example.com>\r\n"
+            b"Message-ID: <rfc@example.com>\r\n"
+            b"Subject: id\r\n\r\nbody\r\n"
+        )
+        assert isinstance(message, MessageRec)
+        self.assertEqual(message.gmail_message_id, "rfc822:" + hashlib.sha256(b"rfc@example.com").hexdigest())
 
     def test_unparseable_values_never_raise(self) -> None:
         found = self.items(
