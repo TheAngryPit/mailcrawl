@@ -1,5 +1,6 @@
 """Default taxonomy, local override, and category counts."""
 
+import csv
 import json
 import os
 import tempfile
@@ -29,14 +30,17 @@ def _message(
     number: int,
     label_ids: list[str],
     headers: dict[str, str] | None = None,
+    *,
+    sender: str | None = None,
+    body: str | None = None,
 ) -> dict[str, object]:
     item: dict[str, object] = {
         "example_message_id": f"tax-{number}",
         "example_thread_id": f"tax-thread-{number}",
         "example_label_ids": label_ids,
         "example_date": 1700000000,
-        "example_from": f"Ada Fixture <ada{number}@example.com>",
-        "example_body": "synthetic taxonomy body",
+        "example_from": sender or f"Ada Fixture <ada{number}@example.com>",
+        "example_body": body or "synthetic taxonomy body",
     }
     if headers:
         item["example_headers"] = headers
@@ -316,6 +320,189 @@ class DefaultTaxonomyTest(unittest.TestCase):
         self.assertEqual(matches["correspondence"], {"messages": 0, "threads": 0})
         self.assertEqual(preview["decisions_by_category"]["invoice_receipt"], {"3": 1})
 
+    def test_dry_run_exports_a_stratified_thread_sample(self) -> None:
+        export = self.home / "export"
+        _export(
+            export,
+            [
+                {"example_label_id": "Label_9", "example_name": "Example type/Receipt", "example_kind": "user"},
+                {"example_label_id": "Label_7", "example_name": "Example origin/Machine", "example_kind": "user"},
+                {"example_label_id": "Label_6", "example_name": "Example type/Bulletin", "example_kind": "user"},
+                {"example_label_id": "SPAM", "example_name": "SPAM", "example_kind": "system"},
+            ],
+            [
+                _message(1, ["Label_9"]),
+                _message(2, ["Label_6", "Label_7"], {"list-unsubscribe": "<https://example.com/unsub>"}),
+                _message(3, []),
+                _message(4, []),
+                _message(5, ["SPAM"]),
+                _message(6, [], sender="Ada <ada@example.com>", body="note"),
+            ],
+        )
+        override = self.home / "hive.json"
+        override.write_text(
+            json.dumps(
+                {
+                    "thehive": {
+                        "automated": ["Example origin/Machine"],
+                        "newsletter": ["Example type/Bulletin"],
+                        "invoice_receipt": ["Example type/Receipt"],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._init("thehive")
+        self._run("import", "gog-export", "--account", "thehive", "--dir", str(export))
+        self._run("dry-run", "--account", "thehive", "--now", "1700000000")
+        before = self._archive_signature("thehive")
+        dest = self.home / "out" / "threads.csv"
+        dest.parent.mkdir()
+        preview = self._run(
+            "dry-run",
+            "--account",
+            "thehive",
+            "--taxonomy",
+            str(override),
+            "--now",
+            "1700000000",
+            "--export-decisions",
+            str(dest),
+        )
+        self.assertEqual(self._archive_signature("thehive"), before)
+        self.assertEqual(preview["exported"], 6)
+        self.assertEqual(preview["by_rule"].get("5"), 2)
+        self.assertNotIn("tax-thread", json.dumps(preview))
+        rows = self._csv(dest)
+        self.assertEqual(
+            [row["gmail_thread_id"] for row in rows],
+            [f"tax-thread-{number}" for number in range(1, 7)],
+        )
+        by_id = {row["gmail_thread_id"]: row for row in rows}
+        self.assertEqual(by_id["tax-thread-1"]["rule"], "3")
+        self.assertEqual(by_id["tax-thread-1"]["lane"], "paper_trail")
+        self.assertEqual(by_id["tax-thread-1"]["override_match"], "invoice_receipt")
+        self.assertEqual(by_id["tax-thread-2"]["rule"], "2")
+        self.assertEqual(by_id["tax-thread-2"]["lane"], "feed")
+        self.assertEqual(by_id["tax-thread-2"]["override_match"], "automated|newsletter")
+        self.assertEqual(by_id["tax-thread-3"]["rule"], "5")
+        self.assertEqual(by_id["tax-thread-3"]["lane"], "imbox")
+        self.assertEqual(by_id["tax-thread-3"]["override_match"], "")
+        self.assertEqual(by_id["tax-thread-4"]["rule"], "5")
+        self.assertEqual(by_id["tax-thread-5"]["rule"], "spam-trash")
+        self.assertEqual(by_id["tax-thread-5"]["lane"], "screened_out")
+        self.assertEqual(by_id["tax-thread-5"]["override_match"], "")
+        self.assertEqual(by_id["tax-thread-6"]["rule"], "else")
+        self.assertEqual(by_id["tax-thread-6"]["lane"], "imbox")
+        blob = dest.read_text(encoding="utf-8")
+        self.assertNotIn("Example", blob)
+        self.assertNotIn("Label_", blob)
+        self.assertNotIn("synthetic taxonomy body", blob)
+        sampled_path = self.home / "out" / "sample.csv"
+        first = self._run(
+            "dry-run",
+            "--account",
+            "thehive",
+            "--taxonomy",
+            str(override),
+            "--now",
+            "1700000000",
+            "--export-decisions",
+            str(sampled_path),
+            "--sample",
+            "5",
+            "--seed",
+            "1",
+        )
+        self.assertEqual(first["by_rule"].get("5"), 2)
+        self.assertEqual(first["exported"], 5)
+        sampled = self._csv(sampled_path)
+        self.assertEqual({row["rule"] for row in sampled}, {"2", "3", "5", "spam-trash", "else"})
+        again = self.home / "out" / "sample-again.csv"
+        self._run(
+            "dry-run",
+            "--account",
+            "thehive",
+            "--taxonomy",
+            str(override),
+            "--now",
+            "1700000000",
+            "--export-decisions",
+            str(again),
+            "--sample",
+            "5",
+            "--seed",
+            "1",
+        )
+        self.assertEqual(again.read_text(encoding="utf-8"), sampled_path.read_text(encoding="utf-8"))
+        reply_ids = {
+            row["gmail_thread_id"]
+            for row in sampled
+            if row["rule"] == "5"
+        }
+        self.assertEqual(len(reply_ids), 1)
+        small_path = self.home / "out" / "small.csv"
+        small = self._run(
+            "dry-run",
+            "--account",
+            "thehive",
+            "--taxonomy",
+            str(override),
+            "--now",
+            "1700000000",
+            "--export-decisions",
+            str(small_path),
+            "--sample",
+            "2",
+            "--seed",
+            "1",
+        )
+        self.assertEqual(small["exported"], 5)
+        self.assertEqual(small["by_rule"].get("5"), 2)
+        self.assertEqual(
+            {row["rule"] for row in self._csv(small_path)},
+            {"2", "3", "5", "spam-trash", "else"},
+        )
+        other = None
+        for seed in range(2, 30):
+            path = self.home / "out" / f"seed-{seed}.csv"
+            self._run(
+                "dry-run",
+                "--account",
+                "thehive",
+                "--taxonomy",
+                str(override),
+                "--now",
+                "1700000000",
+                "--export-decisions",
+                str(path),
+                "--sample",
+                "5",
+                "--seed",
+                str(seed),
+            )
+            picked = {
+                row["gmail_thread_id"]
+                for row in self._csv(path)
+                if row["rule"] == "5"
+            }
+            if picked != reply_ids:
+                other = picked
+                break
+        self.assertIsNotNone(other)
+        code, doc = self._code(
+            "dry-run",
+            "--account",
+            "thehive",
+            "--sample",
+            "2",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("sample needs --export-decisions", str(doc.get("detail")))
+        ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+        self.assertIn("*.csv", ignore)
+        self.assertIn("!testdata/**/*.csv", ignore)
+
     def test_example_schema_turns_content_rules_on(self) -> None:
         self._init("vcl")
         preview = self._run(
@@ -478,6 +665,23 @@ class DefaultTaxonomyTest(unittest.TestCase):
         with redirect_stdout(hold):
             code = main(["--json", "--home", str(self.home), *args])
         return code, json.loads(hold.getvalue())
+
+    def _csv(self, path: Path) -> list[dict[str, str]]:
+        with path.open(encoding="utf-8", newline="") as handle:
+            return list(csv.DictReader(handle))
+
+    def _archive_signature(self, alias: str) -> tuple[int, tuple[tuple[str, str | None], ...]]:
+        conn = connect(self.home / f"{alias}.db")
+        try:
+            decisions = int(conn.execute("SELECT count(*) FROM decisions").fetchone()[0])
+            keys = tuple(
+                conn.execute(
+                    "SELECT gmail_label_id, catalogue_key FROM labels ORDER BY gmail_label_id"
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+        return decisions, tuple((str(row[0]), row[1]) for row in keys)
 
     def _keys(self, alias: str) -> dict[str, str | None]:
         conn = connect(self.home / f"{alias}.db")

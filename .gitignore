@@ -72,6 +72,10 @@ gogcli/
 !testdata/**/*.mbox
 !testdata/**/*.jsonl
 
+# Local dry-run decision exports. They hold thread ids. Do not commit them.
+*.csv
+!testdata/**/*.csv
+
 # Models, embeddings, and vectors
 models/
 embeddings/

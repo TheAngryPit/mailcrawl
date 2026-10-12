@@ -1,6 +1,6 @@
 # Stats and dry-run
 
-`mailcrawl stats` prints archive counts from stored category keys. `mailcrawl dry-run` evaluates the current rules and prints would-be decisions by state, rule, and category, plus `undecided`. A taxonomy file matches label names for that count. It does not read the `decisions` table to make those counts. Neither command writes a plan file, writes a decision, or touches Gmail. The output is counts only.
+`mailcrawl stats` prints archive counts from stored category keys. `mailcrawl dry-run` evaluates the current rules and prints would-be decisions by state, rule, and category, plus `undecided`. A taxonomy file matches label names for that count. `--export-decisions` can write a local CSV of those threads. It does not read the `decisions` table to make those counts. Neither command writes a plan file, writes a decision, or touches Gmail. The output is counts only.
 
 ## Sub-features
 
