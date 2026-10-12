@@ -87,7 +87,7 @@ python3 -m mailcrawl --json stats --account thehive
 python3 -m mailcrawl --json dry-run --account thehive
 ```
 
-`stats` prints message counts in `by_category` and `uncategorized`. `dry-run` evaluates the active rules and prints would-be decisions in `by_rule`, `by_state`, and `decisions_by_category`, plus `undecided`. It does not write decisions. With only the Gmail default, `inactive_reason` stays `gmail_default`.
+`stats` prints message counts in `by_category` and `uncategorized`, plus `needs_review_rule0` and `needs_review_else`. `dry-run` evaluates the active rules and prints would-be decisions in `by_rule`, `by_state`, and `decisions_by_category`, plus `undecided`. Rule `0` is only `STARRED`. `IMPORTANT` alone falls through. A `SPAM` or `TRASH` thread that reaches it matches rule `spam-trash` and state `resolved`, before reply or action. `else` stays `needs_review` on the decision row, and `dry-run` counts it as `needs_review_else` rather than folding it into rule `0`. `dry-run` does not write decisions. With only the Gmail default, `inactive_reason` stays `gmail_default`. `rules_version` is `rules-v1`.
 
 ## How agents use it
 

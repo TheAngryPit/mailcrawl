@@ -479,7 +479,7 @@ PY
 import json, sys
 doc = json.load(sys.stdin)
 ok = (
-    doc.get("rules_version") == "rules-v0"
+    doc.get("rules_version") == "rules-v1"
     and doc.get("threads") == 2
     and doc.get("covered") == 2
     and doc.get("by_state") == {"needs_review": 1, "reply": 1}
@@ -603,7 +603,7 @@ dry = json.loads(os.environ["DRY_JSON"])
 ok = (
     stats.get("by_category", {}).get("STARRED") == 1
     and stats.get("uncategorized") == 2
-    and dry.get("by_state") == {"needs_review": 1, "reply": 1}
+    and dry.get("by_state") == {"needs_review_rule0": 1, "reply": 1}
     and dry.get("by_rule") == {"0": 1, "5": 1}
     and dry.get("undecided") == 0
     and dry.get("decisions_by_category") == {"STARRED": {"0": 1}}
@@ -647,7 +647,7 @@ ok = (
     and stats.get("threads") == 2
     and stats.get("senders") == 2
     and stats.get("by_month") == {"2023-11": 2}
-    and dry.get("by_state") == {"needs_review": 1, "reply": 1}
+    and dry.get("by_state") == {"needs_review_rule0": 1, "reply": 1}
     and dry.get("by_rule") == {"0": 1, "5": 1}
     and dry.get("by_label") == {"STARRED": 1}
     and dry.get("by_sender") == {"1": 1, "2": 1}

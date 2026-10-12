@@ -36,10 +36,13 @@ def stats(
         by_month[key] = by_month.get(key, 0) + 1
     backfill_categories(conn)
     active = _active(categories)
+    rule0, fallthrough = _review_split(conn, now=None, config=None)
     return {
         "by_category": _category_counts(conn, active),
         "by_month": by_month,
         "messages": messages,
+        "needs_review_else": fallthrough,
+        "needs_review_rule0": rule0,
         "senders": senders,
         "threads": threads,
         "uncategorized": _uncategorized(conn),
@@ -68,7 +71,8 @@ def dry_run(
     for preview in preview_rules(conn, now=stamp_now, config=config):
         state = preview.next_state
         rule_id = preview.rule_id
-        by_state[state] = by_state.get(state, 0) + 1
+        reported = _reported_state(state, rule_id)
+        by_state[reported] = by_state.get(reported, 0) + 1
         by_rule[rule_id] = by_rule.get(rule_id, 0) + 1
         if rule_id == "else":
             undecided += 1
@@ -129,6 +133,33 @@ def dry_run(
         "inactive_rules": inactive_content_rules(active),
         "undecided": undecided,
     }
+
+
+def _reported_state(state: str, rule_id: str) -> str:
+    if state == "needs_review" and rule_id == "0":
+        return "needs_review_rule0"
+    if state == "needs_review" and rule_id == "else":
+        return "needs_review_else"
+    return state
+
+
+def _review_split(
+    conn: sqlite3.Connection,
+    *,
+    now: int | None,
+    config: RulesConfig | None,
+) -> tuple[int, int]:
+    if config is None:
+        config = load_rules(bundled_rules_path())
+    stamp_now = int(time.time()) if now is None else now
+    rule0 = 0
+    fallthrough = 0
+    for preview in preview_rules(conn, now=stamp_now, config=config):
+        if preview.rule_id == "0" and preview.next_state == "needs_review":
+            rule0 += 1
+        elif preview.rule_id == "else" and preview.next_state == "needs_review":
+            fallthrough += 1
+    return rule0, fallthrough
 
 
 def _thread_categories(

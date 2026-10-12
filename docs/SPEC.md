@@ -54,7 +54,7 @@ Phase 1 is read-only Python and it does all of the following:
 - Import a Google Takeout mbox idempotently with `mailcrawl import mbox <file> --alias <thehive|vcl|personal>`. It streams the file and writes through the same writer as `import gog-export`. See section 4.1.
 - Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`. Import writes `msg_fts` from the cleaned body. `mailcrawl search` reads it.
 - Parse attachment bytes through `mailcrawl.extract`. `text/plain` and `text/html` are extracted. Other types stay behind that interface. No external binary is required.
-- Apply rules 0 to 8 with `mailcrawl rules`. `rules_version` is `rules-v0`. The command prints counts only.
+- Apply rules 0 to 8 with `mailcrawl rules`. `rules_version` is `rules-v1`. The command prints counts only.
 - Print archive counts with `mailcrawl stats` and would-be decision counts with `mailcrawl dry-run`. Both commands print counts only. Dry-run evaluates rules and does not write decisions. Neither command writes a plan file or touches Gmail.
 - Speak JSON on the CLI. `init`, `import`, and `search` accept `--json` before the command.
 - Test against synthetic fixtures only.
@@ -169,7 +169,7 @@ Rules 2, 2-read, 3, and 4 need content types that are not in that default. They 
 
 An archive imported before those keys existed has the Gmail label id stored and `catalogue_key` empty. `backfill` copies the id into `catalogue_key` for the system labels and category tabs above. It does not change a key that is already set, it does not invent a content type, and it does not update message rows. A `pseudo:` id is skipped. `stats` and `dry-run` run the same fill before they count, so an old archive does not need a reimport. Running `backfill` twice changes nothing the second time. `testdata/fixtures/old-taxonomy/pre-category.sql` is the synthetic old archive.
 
-`stats` reports `uncategorized` as the number of messages with none of the five category tabs. `dry-run` evaluates rules v0 against the current taxonomy and does not read or write the `decisions` table. `by_rule` and `by_state` are the would-be decisions. `decisions_by_category` counts those decisions under each Gmail category the thread carries. `undecided` is the number of threads whose would-be rule is `else`. `--now` and `--rules` select the clock and the rules file. The default rules file is `testdata/rules/rules-v0.json`.
+`stats` reports `uncategorized` as the number of messages with none of the five category tabs. `dry-run` evaluates the current rules against the current taxonomy and does not read or write the `decisions` table. `by_rule` and `by_state` are the would-be decisions. `decisions_by_category` counts those decisions under each Gmail category the thread carries. `undecided` is the number of threads whose would-be rule is `else`. `--now` and `--rules` select the clock and the rules file. The default rules file is `testdata/rules/rules-v0.json`. Its `rules_version` is `rules-v1`.
 
 Two customizations use one JSON file. Lookup order is the `--taxonomy` flag, then the environment variable `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`. Sections are `thehive`, `vcl`, `personal`, and an optional `default`. `pessoal` is accepted and means `personal`. An account section replaces that category's `default` list. Each value is a list of label names.
 
@@ -194,7 +194,15 @@ Invalid JSON, a file that is not an object, an unknown account, or a value that 
 
 `*.local.json` and a `taxonomy.json` at the repository root are gitignored. The example schema contains example label names only.
 
-The rule roles `finance`, `purchase`, and `brief` are `invoice_receipt`, `purchase_delivery`, and `correspondence`. `rules_version` stays `rules-v0`. Those rules fire when the opted-in schema supplies the key.
+The rule roles `finance`, `purchase`, and `brief` are `invoice_receipt`, `purchase_delivery`, and `correspondence`. `rules_version` is `rules-v1`. Those rules fire when the opted-in schema supplies the key.
+
+### 4.3 Rule answers in rules-v1
+
+Rule `0` keys only on the Gmail label id `STARRED`. A thread with `IMPORTANT` and no `STARRED` label does not match rule `0`. It continues at the next rule.
+
+A thread with `SPAM` or `TRASH` that has not already matched rules `0` through `4` matches rule `spam-trash`. The state is `resolved`. The lane is `screened_out`. This rule runs before rules `5`, `6`, `7`, `8`, and `else`, so that thread does not become `reply` or `action`. A starred thread still matches rule `0` first. A muted thread still matches rule `1` first.
+
+Rule `else` stays state `needs_review` on the decision row. `dry-run` does not put rule `0` and rule `else` in one `needs_review` count. Rule `0` is `needs_review_rule0`. Rule `else` is `needs_review_else`. `undecided` is still the `else` count. `stats` reports `needs_review_rule0` and `needs_review_else` the same way. Another rule that returns `needs_review`, such as rule `4`, keeps the state name `needs_review` in `dry-run`.
 
 ## 5. Phase 1 proof
 A phase 1 change is done when, on a clean Linux runner with no network credentials and a temporary `HOME`, this exits 0:
@@ -219,7 +227,7 @@ make check && scripts/proof.sh
 12. For the v0 fixture message that contains a `>` quote and a `-- ` signature, `body_text_raw` keeps both, `body_text` keeps only the sentence above them, and `search quoted` does not return that message. `search fake` does.
 13. The v0 metadata attachment is `skipped` with reason `no_bytes`. The native text attachment is `ok`. The native octet-stream attachment is `unsupported` and is not searchable. OCR thresholds 25 and 60 run only when a backend is supplied.
 14. `mailcrawl rules` on a synthetic account prints counts. A `STARRED` thread is `needs_review` under rule `0`. A plain thread is `reply` under rule `5`. A second run does not add a decision. The output has no message body.
-15. On that same account, `mailcrawl stats` prints 2 messages, 2 threads, 2 senders, and month `2023-11` with count 2. `mailcrawl dry-run` prints state counts `needs_review` 1 and `reply` 1, rule counts `0` 1 and `5` 1, label `STARRED` once, sender ids `1` and `2` once each, and month `2023-11` with count 2. Those counts come from evaluating the rules, including when the `decisions` table is still empty. Neither command prints a message body or an address. A later `rules` run still leaves 2 decision rows, and dry-run does not add more. No `plans` table is created.
+15. On that same account, `mailcrawl stats` prints 2 messages, 2 threads, 2 senders, month `2023-11` with count 2, `needs_review_rule0` 1, and `needs_review_else` 0. `mailcrawl dry-run` prints state `needs_review_rule0` 1 and `reply` 1, rule counts `0` 1 and `5` 1, label `STARRED` once, sender ids `1` and `2` once each, and month `2023-11` with count 2. Those counts come from evaluating the rules, including when the `decisions` table is still empty. Neither command prints a message body or an address. A later `rules` run still leaves 2 decision rows, and dry-run does not add more. No `plans` table is created. The `rules` command still stores state `needs_review` for rule `0`. The split names are only on `stats` and `dry-run`.
 16. The synthetic Takeout mbox imports 5 messages and refuses 1. A second import adds nothing. Four of those messages carry a `pseudo:opened` or `pseudo:archived` label. A gog import of two of those messages afterwards keeps 5 rows, counts 1 duplicate, 1 reconciled, and 0 errors, leaves no provisional label, and keeps all four pseudo-label links.
 
 ## 6. Closed decisions
@@ -237,11 +245,11 @@ These points are closed.
 10. `snippet` and `gmail_history_id` are NULL when the export omits them. `subject_norm` trims the subject, removes a leading run of `Re:`, `Fwd:`, and `Fw:` without regard to case, and collapses whitespace. It does not fold accents.
 11. Attachment parsing handles `text/plain` and `text/html` only. PDF, OCR, Office, `ics`, `attachment_fields`, and image embeddings stay behind an interface with no required implementation. An unsupported type is `unsupported`. A missing backend is `skipped`. A row with no `file_sha256` is `skipped` with reason `no_bytes`. OCR thresholds are v0 constants: fewer than 25 characters per page tries OCR, and `ocr_conf` below 60 is `low_confidence`. Those thresholds are exercised only when a backend is present. This revision adds that interface in `mailcrawl/extract.py`. The default backend does not invoke `pdftotext` or `tesseract`. Image embeddings and `attachment_fields` are not created.
 12. The default taxonomy is the Gmail categories in section 4.2. Content-type rules stay off until an override schema supplies their keys. `invoice_receipt`, `purchase_delivery`, and `correspondence` replace `finance`, `purchase`, and `brief` inside that example schema. Real label names never appear in code or tests. They stay in a local file outside Git.
-13. Guards run first. A guard can only force `needs_review` or block `noise` and `resolved`. Later rules choose the other states. `STARRED` and `IMPORTANT` are Gmail system label ids. Rules never read a `pseudo:` label.
+13. Guards run first. A guard can only force `needs_review` or block `noise` and `resolved`. Later rules choose the other states. `STARRED` and `IMPORTANT` are Gmail system label ids. Rule `0` keys only on `STARRED`. `IMPORTANT` alone does not match rule `0`. Rule `spam-trash` is not a guard. It is the rule in section 4.3. Rules never read a `pseudo:` label.
 14. These definitions are v0, tunable, and marked v0 in code. A human participant is a sender whose origin label is human. When that label is missing, the sender has no `List-Unsubscribe`, no `Precedence` of `bulk` or `list`, and no `Auto-Submitted` other than `no`. The label beats the header. Unrecognized Account & Security means a sender with no `sender_decisions` row. The read-list is `sender_decisions.route = 'read'`. There is no extra domain file. `read_later_expiry_days` is 30, and expiry is tested on fixtures. Open questions, concrete tasks, and closing language are short clue lists in Portuguese and English. They live in a configuration file, not in the engine. The minimum question clues are a `?` at the end of a sentence outside a quote, or a start of `can you`, `could you`, `podes`, `consegues`, or `pode`. The minimum task clues are `please`, `por favor`, `preciso que`, `need you to`, and `can you send`. The minimum closing clues are `thanks`, `obrigado`, `cumprimentos`, `best regards`, `perfect`, and `combinado`. That list is not final. The client plus-three-business-days path is unimplemented. Everyone uses plus seven days. `sender_decisions.client_sla_days` exists and is NULL by default. `sender_decisions.route` may be `imbox`, `feed`, `paper_trail`, or `read`. Priority comes from `sender_decisions.priority`. When that row is missing, priority is NULL.
 15. Coverage is the fraction of threads with a current decision. `needs_review` counts as covered. The report is counts by `next_state` and by `rule_id`. A sample of 100 and a 2% threshold are not a fixture gate.
 16. Dry-run prints counts only: state, label, sender, month, and rule. It does not write a plan file and it does not touch Gmail. Plans are phase 4.
-17. `rules_version` is `rules-v0`. A change to a rule, a constant, or a list increments it. `evidence` stores ids and rule or label names only, never email text.
+17. `rules_version` is `rules-v1`. It was `rules-v0` before the rule `0` and `spam-trash` changes in section 4.3. A change to a rule, a constant, or a list increments it. `evidence` stores ids and rule or label names only, never email text.
 18. No language model runs on the crawl. The first matching rule wins. There is no Gmail write, no network, and no `gog`.
 
 ## 7. Scope
@@ -255,7 +263,7 @@ Body cleaning, schema v2, the attachment interface, rules 0 to 8, `stats`, and d
 An inference stays marked as still to be decided. An open approval stays marked as still to be decided.
 
 ### Phase 2. Cleaned text, parser interface, rules, and counts
-Body cleaning, the attachment interface, rules 0 to 8, `stats`, and dry-run counts are done. `rules_version` is `rules-v0`. There is no model. Dry-run prints counts only. It writes no plan file and it does not touch Gmail.
+Body cleaning, the attachment interface, rules 0 to 8, `stats`, and dry-run counts are done. `rules_version` is `rules-v1`. There is no model. Dry-run prints counts only. It writes no plan file and it does not touch Gmail.
 
 A full thehive backup is not part of phase 2. Cache deletion is not part of phase 2. A sample of 100 and an error under 2% are not a fixture gate. Coverage is the counts in section 6 point 15.
 

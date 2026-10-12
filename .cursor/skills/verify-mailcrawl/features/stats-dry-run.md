@@ -5,7 +5,7 @@
 ## Sub-features
 
 - `archive-counts`. Two synthetic messages count as 2 messages, 2 threads, 2 senders, and month `2023-11` with count 2.
-- `decision-counts`. Dry-run counts `needs_review` and `reply`, rules `0` and `5`, label `STARRED` once, and sender ids `1` and `2`, before any decision row exists.
+- `decision-counts`. Dry-run counts `needs_review_rule0` and `reply`, rules `0` and `5`, label `STARRED` once, and sender ids `1` and `2`, before any decision row exists. `else` is `needs_review_else`, not part of that rule 0 count.
 - `old-archive`. `testdata/fixtures/old-taxonomy/pre-category.sql` has empty Gmail category keys. `backfill` fills two of them, leaves an existing key and a `pseudo:` id alone, and a second run reports `updated` 0.
 - `read-only`. After rules v0 the decision row count stays 2. Dry-run before that leaves it at 0. No `plans` table appears.
 - `no-body`. The JSON output does not contain the seeded body token or an address.

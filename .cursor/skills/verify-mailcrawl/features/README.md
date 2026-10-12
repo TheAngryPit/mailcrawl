@@ -41,6 +41,6 @@ Each feature file uses exactly four H2 sections: `Sub-features`, `How to get to 
 - [mbox-import](./mbox-import.md). Stream a synthetic Takeout mbox, reimport it, keep its `pseudo:` labels out of rules, and reconcile it with a gog export of the same messages.
 - [body-clean](./body-clean.md). Keep `body_text_raw`, index the cleaned `body_text`, and leave schema v2 empty of plans.
 - [attachment-parse](./attachment-parse.md). Extract text parts, skip a missing hash, and leave PDF, OCR, Office, and `ics` behind an interface.
-- [rules-v0](./rules-v0.md). Apply rules 0 to 8 and print counts. `rules_version` is `rules-v0`.
+- [rules-v0](./rules-v0.md). Apply rules 0 to 8 and print counts. `rules_version` is `rules-v1`.
 - [stats-dry-run](./stats-dry-run.md). Print archive counts and would-be decision counts. Backfill an old archive. No plan file and no Gmail.
 - [default-taxonomy](./default-taxonomy.md). Apply generic category signals, accept one local override, and print empty categories.
