@@ -30,6 +30,7 @@ def stats(
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
+    test_recipients: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     messages = int(conn.execute("SELECT count(*) FROM messages").fetchone()[0])
     threads = int(conn.execute("SELECT count(*) FROM threads").fetchone()[0])
@@ -52,6 +53,7 @@ def stats(
         owners=owners,
         domains=domains,
         security_senders=security_senders,
+        test_recipients=test_recipients,
     )
     return {
         "by_category": _category_counts(conn, active),
@@ -78,6 +80,7 @@ def dry_run(
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
+    test_recipients: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     backfill_categories(conn)
     active = _active(categories)
@@ -100,6 +103,7 @@ def dry_run(
         owners=owners,
         domains=domains,
         security_senders=security_senders,
+        test_recipients=test_recipients,
     ):
         state = preview.next_state
         rule_id = preview.rule_id
@@ -265,6 +269,7 @@ def _review_split(
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
+    test_recipients: frozenset[str] = frozenset(),
 ) -> tuple[int, int]:
     if config is None:
         config = load_rules(bundled_rules_path())
@@ -279,6 +284,7 @@ def _review_split(
         owners=owners,
         domains=domains,
         security_senders=security_senders,
+        test_recipients=test_recipients,
     ):
         if preview.rule_id == "0" and preview.next_state == "needs_review":
             rule0 += 1

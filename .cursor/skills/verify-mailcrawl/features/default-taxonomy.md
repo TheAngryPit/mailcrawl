@@ -38,4 +38,4 @@ Preconditions:
 - The drive uses a temp home under `/tmp/mailcrawl-verify-scratch/$RUN_ID` and blocks network proxies. It does not run `gog` and it does not write to Gmail.
 - Cleanup removes that scratch directory. Evidence stays in `$EVIDENCE_DIR`.
 - Example label names in the drive are synthetic. Real label names stay out of the repository.
-- `rules_version` is `rules-v3`. Content-type rules run only when the selected schema has their keys.
+- `rules_version` is `rules-v4`. Content-type rules run only when the selected schema has their keys. `correspondence`, `human`, and `automated` do not by themselves block the Gmail tab fallback.

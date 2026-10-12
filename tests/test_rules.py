@@ -369,19 +369,175 @@ class RulesEngineTest(unittest.TestCase):
         self.assertEqual(self._current(allow)["rule_id"], "4")
         self.assertEqual(self._current(sales)["rule_id"], "screener")
         self.assertEqual(self._current(sales)["next_state"], "screener")
-        self.assertEqual(self._current(repeat)["rule_id"], "5")
+        self.assertEqual(self._current(repeat)["rule_id"], "screener")
+
+    def test_rules_v4_unions_tabs_and_keeps_precedence(self) -> None:
+        promo = self._thread(
+            "hello there",
+            labels=[
+                ("Lh4", "Example origin/Person", "human"),
+                ("Lc4", "Example type/Letter", "correspondence"),
+                ("CATEGORY_PROMOTIONS", "CATEGORY_PROMOTIONS", "CATEGORY_PROMOTIONS"),
+            ],
+        )
+        updates = self._thread(
+            "hello there",
+            labels=[
+                ("La4", "Example origin/Machine", "automated"),
+                ("CATEGORY_UPDATES", "CATEGORY_UPDATES", "CATEGORY_UPDATES"),
+            ],
+        )
+        letter = self._thread(
+            "hello there",
+            labels=[
+                ("Lc4", "Example type/Letter", "correspondence"),
+                ("CATEGORY_UPDATES", "CATEGORY_UPDATES", "CATEGORY_UPDATES"),
+            ],
+        )
+        tracked = self._thread("Can you confirm?", from_me=1)
+        self._message(tracked, "viewed your file", NOW, from_me=0)
+        files = self._thread("files (3) from Ada Example")
+        arquivos = self._thread("arquivos (2) para Ada Example", address="transfer@example.com")
+        html = (
+            "<table><tr><td>Ada Example</td></tr>"
+            "<tr><td>Second row</td></tr><tr><td>Third row</td></tr></table>"
+        )
+        signature = self._thread("Can you confirm this note?\n" + html, from_me=1)
+        tester = self._thread(
+            "Can you confirm this note?\n" + html,
+            from_me=1,
+            to_hdr="Tester <tester@example.com>",
+        )
+        promo_close = self._thread(
+            "Thanks",
+            labels=[("CATEGORY_PROMOTIONS", "CATEGORY_PROMOTIONS", "CATEGORY_PROMOTIONS")],
+        )
+        list_close = self._thread(
+            "Thanks",
+            headers=[("list-unsubscribe", "<https://example.com/unsub>")],
+        )
+        pitch = self._thread("A special offer for you", address="ada.pitch@example.com")
+        pitch_sender = self._sender_of(pitch)
+        self._message(
+            pitch,
+            "You are invited to the session",
+            NOW - 10,
+            from_me=0,
+            sender_id=pitch_sender,
+        )
+        answered = self._thread(
+            "A partnership proposal for you",
+            address="ada.answered@example.com",
+        )
+        answered_sender = self._sender_of(answered)
+        self._message(answered, "Noted for later.", NOW - 30, from_me=1)
+        self._message(
+            answered,
+            "A partnership proposal for you",
+            NOW - 10,
+            from_me=0,
+            sender_id=answered_sender,
+        )
+        invite = self._thread("Convite para o evento na sala", address="ada.invite@example.com")
+        overdue = self._thread("This invoice is overdue")
+        unpaid = self._thread("A fatura está por pagar")
+        asked = self._thread(
+            "Your invoice is attached",
+            labels=[("Li4", "Example type/Receipt", "invoice_receipt")],
+        )
+        self._message(asked, "Can you confirm?", NOW, from_me=1)
+        receipt = self._thread(
+            "Your invoice is attached",
+            address="no-reply@example.com",
+            subject="Automatic reply",
+        )
+        task = self._thread(
+            "É só enviar o ficheiro",
+            labels=[("La4", "Example origin/Machine", "automated")],
+        )
+        stale = self._thread(
+            "The session is happening now",
+            labels=[("La4", "Example origin/Machine", "automated")],
+        )
+        decorrer = self._thread(
+            "A sessão está a decorrer agora",
+            labels=[("La4", "Example origin/Machine", "automated")],
+        )
+        recovery = self._thread("The recovery email validated yesterday")
+        exported = self._thread("A exportação de dados está pronta")
+        budget = self._thread("Budget alert for this workspace")
+        handoff = self._thread("Segue o ficheiro em anexo.", from_me=1)
+        handoff_q = self._thread("Segue o ficheiro em anexo. Can you confirm?", from_me=1)
+        access = self._thread(
+            "Ada Example is requesting access",
+            labels=[("La4", "Example origin/Machine", "automated")],
+        )
+        apply_rules(
+            self.conn,
+            now=NOW,
+            config=self.config,
+            test_recipients=frozenset({"tester@example.com"}),
+        )
+        self.assertEqual(self._current(promo)["rule_id"], "2")
+        self.assertEqual(self._current(updates)["rule_id"], "auto-ref")
+        self.assertNotEqual(self._current(updates)["rule_id"], "else")
+        self.assertEqual(self._current(letter)["rule_id"], "auto-ref")
+        self.assertEqual(self._current(letter)["next_state"], "reference")
+        self.assertEqual(self._current(tracked)["rule_id"], "6")
+        self.assertEqual(self._current(tracked)["next_state"], "waiting")
+        self.assertEqual(self._current(files)["rule_id"], "auto-ref")
+        self.assertEqual(self._current(arquivos)["rule_id"], "auto-ref")
+        self.assertEqual(self._current(signature)["rule_id"], "6")
+        self.assertEqual(self._current(signature)["next_state"], "waiting")
+        self.assertEqual(self._current(tester)["rule_id"], "test-send")
+        self.assertEqual(self._current(tester)["next_state"], "resolved")
+        self.assertEqual(self._current(promo_close)["rule_id"], "2")
+        self.assertNotEqual(self._current(promo_close)["lane"], "imbox")
+        self.assertNotEqual(self._current(list_close)["rule_id"], "8")
+        self.assertEqual(self._current(pitch)["rule_id"], "screener")
+        self.assertEqual(self._current(answered)["rule_id"], "5")
+        self.assertEqual(self._current(invite)["rule_id"], "screener")
+        self.assertEqual(self._current(overdue)["rule_id"], "7")
+        self.assertEqual(self._current(overdue)["next_state"], "action")
+        self.assertEqual(self._current(unpaid)["rule_id"], "7")
+        self.assertEqual(self._current(asked)["rule_id"], "6")
+        self.assertNotEqual(self._current(asked)["rule_id"], "3")
+        self.assertEqual(self._current(receipt)["rule_id"], "3")
+        self.assertNotEqual(self._current(receipt)["rule_id"], "auto-reply")
+        self.assertEqual(self._current(task)["rule_id"], "7")
+        self.assertEqual(self._current(stale)["rule_id"], "auto-ref")
+        self.assertEqual(self._current(decorrer)["rule_id"], "auto-ref")
+        self.assertEqual(self._current(recovery)["rule_id"], "4")
+        self.assertEqual(self._current(exported)["rule_id"], "4")
+        self.assertEqual(self._current(budget)["rule_id"], "7")
+        self.assertEqual(self._current(handoff)["rule_id"], "handoff")
+        self.assertEqual(self._current(handoff)["next_state"], "resolved")
+        self.assertEqual(self._current(handoff_q)["rule_id"], "6")
+        self.assertEqual(self._current(access)["rule_id"], "7")
+        self.assertEqual(self._current(access)["next_state"], "action")
 
     def test_owner_domain_is_from_me_through_config(self) -> None:
         self._thread("Can you confirm?", address="owner@example.com")
         self.conn.commit()
         config = Path(self.tmp.name) / "config.toml"
         config.write_text(
-            '[accounts.vcl]\nemail = "ada@example.com"\nowners = []\ndomains = ["example.com"]\n',
+            "\n".join(
+                [
+                    "[accounts.vcl]",
+                    'email = "ada@example.com"',
+                    "owners = []",
+                    'domains = ["example.com"]',
+                    'security_senders = ["alerts@example.com"]',
+                    'test_recipients = ["tester@example.com"]',
+                    "",
+                ]
+            ),
             encoding="utf-8",
         )
         write_account(config, "vcl", "ada@example.com")
         kept = config.read_text(encoding="utf-8")
         self.assertIn('domains = ["example.com"]', kept)
+        self.assertIn('test_recipients = ["tester@example.com"]', kept)
         code = main(
             [
                 "--json",
@@ -403,7 +559,7 @@ class RulesEngineTest(unittest.TestCase):
             "SELECT rule_id FROM decisions WHERE superseded_by IS NULL"
         ).fetchone()
         self.assertIsNone(row)
-        owners, domains, _security = account_identity(config, "vcl")
+        owners, domains, _security, _testers = account_identity(config, "vcl")
         preview = preview_rules(
             self.conn, now=NOW, config=self.config, owners=owners, domains=domains
         )
@@ -414,6 +570,13 @@ class RulesEngineTest(unittest.TestCase):
         thread = self._thread("On the meeting we decided.", from_me=1)
         apply_rules(self.conn, now=NOW, config=self.config)
         self.assertEqual(self._current(thread)["rule_id"], "else")
+
+    def _sender_of(self, thread_pk: int) -> int:
+        row = self.conn.execute(
+            "SELECT sender_id FROM messages WHERE thread_pk = ? ORDER BY msg_pk LIMIT 1",
+            (thread_pk,),
+        ).fetchone()
+        return int(row[0])
 
     def _current(self, thread_pk: int):
         return self.conn.execute(

@@ -222,7 +222,7 @@ def _rules(args: argparse.Namespace) -> int:
         raise UsageError("account is not initialized")
     config = load_rules(Path(args.rules))
     now = int(time.time()) if args.now is None else args.now
-    owners, domains, security_senders = _identity(args)
+    owners, domains, security_senders, test_recipients = _identity(args)
     conn = connect(db_path)
     try:
         report = apply_rules(
@@ -232,6 +232,7 @@ def _rules(args: argparse.Namespace) -> int:
             owners=owners,
             domains=domains,
             security_senders=security_senders,
+            test_recipients=test_recipients,
         )
     finally:
         conn.close()
@@ -250,7 +251,7 @@ def _rules(args: argparse.Namespace) -> int:
 
 
 def _stats(args: argparse.Namespace) -> int:
-    owners, domains, security_senders = _identity(args)
+    owners, domains, security_senders, test_recipients = _identity(args)
 
     def report(
         conn: sqlite3.Connection,
@@ -264,6 +265,7 @@ def _stats(args: argparse.Namespace) -> int:
             owners=owners,
             domains=domains,
             security_senders=security_senders,
+            test_recipients=test_recipients,
         )
 
     _emit(args, {**_counted(args, report), "ok": True})
@@ -274,7 +276,7 @@ def _dry_run(args: argparse.Namespace) -> int:
     now = int(time.time()) if args.now is None else args.now
     config = None if not args.rules else load_rules(Path(args.rules))
     export_path, sample, seed = _export_args(args)
-    owners, domains, security_senders = _identity(args)
+    owners, domains, security_senders, test_recipients = _identity(args)
 
     def report(
         conn: sqlite3.Connection,
@@ -293,13 +295,16 @@ def _dry_run(args: argparse.Namespace) -> int:
             owners=owners,
             domains=domains,
             security_senders=security_senders,
+            test_recipients=test_recipients,
         )
 
     _emit(args, {**_counted(args, report), "ok": True})
     return 0
 
 
-def _identity(args: argparse.Namespace) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+def _identity(
+    args: argparse.Namespace,
+) -> tuple[frozenset[str], frozenset[str], frozenset[str], frozenset[str]]:
     return account_identity(config_path(args.config), canonical_alias(args.account))
 
 

@@ -1,6 +1,6 @@
 # Rules v0
 
-`mailcrawl rules` applies rules 0 to 8 and prints counts. `rules_version` is `rules-v3`. There is no model. Evidence and the command output use ids and rule or label names, not message text. The catalogue leaves in the repo are synthetic.
+`mailcrawl rules` applies rules 0 to 8 and prints counts. `rules_version` is `rules-v4`. There is no model. Evidence and the command output use ids and rule or label names, not message text. The catalogue leaves in the repo are synthetic.
 
 ## Sub-features
 

@@ -12,7 +12,20 @@ from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.taxonomy import CONTENT, ORIGIN, effective_keys
 from mailcrawl.textnorm import parse_address
 
-RULES_VERSION = "rules-v3"
+RULES_VERSION = "rules-v4"
+_FILE_COUNT = re.compile(
+    r"(?<!\w)files \(\d+\) (?:from|to)\b|(?<!\w)arquivos \(\d+\) (?:para|de)\b",
+    re.IGNORECASE,
+)
+_SPECIFIC_CONTENT = (
+    "newsletter",
+    "job_alert",
+    "notification",
+    "invoice_receipt",
+    "purchase_delivery",
+    "account_security",
+    "contract",
+)
 _DAY = 86400
 _KEY_ROLES = CONTENT + ORIGIN
 
@@ -36,6 +49,12 @@ class RulesConfig:
     sales: tuple[str, ...]
     security_wording: tuple[str, ...]
     auto_reply_subject: tuple[str, ...]
+    read_tracking: tuple[str, ...]
+    transfer_local: tuple[str, ...]
+    stale_meeting: tuple[str, ...]
+    security_notice: tuple[str, ...]
+    file_handoff: tuple[str, ...]
+    access_request: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -84,6 +103,12 @@ def load_rules(path: Path) -> RulesConfig:
         sales=_merged_phrases(document, "sales"),
         security_wording=_merged_phrases(document, "security_wording"),
         auto_reply_subject=_merged_phrases(document, "auto_reply_subject"),
+        read_tracking=_merged_phrases(document, "read_tracking"),
+        transfer_local=_merged_phrases(document, "transfer_local"),
+        stale_meeting=_merged_phrases(document, "stale_meeting"),
+        security_notice=_merged_phrases(document, "security_notice"),
+        file_handoff=_merged_phrases(document, "file_handoff"),
+        access_request=_merged_phrases(document, "access_request"),
     )
 
 
@@ -108,15 +133,23 @@ def preview_rules(
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
+    test_recipients: frozenset[str] = frozenset(),
 ) -> list[Preview]:
     found: list[Preview] = []
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
     for thread in threads:
         thread_pk = int(thread[0])
         facts = _load(
-            conn, thread_pk, now, config, label_keys, owners, domains, security_senders
+            conn,
+            thread_pk,
+            now,
+            config,
+            label_keys,
+            owners,
+            domains,
+            security_senders,
         )
-        outcome = _classify(facts, now, config)
+        outcome = _classify(facts, now, config, test_recipients)
         found.append(Preview(thread_pk, outcome.next_state, outcome.rule_id, outcome.lane))
     return found
 
@@ -129,11 +162,21 @@ def apply_rules(
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
+    test_recipients: frozenset[str] = frozenset(),
 ) -> Coverage:
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
     for thread in threads:
         thread_pk = int(thread[0])
-        _apply_thread(conn, thread_pk, now, config, owners, domains, security_senders)
+        _apply_thread(
+            conn,
+            thread_pk,
+            now,
+            config,
+            owners,
+            domains,
+            security_senders,
+            test_recipients,
+        )
     conn.commit()
     return coverage_counts(conn)
 
@@ -203,8 +246,18 @@ def _apply_thread(
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
+    test_recipients: frozenset[str] = frozenset(),
 ) -> None:
-    facts = _load(conn, thread_pk, now, config, None, owners, domains, security_senders)
+    facts = _load(
+        conn,
+        thread_pk,
+        now,
+        config,
+        None,
+        owners,
+        domains,
+        security_senders,
+    )
     current = conn.execute(
         """
         SELECT decision_id, thread_pk, next_state, rule_id, lane, priority,
@@ -220,7 +273,7 @@ def _apply_thread(
             return
         _supersede(conn, current, outcome, now, config.rules_version)
         return
-    outcome = _classify(facts, now, config)
+    outcome = _classify(facts, now, config, test_recipients)
     _insert_decision(conn, thread_pk, outcome, now, config.rules_version, None)
 
 
@@ -272,7 +325,12 @@ def _transition(current: sqlite3.Row, facts: "_Facts", now: int, config: RulesCo
     return None
 
 
-def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
+def _classify(
+    facts: "_Facts",
+    now: int,
+    config: RulesConfig,
+    test_recipients: frozenset[str] = frozenset(),
+) -> _Outcome:
     if facts.starred:
         return _outcome(
             "needs_review",
@@ -317,19 +375,45 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
         )
     if facts.newsletter_sender and not protected:
         return _outcome("noise", "2", "feed", None, None, 0, ({"type": "rule", "name": "2"},))
-    if facts.promotions and not facts.custom_content() and not protected:
+    if facts.promotions and not facts.specific_content() and not protected:
         return _outcome("noise", "2", "feed", None, None, 0, ({"type": "rule", "name": "2"},))
-    if _any_phrase(facts.body, config.billing_action):
+    if _any_phrase(_text(facts), config.billing_action):
         return _outcome("action", "7", "imbox", None, None, 0, ({"type": "rule", "name": "7"},))
+    if _test_send(facts, test_recipients) and not protected:
+        return _outcome(
+            "resolved",
+            "test-send",
+            "screened_out",
+            None,
+            None,
+            0,
+            ({"type": "rule", "name": "test-send"},),
+        )
     if (
-        facts.has_key("invoice_receipt")
-        or facts.has_key("purchase_delivery")
-        or (_receipt_words_apply(facts) and _any_phrase(facts.body, config.receipt_words))
+        not facts.draft_only
+        and facts.last_from_me
+        and _question(facts.body, config)
+        and not _housekeeping(facts, config)
     ):
+        return _outcome(
+            "waiting",
+            "6",
+            "imbox",
+            None,
+            now + config.review_days * _DAY,
+            0,
+            ({"type": "rule", "name": "6"},),
+        )
+    if _receipt(facts, config):
         role = "invoice_receipt" if facts.has_key("invoice_receipt") else "purchase_delivery"
         evidence = _labels(facts.keys.get(role, ())) + ({"type": "rule", "name": "3"},)
         return _outcome("reference", "3", "paper_trail", None, None, 0, evidence)
-    if facts.real_security or facts.security_sender or _tab_security(facts, config):
+    if (
+        facts.real_security
+        or facts.security_sender
+        or _tab_security(facts, config)
+        or _security_notice(facts, config)
+    ):
         fresh = facts.last_at is not None and (now - facts.last_at) < config.unrecognized_days * _DAY
         if facts.sender_known is False and fresh:
             return _outcome(
@@ -382,6 +466,8 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
             0,
             ({"type": "rule", "name": "auto-reply"},),
         )
+    if _access_request(facts, config):
+        return _outcome("action", "7", "imbox", None, None, 0, ({"type": "rule", "name": "7"},))
     if _automated_reference(facts, config):
         return _outcome(
             "reference",
@@ -392,22 +478,32 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
             0,
             ({"type": "rule", "name": "auto-ref"},),
         )
-    if facts.last_from_me and _template_body(facts.body) and not protected:
+    if facts.updates and not facts.specific_content():
+        return _outcome(
+            "reference",
+            "auto-ref",
+            "paper_trail",
+            None,
+            None,
+            0,
+            ({"type": "rule", "name": "auto-ref"},),
+        )
+    if _handoff(facts, config) and not protected:
         return _outcome(
             "resolved",
-            "test-send",
+            "handoff",
             "screened_out",
             None,
             None,
             0,
-            ({"type": "rule", "name": "test-send"},),
+            ({"type": "rule", "name": "handoff"},),
         )
-    if _short_closing(facts.body, config) and not protected:
+    if _short_closing(facts.body, config) and not protected and not _inbox_noise(facts):
         return _outcome("resolved", "8", "imbox", None, None, 0, ({"type": "rule", "name": "8"},))
     if (
         facts.human
         and not facts.last_from_me
-        and facts.first_contact
+        and not facts.replied
         and _any_phrase(facts.body, config.sales)
     ):
         return _outcome("screener", "screener", "imbox", None, None, 0, ({"type": "rule", "name": "screener"},))
@@ -429,7 +525,12 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
         )
     if not facts.last_from_me and not facts.listish and not facts.promotions and _task(facts.body, config):
         return _outcome("action", "7", "imbox", None, None, 0, ({"type": "rule", "name": "7"},))
-    if _closing(facts.body, config) and not _question(facts.body, config) and not _task(facts.body, config):
+    if (
+        _closing(facts.body, config)
+        and not _question(facts.body, config)
+        and not _task(facts.body, config)
+        and not _inbox_noise(facts)
+    ):
         if not protected:
             return _outcome("resolved", "8", "imbox", None, None, 0, ({"type": "rule", "name": "8"},))
     if facts.has_key("account_security"):
@@ -441,6 +542,16 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
             None,
             0,
             _labels(facts.keys.get("account_security", ())) + ({"type": "rule", "name": "4"},),
+        )
+    if facts.automated and facts.updates:
+        return _outcome(
+            "reference",
+            "auto-ref",
+            "paper_trail",
+            None,
+            None,
+            0,
+            ({"type": "rule", "name": "auto-ref"},),
         )
     return _outcome("needs_review", "else", "imbox", None, None, 0, ({"type": "rule", "name": "else"},))
 
@@ -478,7 +589,10 @@ class _Facts:
     automated: bool
     newsletter_sender: bool
     security_sender: bool
-    first_contact: bool
+    replied: bool
+    machine: bool
+    transfer_sender: bool
+    to_hdr: str
     message_count: int
     subject: str
     auto_submitted: bool
@@ -486,8 +600,8 @@ class _Facts:
     def has_key(self, role: str) -> bool:
         return bool(self.keys.get(role))
 
-    def custom_content(self) -> bool:
-        return any(self.keys.get(role) for role in CONTENT)
+    def specific_content(self) -> bool:
+        return any(self.keys.get(role) for role in _SPECIFIC_CONTENT)
 
 
 def _load(
@@ -512,6 +626,14 @@ def _load(
         """,
         (thread_pk,),
     ).fetchall()
+    outbound = any(
+        bool(message["is_from_me"]) or _is_owner(message["address_norm"], owners, domains)
+        for message in messages
+    )
+    if outbound:
+        kept = [message for message in messages if not _tracking_message(message, config)]
+        if kept:
+            messages = kept
     mute = conn.execute(
         "SELECT until FROM thread_mutes WHERE thread_pk = ?",
         (thread_pk,),
@@ -581,6 +703,7 @@ def _load(
         priority = int(decision["priority"])
     body = "" if last is None or last["body_text"] is None else str(last["body_text"])
     last_address = None if last is None else last["address_norm"]
+    subject = "" if last is None or last["subject"] is None else str(last["subject"])
     last_from_me = bool(
         last and (last["is_from_me"] or _is_owner(last_address, owners, domains))
     )
@@ -589,12 +712,24 @@ def _load(
         and not last_from_me
         and _machine_address(last_address, config.machine_local)
     )
-    transfer = _any_phrase(body, config.transfer_notice)
+    transfer_sender = bool(
+        last is not None
+        and not last_from_me
+        and _machine_address(last_address, config.transfer_local)
+    )
+    text = f"{subject}\n{body}"
+    transfer = (
+        transfer_sender
+        or _any_phrase(text, config.transfer_notice)
+        or _FILE_COUNT.search(text) is not None
+    )
+    stale = _any_phrase(text, config.stale_meeting)
     both_origins = human_label and automated_label
     human = (
         not machine_sender
         and not _mail_domain(last_address)
         and not transfer
+        and not stale
         and not both_origins
         and not promotions
         and not blocks_human
@@ -607,20 +742,11 @@ def _load(
     muted = False
     if mute is not None and (mute["until"] is None or int(mute["until"]) >= now):
         muted = True
-    to_hdr = None if last is None else last["to_hdr"]
-    subject = "" if last is None or last["subject"] is None else str(last["subject"])
+    to_hdr = "" if last is None or last["to_hdr"] is None else str(last["to_hdr"])
     replied = any(
         bool(message["is_from_me"]) or _is_owner(message["address_norm"], owners, domains)
         for message in messages
     )
-    seen_threads = 0
-    if sender_id is not None:
-        seen_threads = int(
-            conn.execute(
-                "SELECT count(DISTINCT thread_pk) FROM messages WHERE sender_id = ?",
-                (sender_id,),
-            ).fetchone()[0]
-        )
     address = "" if not isinstance(last_address, str) else last_address.strip().lower()
     return _Facts(
         starred=bool(star_labels),
@@ -644,10 +770,13 @@ def _load(
         draft_only=bool(draft_flags) and all(draft_flags),
         real_security=real_security,
         to_self=last_from_me and _only_owners(to_hdr, owners, domains),
-        automated=automated_label,
+        automated=automated_label or transfer_sender,
         newsletter_sender=_machine_address(last_address, ("newsletter",)),
         security_sender=address in security_senders,
-        first_contact=seen_threads == 1 and not replied,
+        replied=replied,
+        machine=machine_sender or transfer_sender,
+        transfer_sender=transfer_sender,
+        to_hdr=to_hdr,
         message_count=len(messages),
         subject=subject,
         auto_submitted=auto_submitted,
@@ -813,14 +942,86 @@ def _receipt_words_apply(facts: _Facts) -> bool:
     return not (facts.human and facts.message_count > 1 and not facts.automated)
 
 
-def _tab_security(facts: _Facts, config: RulesConfig) -> bool:
-    if not facts.updates or facts.custom_content():
+def _text(facts: _Facts) -> str:
+    return f"{facts.subject}\n{facts.body}"
+
+
+def _inbox_noise(facts: _Facts) -> bool:
+    return facts.listish or facts.promotions
+
+
+def _receipt(facts: _Facts, config: RulesConfig) -> bool:
+    return bool(
+        facts.has_key("invoice_receipt")
+        or facts.has_key("purchase_delivery")
+        or (_receipt_words_apply(facts) and _any_phrase(facts.body, config.receipt_words))
+    )
+
+
+def _tracking_message(message: sqlite3.Row, config: RulesConfig) -> bool:
+    if message["is_from_me"]:
         return False
-    text = f"{facts.subject}\n{facts.body}"
-    return _any_phrase(text, config.security_wording)
+    subject = "" if message["subject"] is None else str(message["subject"])
+    body = "" if message["body_text"] is None else str(message["body_text"])
+    return _any_phrase(f"{subject}\n{body}", config.read_tracking)
+
+
+def _tab_security(facts: _Facts, config: RulesConfig) -> bool:
+    if not facts.updates or facts.specific_content():
+        return False
+    return _any_phrase(_text(facts), config.security_wording)
+
+
+def _security_notice(facts: _Facts, config: RulesConfig) -> bool:
+    if facts.listish or facts.promotions:
+        return False
+    return _any_phrase(_text(facts), config.security_notice)
+
+
+def _access_request(facts: _Facts, config: RulesConfig) -> bool:
+    if facts.human or facts.listish or facts.promotions:
+        return False
+    if not (facts.automated or facts.machine):
+        return False
+    return _any_phrase(_text(facts), config.access_request)
+
+
+def _test_send(facts: _Facts, recipients: frozenset[str]) -> bool:
+    if not facts.last_from_me or not _template_body(facts.body):
+        return False
+    if _known_tester(facts.to_hdr, recipients):
+        return True
+    return _opens_with_html(facts.body)
+
+
+def _known_tester(to_hdr: str, recipients: frozenset[str]) -> bool:
+    if not recipients or not to_hdr.strip():
+        return False
+    for part in to_hdr.split(","):
+        _name, addr, _domain = parse_address(part)
+        if isinstance(addr, str) and addr.strip().lower() in recipients:
+            return True
+    return False
+
+
+def _opens_with_html(body: str) -> bool:
+    match = re.search(r"</?[a-zA-Z][^>]*>", body)
+    if match is None:
+        return False
+    return not body[: match.start()].strip()
+
+
+def _handoff(facts: _Facts, config: RulesConfig) -> bool:
+    if not facts.last_from_me:
+        return False
+    if _question(facts.body, config) or _task(facts.body, config):
+        return False
+    return _any_phrase(facts.body, config.file_handoff)
 
 
 def _auto_reply(facts: _Facts, config: RulesConfig) -> bool:
+    if _receipt(facts, config):
+        return False
     if facts.auto_submitted:
         return True
     return _any_phrase(facts.subject, config.auto_reply_subject)
@@ -844,8 +1045,13 @@ def _housekeeping(facts: _Facts, config: RulesConfig) -> bool:
 def _automated_reference(facts: _Facts, config: RulesConfig) -> bool:
     if facts.human:
         return False
-    return _any_phrase(facts.body, config.automated_reference) or _any_phrase(
-        facts.body, config.transfer_notice
+    text = _text(facts)
+    return (
+        facts.transfer_sender
+        or _FILE_COUNT.search(text) is not None
+        or _any_phrase(text, config.automated_reference)
+        or _any_phrase(text, config.transfer_notice)
+        or _any_phrase(text, config.stale_meeting)
     )
 
 
