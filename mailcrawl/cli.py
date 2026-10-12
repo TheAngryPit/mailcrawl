@@ -115,6 +115,9 @@ def _parser() -> argparse.ArgumentParser:
     preview.add_argument("--taxonomy")
     preview.add_argument("--rules")
     preview.add_argument("--now", type=int)
+    preview.add_argument("--export-decisions")
+    preview.add_argument("--sample", type=int)
+    preview.add_argument("--seed", type=int)
 
     fill = sub.add_parser("backfill")
     fill.add_argument("--account", required=True)
@@ -253,16 +256,46 @@ def _stats(args: argparse.Namespace) -> int:
 def _dry_run(args: argparse.Namespace) -> int:
     now = int(time.time()) if args.now is None else args.now
     config = None if not args.rules else load_rules(Path(args.rules))
+    export_path, sample, seed = _export_args(args)
 
     def report(
         conn: sqlite3.Connection,
         categories: tuple[str, ...],
         names: dict[str, str] | None,
     ) -> dict[str, object]:
-        return dry_run(conn, categories=categories, now=now, config=config, label_keys=names)
+        return dry_run(
+            conn,
+            categories=categories,
+            now=now,
+            config=config,
+            label_keys=names,
+            export_path=export_path,
+            sample=sample,
+            seed=seed,
+        )
 
     _emit(args, {**_counted(args, report), "ok": True})
     return 0
+
+
+def _export_args(args: argparse.Namespace) -> tuple[Path | None, int | None, int]:
+    raw = args.export_decisions
+    sample = args.sample
+    seed = args.seed
+    if sample is not None and raw is None:
+        raise UsageError("sample needs --export-decisions")
+    if seed is not None and sample is None:
+        raise UsageError("seed needs --sample")
+    if sample is not None and sample < 1:
+        raise UsageError("sample needs a positive count")
+    if raw is None:
+        return None, None, 0
+    dest = Path(raw)
+    if dest.exists() and dest.is_dir():
+        raise UsageError("export path is a directory")
+    if not dest.parent.is_dir():
+        raise UsageError("export directory is missing")
+    return dest, sample, 0 if seed is None else seed
 
 
 def _backfill(args: argparse.Namespace) -> int:

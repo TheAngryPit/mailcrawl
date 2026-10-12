@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import csv
 import datetime
+import random
 import sqlite3
 import time
 from collections.abc import Iterable
+from pathlib import Path
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.rules import RulesConfig, bundled_rules_path, load_rules, preview_rules
@@ -58,6 +61,9 @@ def dry_run(
     now: int | None = None,
     config: RulesConfig | None = None,
     label_keys: dict[str, str] | None = None,
+    export_path: Path | None = None,
+    sample: int | None = None,
+    seed: int = 0,
 ) -> dict[str, object]:
     backfill_categories(conn)
     active = _active(categories)
@@ -70,6 +76,7 @@ def dry_run(
     by_sender: dict[str, int] = {}
     by_month: dict[str, int] = {}
     decisions_by_category: dict[str, dict[str, int]] = {}
+    export_rows: list[tuple[str, str, str, str]] = []
     undecided = 0
     for preview in preview_rules(conn, now=stamp_now, config=config, label_keys=label_keys):
         state = preview.next_state
@@ -79,6 +86,10 @@ def dry_run(
         by_rule[rule_id] = by_rule.get(rule_id, 0) + 1
         if rule_id == "else":
             undecided += 1
+        if export_path is not None:
+            export_rows.append(
+                _export_row(conn, preview.thread_pk, rule_id, preview.lane, label_keys)
+            )
         for key in _thread_categories(conn, preview.thread_pk, active, label_keys):
             bucket = decisions_by_category.setdefault(key, {})
             bucket[rule_id] = bucket.get(rule_id, 0) + 1
@@ -138,7 +149,79 @@ def dry_run(
     }
     if label_keys is not None:
         counted["override_matches"] = _override_matches(conn, label_keys)
+    if export_path is not None:
+        chosen = export_rows if sample is None else _stratified(export_rows, sample, seed)
+        counted["exported"] = _write_decisions(export_path, chosen)
     return counted
+
+
+def _export_row(
+    conn: sqlite3.Connection,
+    thread_pk: int,
+    rule_id: str,
+    lane: str,
+    label_keys: dict[str, str] | None,
+) -> tuple[str, str, str, str]:
+    thread_id = conn.execute(
+        "SELECT gmail_thread_id FROM threads WHERE thread_pk = ?",
+        (thread_pk,),
+    ).fetchone()
+    return (str(thread_id[0]), rule_id, lane, _override_cell(conn, thread_pk, label_keys))
+
+
+def _override_cell(
+    conn: sqlite3.Connection,
+    thread_pk: int,
+    label_keys: dict[str, str] | None,
+) -> str:
+    if not label_keys:
+        return ""
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT labels.name
+        FROM messages
+        JOIN message_labels ON message_labels.msg_pk = messages.msg_pk
+        JOIN labels
+          ON labels.account_id = message_labels.account_id
+         AND labels.gmail_label_id = message_labels.gmail_label_id
+         AND {GMAIL_LABEL_SQL}
+        WHERE messages.thread_pk = ?
+        """,
+        (thread_pk,),
+    ).fetchall()
+    found = sorted({label_keys[str(name)] for (name,) in rows if str(name) in label_keys})
+    return "|".join(found)
+
+
+def _stratified(
+    rows: list[tuple[str, str, str, str]],
+    count: int,
+    seed: int,
+) -> list[tuple[str, str, str, str]]:
+    grouped: dict[str, list[tuple[str, str, str, str]]] = {}
+    for row in rows:
+        grouped.setdefault(row[1], []).append(row)
+    rng = random.Random(seed)
+    chosen: list[tuple[str, str, str, str]] = []
+    rest: list[tuple[str, str, str, str]] = []
+    for rule in sorted(grouped):
+        bucket = list(grouped[rule])
+        rng.shuffle(bucket)
+        chosen.append(bucket[0])
+        rest.extend(bucket[1:])
+    if len(chosen) < count:
+        rng.shuffle(rest)
+        chosen.extend(rest[: count - len(chosen)])
+    return chosen
+
+
+def _write_decisions(path: Path, rows: list[tuple[str, str, str, str]]) -> int:
+    ordered = sorted(rows, key=lambda row: row[0])
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(["gmail_thread_id", "rule", "lane", "override_match"])
+        writer.writerows(ordered)
+    return len(ordered)
 
 
 def _reported_state(state: str, rule_id: str) -> str:

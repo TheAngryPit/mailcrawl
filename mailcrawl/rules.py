@@ -77,6 +77,7 @@ class Preview:
     thread_pk: int
     next_state: str
     rule_id: str
+    lane: str
 
 
 def preview_rules(
@@ -92,7 +93,7 @@ def preview_rules(
         thread_pk = int(thread[0])
         facts = _load(conn, thread_pk, now, config, label_keys)
         outcome = _classify(facts, now, config)
-        found.append(Preview(thread_pk, outcome.next_state, outcome.rule_id))
+        found.append(Preview(thread_pk, outcome.next_state, outcome.rule_id, outcome.lane))
     return found
 
 
