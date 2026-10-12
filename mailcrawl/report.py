@@ -1,13 +1,21 @@
-"""Read-only archive counts and dry-run counts."""
+"""Archive counts and dry-run counts. Dry-run does not write decisions."""
 
 from __future__ import annotations
 
 import datetime
 import sqlite3
+import time
 from collections.abc import Iterable
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
-from mailcrawl.taxonomy import GMAIL_CATEGORIES, inactive_content_rules, inactive_reason
+from mailcrawl.rules import RulesConfig, bundled_rules_path, load_rules, preview_rules
+from mailcrawl.taxonomy import (
+    GMAIL_CATEGORIES,
+    GMAIL_TABS,
+    backfill_categories,
+    inactive_content_rules,
+    inactive_reason,
+)
 
 
 def stats(
@@ -26,6 +34,7 @@ def stats(
         if key is None:
             continue
         by_month[key] = by_month.get(key, 0) + 1
+    backfill_categories(conn)
     active = _active(categories)
     return {
         "by_category": _category_counts(conn, active),
@@ -33,6 +42,7 @@ def stats(
         "messages": messages,
         "senders": senders,
         "threads": threads,
+        "uncategorized": _uncategorized(conn),
     }
 
 
@@ -40,26 +50,32 @@ def dry_run(
     conn: sqlite3.Connection,
     *,
     categories: Iterable[str] | None = None,
+    now: int | None = None,
+    config: RulesConfig | None = None,
 ) -> dict[str, object]:
+    backfill_categories(conn)
+    active = _active(categories)
+    if config is None:
+        config = load_rules(bundled_rules_path())
+    stamp_now = int(time.time()) if now is None else now
     by_state: dict[str, int] = {}
     by_rule: dict[str, int] = {}
     by_label: dict[str, int] = {}
     by_sender: dict[str, int] = {}
     by_month: dict[str, int] = {}
-    rows = conn.execute(
-        """
-        SELECT decision_id, thread_pk, next_state, rule_id
-        FROM decisions
-        WHERE superseded_by IS NULL
-        ORDER BY thread_pk
-        """
-    ).fetchall()
-    for row in rows:
-        state = str(row["next_state"])
-        rule_id = str(row["rule_id"])
+    decisions_by_category: dict[str, dict[str, int]] = {}
+    undecided = 0
+    for preview in preview_rules(conn, now=stamp_now, config=config):
+        state = preview.next_state
+        rule_id = preview.rule_id
         by_state[state] = by_state.get(state, 0) + 1
         by_rule[rule_id] = by_rule.get(rule_id, 0) + 1
-        thread_pk = int(row["thread_pk"])
+        if rule_id == "else":
+            undecided += 1
+        for key in _thread_categories(conn, preview.thread_pk, active):
+            bucket = decisions_by_category.setdefault(key, {})
+            bucket[rule_id] = bucket.get(rule_id, 0) + 1
+        thread_pk = preview.thread_pk
         for (name,) in conn.execute(
             f"""
             SELECT DISTINCT labels.name
@@ -98,7 +114,6 @@ def dry_run(
             month = _month(int(stamp))
             if month is not None:
                 by_month[month] = by_month.get(month, 0) + 1
-    active = _active(categories)
     return {
         "by_category": _category_counts(conn, active),
         "by_label": by_label,
@@ -106,9 +121,57 @@ def dry_run(
         "by_rule": by_rule,
         "by_sender": by_sender,
         "by_state": by_state,
+        "decisions_by_category": {
+            name: dict(sorted(rules.items()))
+            for name, rules in sorted(decisions_by_category.items())
+        },
         "inactive_reason": inactive_reason(active),
         "inactive_rules": inactive_content_rules(active),
+        "undecided": undecided,
     }
+
+
+def _thread_categories(
+    conn: sqlite3.Connection,
+    thread_pk: int,
+    categories: tuple[str, ...],
+) -> list[str]:
+    wanted = set(categories)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT labels.catalogue_key
+        FROM messages
+        JOIN message_labels ON message_labels.msg_pk = messages.msg_pk
+        JOIN labels
+          ON labels.account_id = message_labels.account_id
+         AND labels.gmail_label_id = message_labels.gmail_label_id
+         AND {GMAIL_LABEL_SQL}
+        WHERE messages.thread_pk = ?
+        """,
+        (thread_pk,),
+    ).fetchall()
+    return sorted(str(key) for (key,) in rows if key in wanted)
+
+
+def _uncategorized(conn: sqlite3.Connection) -> int:
+    placeholders = ", ".join("?" for _ in GMAIL_TABS)
+    row = conn.execute(
+        f"""
+        SELECT count(*) FROM messages
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM message_labels
+          JOIN labels
+            ON labels.account_id = message_labels.account_id
+           AND labels.gmail_label_id = message_labels.gmail_label_id
+           AND {GMAIL_LABEL_SQL}
+          WHERE message_labels.msg_pk = messages.msg_pk
+            AND labels.catalogue_key IN ({placeholders})
+        )
+        """,
+        GMAIL_TABS,
+    ).fetchone()
+    return int(row[0])
 
 
 def _active(categories: Iterable[str] | None) -> tuple[str, ...]:

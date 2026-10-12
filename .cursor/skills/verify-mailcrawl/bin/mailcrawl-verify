@@ -563,13 +563,72 @@ add(2, "hello there", False)
 conn.commit()
 conn.close()
 PY
+  local old_home old_db fill_out
+  old_home="$(mktemp -d "$SCRATCH_DIR/old-tax.XXXXXX")"
+  mailcrawl_in "$old_home" --json init --account vcl --email ada@example.com >/dev/null
+  old_db="$old_home/.local/share/mailcrawl/vcl.db"
+  OLD_DB="$old_db" FIXTURE="$REPO_ROOT/testdata/fixtures/old-taxonomy/pre-category.sql" python3 - <<'PY'
+import os
+import sqlite3
+from pathlib import Path
+conn = sqlite3.connect(os.environ["OLD_DB"])
+conn.executescript(Path(os.environ["FIXTURE"]).read_text(encoding="utf-8"))
+conn.commit()
+conn.close()
+PY
+  fill_out="$(mailcrawl_in "$old_home" --json backfill --account vcl)"
+  printf '%s\n' "$fill_out"
+  printf '%s' "$fill_out" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+ok = doc.get("ok") is True and doc.get("updated") == 2
+sys.exit(0 if ok else 1)
+' || { log "stats dry-run: backfill did not fill two labels"; return 1; }
+  fill_out="$(mailcrawl_in "$old_home" --json backfill --account vcl)"
+  printf '%s' "$fill_out" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+sys.exit(0 if doc.get("updated") == 0 else 1)
+' || { log "stats dry-run: second backfill was not a no-op"; return 1; }
+  rm -rf "$old_home"
+
+  local stats_out dry_out
+  stats_out="$(mailcrawl_in "$home" --json stats --account vcl)"
+  dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl --now 1700000000)"
+  printf '%s\n%s\n' "$stats_out" "$dry_out"
+  STATS_JSON="$stats_out" DRY_JSON="$dry_out" python3 - <<'PY' || {
+import json, os, sys
+stats = json.loads(os.environ["STATS_JSON"])
+dry = json.loads(os.environ["DRY_JSON"])
+ok = (
+    stats.get("by_category", {}).get("STARRED") == 1
+    and stats.get("uncategorized") == 2
+    and dry.get("by_state") == {"needs_review": 1, "reply": 1}
+    and dry.get("by_rule") == {"0": 1, "5": 1}
+    and dry.get("undecided") == 0
+    and dry.get("decisions_by_category") == {"STARRED": {"0": 1}}
+    and dry.get("inactive_reason") == "gmail_default"
+)
+sys.exit(0 if ok else 1)
+PY
+    log "stats dry-run: would-be counts drifted before any decision"
+    return 1
+  }
+  local before
+  before="$(python3 - "$db" <<'PY'
+import sqlite3, sys
+print(sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM decisions").fetchone()[0])
+PY
+)"
+  if [[ "$before" != "0" ]]; then
+    log "stats dry-run: dry-run wrote decisions"
+    return 1
+  fi
   mailcrawl_in "$home" --json rules \
     --account vcl \
     --rules "$REPO_ROOT/testdata/rules/rules-v0.json" \
     --now 1700000000 >/dev/null
-  local stats_out dry_out
-  stats_out="$(mailcrawl_in "$home" --json stats --account vcl)"
-  dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl)"
+  dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl --now 1700000000)"
   printf '%s\n%s\n' "$stats_out" "$dry_out"
   if printf '%s%s' "$stats_out" "$dry_out" | grep -q secretbodyqx; then
     log "stats dry-run: output included message text"

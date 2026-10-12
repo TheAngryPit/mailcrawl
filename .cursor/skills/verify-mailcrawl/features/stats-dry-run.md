@@ -1,20 +1,21 @@
 # Stats and dry-run
 
-`mailcrawl stats` prints archive counts. `mailcrawl dry-run` prints counts of current decisions by state, label, sender id, month, and rule. Neither command writes a plan file or touches Gmail. The output is counts only.
+`mailcrawl stats` prints archive counts from stored category keys. `mailcrawl dry-run` evaluates rules v0 and prints would-be decisions by state, rule, and category, plus `undecided`. It does not read the `decisions` table to make those counts. Neither command writes a plan file, writes a decision, or touches Gmail. The output is counts only.
 
 ## Sub-features
 
 - `archive-counts`. Two synthetic messages count as 2 messages, 2 threads, 2 senders, and month `2023-11` with count 2.
-- `decision-counts`. After rules v0, dry-run counts `needs_review` and `reply`, rules `0` and `5`, label `STARRED` once, and sender ids `1` and `2`.
-- `read-only`. The decision row count stays 2. No `plans` table appears.
+- `decision-counts`. Dry-run counts `needs_review` and `reply`, rules `0` and `5`, label `STARRED` once, and sender ids `1` and `2`, before any decision row exists.
+- `old-archive`. `testdata/fixtures/old-taxonomy/pre-category.sql` has empty Gmail category keys. `backfill` fills two of them, leaves an existing key and a `pseudo:` id alone, and a second run reports `updated` 0.
+- `read-only`. After rules v0 the decision row count stays 2. Dry-run before that leaves it at 0. No `plans` table appears.
 - `no-body`. The JSON output does not contain the seeded body token or an address.
 
 ## How to get to it (user POV)
 
 - Init account `vcl` in an isolated home and seed the same two synthetic threads the rules drive uses.
-- Run `python3 -m mailcrawl --json rules --account vcl --rules testdata/rules/rules-v0.json --now 1700000000`.
-- Run `python3 -m mailcrawl --json stats --account vcl`.
-- Run `python3 -m mailcrawl --json dry-run --account vcl`.
+- Run `python3 -m mailcrawl --json stats --account vcl` and `python3 -m mailcrawl --json dry-run --account vcl --now 1700000000` before `rules`. The decision table stays empty.
+- Load `testdata/fixtures/old-taxonomy/pre-category.sql` into a fresh account and run `python3 -m mailcrawl --json backfill --account vcl`.
+- Run `python3 -m mailcrawl --json rules --account vcl --rules testdata/rules/rules-v0.json --now 1700000000`, then dry-run again.
 
 ## Driving it with mailcrawl-verify
 

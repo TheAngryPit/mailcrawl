@@ -82,7 +82,7 @@ class StatsDryRunTest(unittest.TestCase):
             "INBOX": 0,
             "SENT": 0,
             "SPAM": 0,
-            "STARRED": 0,
+            "STARRED": 1,
             "TRASH": 0,
             "UNREAD": 0,
         }
@@ -97,6 +97,7 @@ class StatsDryRunTest(unittest.TestCase):
                 "senders": 2,
                 "taxonomy_warnings": 0,
                 "threads": 2,
+                "uncategorized": 2,
             },
         )
         self.assertEqual(
@@ -108,11 +109,13 @@ class StatsDryRunTest(unittest.TestCase):
                 "by_rule": {"0": 1, "5": 1},
                 "by_sender": {"1": 1, "2": 1},
                 "by_state": {"needs_review": 1, "reply": 1},
+                "decisions_by_category": {"STARRED": {"0": 1}},
                 "inactive_reason": "gmail_default",
                 "inactive_rules": ["2", "2-read", "3", "4"],
                 "missing_labels": [],
                 "ok": True,
                 "taxonomy_warnings": 0,
+                "undecided": 0,
             },
         )
         self.assertEqual(self._decision_count(), before)

@@ -42,5 +42,5 @@ Each feature file uses exactly four H2 sections: `Sub-features`, `How to get to 
 - [body-clean](./body-clean.md). Keep `body_text_raw`, index the cleaned `body_text`, and leave schema v2 empty of plans.
 - [attachment-parse](./attachment-parse.md). Extract text parts, skip a missing hash, and leave PDF, OCR, Office, and `ics` behind an interface.
 - [rules-v0](./rules-v0.md). Apply rules 0 to 8 and print counts. `rules_version` is `rules-v0`.
-- [stats-dry-run](./stats-dry-run.md). Print archive counts and current-decision counts. No plan file and no Gmail.
+- [stats-dry-run](./stats-dry-run.md). Print archive counts and would-be decision counts. Backfill an old archive. No plan file and no Gmail.
 - [default-taxonomy](./default-taxonomy.md). Apply generic category signals, accept one local override, and print empty categories.

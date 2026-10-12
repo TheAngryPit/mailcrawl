@@ -1,4 +1,4 @@
-"""JSON CLI for init, import, search, rules, stats, and dry-run."""
+"""JSON CLI for init, import, search, rules, stats, dry-run, and backfill."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
 from mailcrawl.taxonomy import (
     active_categories,
+    backfill_categories,
     load_taxonomy,
     missing_labels,
     present_label_names,
@@ -47,6 +48,8 @@ def main(argv: list[str] | None = None) -> int:
             return _stats(args)
         if args.command == "dry-run":
             return _dry_run(args)
+        if args.command == "backfill":
+            return _backfill(args)
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
@@ -110,6 +113,11 @@ def _parser() -> argparse.ArgumentParser:
     preview = sub.add_parser("dry-run")
     preview.add_argument("--account", required=True)
     preview.add_argument("--taxonomy")
+    preview.add_argument("--rules")
+    preview.add_argument("--now", type=int)
+
+    fill = sub.add_parser("backfill")
+    fill.add_argument("--account", required=True)
     return parser
 
 
@@ -236,7 +244,24 @@ def _stats(args: argparse.Namespace) -> int:
 
 
 def _dry_run(args: argparse.Namespace) -> int:
-    _emit(args, {**_counted(args, dry_run), "ok": True})
+    now = int(time.time()) if args.now is None else args.now
+    config = None if not args.rules else load_rules(Path(args.rules))
+
+    def report(conn: sqlite3.Connection, categories: tuple[str, ...]) -> dict[str, object]:
+        return dry_run(conn, categories=categories, now=now, config=config)
+
+    _emit(args, {**_counted(args, report), "ok": True})
+    return 0
+
+
+def _backfill(args: argparse.Namespace) -> int:
+    alias = canonical_alias(args.account)
+    conn = _account_db(args)
+    try:
+        updated = backfill_categories(conn)
+    finally:
+        conn.close()
+    _emit(args, {"account": alias, "ok": True, "updated": updated})
     return 0
 
 

@@ -68,6 +68,28 @@ def load_rules(path: Path) -> RulesConfig:
     )
 
 
+def bundled_rules_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "testdata" / "rules" / "rules-v0.json"
+
+
+@dataclass(frozen=True)
+class Preview:
+    thread_pk: int
+    next_state: str
+    rule_id: str
+
+
+def preview_rules(conn: sqlite3.Connection, *, now: int, config: RulesConfig) -> list[Preview]:
+    found: list[Preview] = []
+    threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
+    for thread in threads:
+        thread_pk = int(thread[0])
+        facts = _load(conn, thread_pk, now, config)
+        outcome = _classify(facts, now, config)
+        found.append(Preview(thread_pk, outcome.next_state, outcome.rule_id))
+    return found
+
+
 def apply_rules(conn: sqlite3.Connection, *, now: int, config: RulesConfig) -> Coverage:
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
     for thread in threads:

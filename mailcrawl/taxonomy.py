@@ -177,6 +177,24 @@ def present_label_names(conn: sqlite3.Connection) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
+def backfill_categories(conn: sqlite3.Connection) -> int:
+    """Fill missing Gmail category keys from stored label ids. Leave every other row alone."""
+    placeholders = ", ".join("?" for _ in GMAIL_CATEGORIES)
+    changed = conn.execute(
+        f"""
+        UPDATE labels
+        SET catalogue_key = gmail_label_id,
+            axis = 'gmail',
+            in_catalogue = 1
+        WHERE gmail_label_id IN ({placeholders})
+          AND (catalogue_key IS NULL OR catalogue_key = '')
+        """,
+        GMAIL_CATEGORIES,
+    ).rowcount
+    conn.commit()
+    return int(changed)
+
+
 def _existing(path: Path, shown: str) -> Path:
     if not path.is_file():
         raise UsageError(f"taxonomy file not found: {shown}")

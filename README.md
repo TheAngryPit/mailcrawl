@@ -77,6 +77,18 @@ Or opt into your own schema. The keys are the schema. This example turns on the 
 
 `testdata/catalogue/taxonomy.synthetic.json` is that example schema with example label names. It is not the default. Real label names stay in the local file.
 
+## Fill category keys on an existing archive
+
+An archive imported before the Gmail category keys were stored still has the label ids. This fills the missing keys from those ids. It does not reimport, it does not change message rows, and it does not write to Gmail. A second run reports `updated` 0. `stats` and `dry-run` fill the same keys before they count.
+
+```
+python3 -m mailcrawl --json backfill --account thehive
+python3 -m mailcrawl --json stats --account thehive
+python3 -m mailcrawl --json dry-run --account thehive
+```
+
+`stats` prints message counts in `by_category` and `uncategorized`. `dry-run` evaluates the active rules and prints would-be decisions in `by_rule`, `by_state`, and `decisions_by_category`, plus `undecided`. It does not write decisions. With only the Gmail default, `inactive_reason` stays `gmail_default`.
+
 ## How agents use it
 
 The JSON CLI is `python3 -m mailcrawl`. Search returns untrusted message text. A later phase plans a read-only MCP server. `skills/mailcrawl/SKILL.md` states the boundary.
