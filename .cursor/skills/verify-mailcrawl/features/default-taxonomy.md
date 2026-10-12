@@ -1,21 +1,23 @@
 # Default taxonomy
 
-`mailcrawl` ships category keys on two axes. Content type is `newsletter`, `job_alert`, `notification`, `invoice_receipt`, `purchase_delivery`, `account_security`, `contract`, and `correspondence`. Origin is `human` and `automated`. With no override, only generic signals apply. `--taxonomy` is a local JSON override. `stats` and `dry-run` print `by_category` and `empty_no_override`.
+The default taxonomy is Gmail's own categories. System labels and `CATEGORY_PERSONAL`, `CATEGORY_SOCIAL`, `CATEGORY_PROMOTIONS`, `CATEGORY_UPDATES`, and `CATEGORY_FORUMS` store their id as the category key. No other content type is invented. `--taxonomy` is one local JSON override. It can map a custom label onto a Gmail category, or it can supply another schema. `dry-run` lists content-type rules that cannot fire.
 
 ## Sub-features
 
-- `generic-signals`. `List-Unsubscribe`, `List-Id`, and `Precedence: bulk` mark `automated`. `CATEGORY_PROMOTIONS` marks `newsletter`. `CATEGORY_UPDATES` marks `notification`. `CATEGORY_PERSONAL` marks `correspondence`. A `pseudo:` label is not a signal.
-- `empty-categories`. With no override, `empty_no_override` lists `account_security`, `contract`, `human`, `invoice_receipt`, `job_alert`, and `purchase_delivery`.
-- `override`. One JSON file has `default` plus `thehive`, `vcl`, or `personal`. `pessoal` means `personal`. An account section replaces that category's default list.
+- `gmail-categories`. With no override, `CATEGORY_PROMOTIONS`, `CATEGORY_UPDATES`, `CATEGORY_PERSONAL`, and `INBOX` keep those ids. A `pseudo:` label is not a category. `newsletter` and `automated` are absent.
+- `inactive-rules`. `dry-run` sets `inactive_reason` to `gmail_default` and lists rules `2`, `2-read`, `3`, and `4`.
+- `custom-label`. An override can map an example label name onto `CATEGORY_PROMOTIONS`. Content-type rules stay inactive.
+- `example-schema`. `testdata/catalogue/taxonomy.synthetic.json` is an opt-in schema. Its keys include `newsletter` and `invoice_receipt`. `inactive_rules` is empty when that file is selected.
 - `lookup`. The flag wins, then `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`.
-- `validation`. Invalid JSON, a non-object, an unknown category, an unknown account, or a non-list of label names exits 2.
+- `validation`. Invalid JSON, a non-object, an unknown account, or a non-list of label names exits 2. A category name that is not a Gmail id is the caller's schema and exits 0.
 - `missing-label`. A label name the account does not have increments `taxonomy_warnings` and is listed in `missing_labels`. The command exits 0.
 
 ## How to get to it (user POV)
 
 - Init an account in an isolated home.
 - Import a synthetic export with no `--taxonomy` and read `stats` and `dry-run`.
-- Import again with an override file that has `default` and an account section.
+- Import with an override that maps `Example/Shared` onto a Gmail category.
+- Import with an override that uses `newsletter` and `invoice_receipt`.
 - Point `--taxonomy`, `MAILCRAWL_TAXONOMY`, the config key, and the home file at different overrides and import once at each layer.
 - Pass a bad override and expect exit 2.
 - Pass an override that names `Example type/Missing` and expect a warning.
@@ -28,7 +30,7 @@ Preconditions:
 - `testdata/catalogue/taxonomy.synthetic.json` exists.
 
 - Run `"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature default-taxonomy`.
-- Expect exit 0. The log shows `default-taxonomy`, `empty_no_override`, and no message body.
+- Expect exit 0. The log shows `default-taxonomy`, `gmail_default`, and no message body.
 - When the synthetic taxonomy file is missing, the same command exits 2.
 
 ## Gotchas
@@ -36,4 +38,4 @@ Preconditions:
 - The drive uses a temp home under `/tmp/mailcrawl-verify-scratch/$RUN_ID` and blocks network proxies. It does not run `gog` and it does not write to Gmail.
 - Cleanup removes that scratch directory. Evidence stays in `$EVIDENCE_DIR`.
 - Example label names in the drive are synthetic. Real label names stay out of the repository.
-- `rules_version` stays `rules-v0`. The roles `finance`, `purchase`, and `brief` are now `invoice_receipt`, `purchase_delivery`, and `correspondence`.
+- `rules_version` stays `rules-v0`. Content-type rules run only when the selected schema has their keys.
