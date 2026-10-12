@@ -32,18 +32,22 @@ def account_email(path: Path, alias: str) -> str:
     return email.strip()
 
 
-def account_identity(path: Path, alias: str) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+def account_identity(
+    path: Path, alias: str
+) -> tuple[frozenset[str], frozenset[str], frozenset[str], frozenset[str]]:
     document = load_config(path)
     accounts = document.get("accounts")
+    empty = frozenset(), frozenset(), frozenset(), frozenset()
     if not isinstance(accounts, dict):
-        return frozenset(), frozenset(), frozenset()
+        return empty
     row = accounts.get(canonical_alias(alias))
     if not isinstance(row, dict):
-        return frozenset(), frozenset(), frozenset()
+        return empty
     return (
         _address_set(row.get("owners")),
         _address_set(row.get("domains")),
         _address_set(row.get("security_senders")),
+        _address_set(row.get("test_recipients")),
     )
 
 
@@ -84,12 +88,15 @@ def write_account(path: Path, alias: str, email: str) -> None:
         owners = _string_list(account.get("owners"))
         domains = _string_list(account.get("domains"))
         security_senders = _string_list(account.get("security_senders"))
+        test_recipients = _string_list(account.get("test_recipients"))
         if owners:
             lines.append(f"owners = {_toml_strings(owners)}")
         if domains:
             lines.append(f"domains = {_toml_strings(domains)}")
         if security_senders:
             lines.append(f"security_senders = {_toml_strings(security_senders)}")
+        if test_recipients:
+            lines.append(f"test_recipients = {_toml_strings(test_recipients)}")
         lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
