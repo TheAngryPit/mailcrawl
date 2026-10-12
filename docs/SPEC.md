@@ -361,7 +361,7 @@ Body cleaning, the attachment interface, rules 0 to 8, `stats`, and dry-run coun
 A full thehive backup is not part of phase 2. Cache deletion is not part of phase 2. A sample of 100 and an error under 2% are not a fixture gate. Coverage is the counts in section 6 point 15.
 
 ### Phase 3. Embeddings
-The local baseline is EmbeddingGemma 2, stored with sqlite-vec at 256 or 768 dimensions. The choice of model and dimension is still open. `mailcrawl embed` is a separate step outside the crawl path.
+The local baseline is EmbeddingGemma 2, stored with sqlite-vec at 256 or 768 dimensions. The choice of model and dimension is still open. `mailcrawl embed` is a separate step outside the crawl path. The layered classifier proposal later in this section uses that embedding as a neighbour index. The model choice stays the SPEC-FLAG there.
 
 The fallback named in the plan is EmbeddingGemma 1. That fallback is an inference, and it is not benchmarked. It is still to be decided.
 
@@ -408,6 +408,52 @@ SPEC-FLAG: Whether the advisor may later read subject or body text, and whether 
 Any cloud language model needs approval. The default is no. That choice is still to be decided.
 
 Acceptance is that the slice beats the rules baseline on an audit sample, and that it uses no tools. That comparison is still to be decided. It waits on the model choice above.
+
+The layered classifier below is a proposal. It is not implemented. `rules-v4` and `StubAdvisor` stay as specified above until a later revision.
+
+### Proposal. Layered classifier
+
+A rules-v4 audit of 100 threads was 29.6% wrong. Excluding `else`, 19% were wrong. Of the `else` threads, 13 of 14 were wrong. Further phrase rules have plateaued. This proposal keeps a short rule layer for obvious mail and sends everything else through local models. No code in this revision changes that path. No weights are added to the repository. No review file is added.
+
+The classification text is the cleaned `body_text`. Phase 1 already removes a quoted line, a reply header, and a `-- ` signature, and it does not cut when unsure. Layers read that cleaned text. They do not read `body_text_raw`. Search stays on `body_text` as it is today. When the cleaned body is empty and the message or an attachment is an image, OCR may fill a local text field before the later layers run. That field stays in the local archive.
+
+The layers run in this order.
+
+1. High-precision rules. A receipt, a calendar reply, a security notice, or housekeeping can still return a decision. Receipts stay rule `3`. Calendar replies and mail to self stay rule `housekeeping`. Security notices stay rule `4`. Every other thread falls through. The fall-through rule id stays `else`. The current `rules-v4` order remains the code until a later revision narrows it to this set.
+2. Nearest neighbour. The thread is embedded locally. The vector is header features plus the cleaned body. Header features are the flags the rules already compute, such as list mail, a message from me, and the category keys on the thread. The index holds two local sets. One set is reviewed decisions. The other is the Gmail labels already stored for that archive. Neighbours are not copied out of the archive.
+3. A small decision model. Logistic regression or gradient boosting takes the embedding and the same header features. It is trained from human-reviewed decisions. It returns a suggested rule, a suggested lane, and a calibrated confidence.
+4. A local language model, only when that confidence is below a threshold this proposal does not set. The call is advisory. It sees that one thread, not the mailbox. It returns the same triple. It has no tools, it does not write Gmail, and it does not run on the crawl path.
+5. OCR sits in front of the embedding for image-only mail and for image attachments. A missing backend skips the part, as section 6 point 11 already does. CI does not install an OCR binary.
+
+Training labels come from the local review CSV written by `--export-decisions`. The human adds `correct_rule` and `correct_lane` on that file. The file stays on the machine, in the same place as the other review exports. `*.csv` stays gitignored. The repository does not store a real review file, a real thread id, a real label name, or an address. A later training command reads that local file and writes a model file next to the database. Model files are gitignored with the SQLite archives. The user's label map does not need an edit. One label may still map to several categories.
+
+The default stays local. Embeddings, the decision model, the language model, and OCR run on the machine that holds the archive. They do not open a network connection. A cloud model still needs approval, and the default is no. JSON output stays counts. It does not print a body, a subject, an address, or a label name.
+
+`--advise` stays off by default. `StubAdvisor` stays the backend in CI and the backend when no local model file is present. It still suggests rule `5`, lane `imbox`, and confidence `0.00`, and `advice.applied` stays false. When a local model file is present and `--advise` is on, that file replaces the stub for threads the high-precision rules did not decide. The suggestion columns stay `suggested_rule`, `suggested_lane`, and `suggested_confidence`. `by_rule` stays the deterministic rule. The `decisions` table is not written. A later phase may write `decisions` from a high-confidence suggestion. That write still does not touch Gmail, and it waits on the audit below and on an approval.
+
+The audit target is under 2% wrong on a fresh local review of 100 threads. Wrong means the suggestion differs from `correct_rule`. The report has two rates. One rate is all 100 threads. The other excludes `else`, and it also states the `else` fraction, so a change in that bucket is visible. The rules-v4 rates above are the baseline. The sample stays local. The 2% figure is not a fixture gate. Section phase 2 already says a sample of 100 and an error under 2% are not a fixture gate. Synthetic tests keep using the stub. A layer ships only when the local audit is under 2% and those tests still pass.
+
+Rollout is one step at a time. Each step is its own revision.
+
+- R0 is this proposal. No code changes.
+- R1 narrows the rule layer to receipts, calendar replies, security notices, and housekeeping. Other threads are `else`. `--advise` still uses the stub.
+- R2 confirms every layer reads cleaned text, and it adds the OCR hook for an empty body. The hook skips when no backend is configured.
+- R3 adds local embeddings and nearest neighbour. Suggestions fill only when `--advise` is on.
+- R4 trains the small decision model from the local review CSV. The stub remains the fallback when the model file is absent.
+- R5 adds the local language model for low-confidence threads. It stays advisory.
+- R6 may write a high-confidence suggestion into `decisions`. It does not write Gmail. It waits until the 100-thread audit is under 2% and the owner approves the write.
+
+SPEC-FLAG: The embedding model is not chosen. EmbeddingGemma 2 at 256 or 768 dimensions, stored with sqlite-vec, is the phase 3 baseline. It is local, and it is already named. The weights are a download that needs approval, the license text is unverified, and Portuguese quality is unverified. A hashing vector needs no download and keeps CI offline. It misses paraphrases, especially in Portuguese. A model file the owner already has on the machine needs no new download. This spec does not name that file. The dimension, 256 or 768, is part of the same choice.
+
+SPEC-FLAG: The neighbour text is not chosen. This proposal embeds category keys and the cleaned body, and it does not embed raw label names, so a count or a suggestion does not reveal a label name. If the owner's own label names are the useful signal, putting those names in the vector is a privacy choice. Raw names would stay in the local archive either way. They would not enter Git.
+
+SPEC-FLAG: The decision model is not chosen. Logistic regression on the embedding plus header features is small, and its coefficients can be read. A linear boundary can miss an interaction between a header flag and the vector. Gradient boosting on the same features can learn that interaction. It is more code to train. It still runs locally, and this proposal does not assume a GPU.
+
+SPEC-FLAG: The local language model is not chosen. The name stays `por definir`. The earlier note of a "laya decision model" is not an identified model. One option is no language model, so a low-confidence thread keeps the decision model's suggestion and shows that low confidence. Another option is a model that is already on the machine. It would see one stripped thread, with no tools and no network. Its license and Portuguese quality are unknown until it is named. A cloud language model is not a candidate in this proposal. The existing default is no, and a cloud call would send mail text off the machine.
+
+SPEC-FLAG: OCR is not chosen. Skipping it leaves image-only mail with an empty cleaned body, which is the behavior when the backend is absent today. A local OCR program the owner installs can use the thresholds in section 6 point 11. Fewer than 25 characters per page tries OCR, and `ocr_conf` below 60 is `low_confidence`. The binary is not in the repository, and CI does not download it. A cloud OCR service is not a candidate. It would send image bytes off the machine.
+
+SPEC-FLAG: Two thresholds are unset. One is the confidence below which the language model runs. The other is the confidence above which rollout R6 may write `decisions`. The stub's `0.00` is not that threshold. Nothing in this proposal treats a suggestion as accepted.
 
 ### Not yet specified
 The phase plan leaves these items unspecified. They are undecided.
