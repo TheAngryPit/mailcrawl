@@ -166,6 +166,19 @@ def load_taxonomy(path: Path) -> Taxonomy:
     return loaded
 
 
+def effective_key(
+    name: str,
+    stored: str | None,
+    label_keys: dict[str, str] | None,
+) -> str | None:
+    """A taxonomy file maps label names. That map wins over a stored key for this read."""
+    if label_keys is not None and name in label_keys:
+        return label_keys[name]
+    if stored:
+        return stored
+    return None
+
+
 def missing_labels(taxonomy: Taxonomy, alias: str, present: set[str]) -> list[str]:
     return sorted(name for name in taxonomy.names_for(alias) if name not in present)
 

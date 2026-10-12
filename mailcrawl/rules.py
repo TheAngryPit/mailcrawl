@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
-from mailcrawl.taxonomy import CONTENT, ORIGIN
+from mailcrawl.taxonomy import CONTENT, ORIGIN, effective_key
 
 RULES_VERSION = "rules-v1"
 _DAY = 86400
@@ -79,12 +79,18 @@ class Preview:
     rule_id: str
 
 
-def preview_rules(conn: sqlite3.Connection, *, now: int, config: RulesConfig) -> list[Preview]:
+def preview_rules(
+    conn: sqlite3.Connection,
+    *,
+    now: int,
+    config: RulesConfig,
+    label_keys: dict[str, str] | None = None,
+) -> list[Preview]:
     found: list[Preview] = []
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
     for thread in threads:
         thread_pk = int(thread[0])
-        facts = _load(conn, thread_pk, now, config)
+        facts = _load(conn, thread_pk, now, config, label_keys)
         outcome = _classify(facts, now, config)
         found.append(Preview(thread_pk, outcome.next_state, outcome.rule_id))
     return found
@@ -339,7 +345,13 @@ class _Facts:
         return bool(self.keys.get(role))
 
 
-def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfig) -> _Facts:
+def _load(
+    conn: sqlite3.Connection,
+    thread_pk: int,
+    now: int,
+    config: RulesConfig,
+    label_keys: dict[str, str] | None = None,
+) -> _Facts:
     messages = conn.execute(
         """
         SELECT msg_pk, sender_id, is_from_me, internal_date, body_text
@@ -362,7 +374,7 @@ def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfi
     header_human = False
     external_senders: list[int] = []
     for message in messages:
-        labels = _message_labels(conn, int(message["msg_pk"]))
+        labels = _message_labels(conn, int(message["msg_pk"]), label_keys)
         for label in labels:
             if label["id"] == "STARRED":
                 star_labels.append(label)
@@ -424,7 +436,11 @@ def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfi
     )
 
 
-def _message_labels(conn: sqlite3.Connection, msg_pk: int) -> list[dict[str, object]]:
+def _message_labels(
+    conn: sqlite3.Connection,
+    msg_pk: int,
+    label_keys: dict[str, str] | None = None,
+) -> list[dict[str, object]]:
     rows = conn.execute(
         f"""
         SELECT labels.gmail_label_id, labels.name, labels.catalogue_key
@@ -438,12 +454,17 @@ def _message_labels(conn: sqlite3.Connection, msg_pk: int) -> list[dict[str, obj
     ).fetchall()
     labels: list[dict[str, object]] = []
     for row in rows:
+        stored = row["catalogue_key"]
         labels.append(
             {
                 "type": "label",
                 "id": row["gmail_label_id"],
                 "name": row["name"],
-                "key": row["catalogue_key"],
+                "key": effective_key(
+                    str(row["name"]),
+                    None if stored is None else str(stored),
+                    label_keys,
+                ),
             }
         )
     return labels

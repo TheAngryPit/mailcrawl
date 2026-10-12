@@ -13,6 +13,7 @@ from mailcrawl.taxonomy import (
     GMAIL_CATEGORIES,
     GMAIL_TABS,
     backfill_categories,
+    effective_key,
     inactive_content_rules,
     inactive_reason,
 )
@@ -22,6 +23,7 @@ def stats(
     conn: sqlite3.Connection,
     *,
     categories: Iterable[str] | None = None,
+    label_keys: dict[str, str] | None = None,
 ) -> dict[str, object]:
     messages = int(conn.execute("SELECT count(*) FROM messages").fetchone()[0])
     threads = int(conn.execute("SELECT count(*) FROM threads").fetchone()[0])
@@ -36,7 +38,7 @@ def stats(
         by_month[key] = by_month.get(key, 0) + 1
     backfill_categories(conn)
     active = _active(categories)
-    rule0, fallthrough = _review_split(conn, now=None, config=None)
+    rule0, fallthrough = _review_split(conn, now=None, config=None, label_keys=label_keys)
     return {
         "by_category": _category_counts(conn, active),
         "by_month": by_month,
@@ -55,6 +57,7 @@ def dry_run(
     categories: Iterable[str] | None = None,
     now: int | None = None,
     config: RulesConfig | None = None,
+    label_keys: dict[str, str] | None = None,
 ) -> dict[str, object]:
     backfill_categories(conn)
     active = _active(categories)
@@ -68,7 +71,7 @@ def dry_run(
     by_month: dict[str, int] = {}
     decisions_by_category: dict[str, dict[str, int]] = {}
     undecided = 0
-    for preview in preview_rules(conn, now=stamp_now, config=config):
+    for preview in preview_rules(conn, now=stamp_now, config=config, label_keys=label_keys):
         state = preview.next_state
         rule_id = preview.rule_id
         reported = _reported_state(state, rule_id)
@@ -76,7 +79,7 @@ def dry_run(
         by_rule[rule_id] = by_rule.get(rule_id, 0) + 1
         if rule_id == "else":
             undecided += 1
-        for key in _thread_categories(conn, preview.thread_pk, active):
+        for key in _thread_categories(conn, preview.thread_pk, active, label_keys):
             bucket = decisions_by_category.setdefault(key, {})
             bucket[rule_id] = bucket.get(rule_id, 0) + 1
         thread_pk = preview.thread_pk
@@ -118,7 +121,7 @@ def dry_run(
             month = _month(int(stamp))
             if month is not None:
                 by_month[month] = by_month.get(month, 0) + 1
-    return {
+    counted = {
         "by_category": _category_counts(conn, active),
         "by_label": by_label,
         "by_month": by_month,
@@ -133,6 +136,9 @@ def dry_run(
         "inactive_rules": inactive_content_rules(active),
         "undecided": undecided,
     }
+    if label_keys is not None:
+        counted["override_matches"] = _override_matches(conn, label_keys)
+    return counted
 
 
 def _reported_state(state: str, rule_id: str) -> str:
@@ -148,13 +154,14 @@ def _review_split(
     *,
     now: int | None,
     config: RulesConfig | None,
+    label_keys: dict[str, str] | None = None,
 ) -> tuple[int, int]:
     if config is None:
         config = load_rules(bundled_rules_path())
     stamp_now = int(time.time()) if now is None else now
     rule0 = 0
     fallthrough = 0
-    for preview in preview_rules(conn, now=stamp_now, config=config):
+    for preview in preview_rules(conn, now=stamp_now, config=config, label_keys=label_keys):
         if preview.rule_id == "0" and preview.next_state == "needs_review":
             rule0 += 1
         elif preview.rule_id == "else" and preview.next_state == "needs_review":
@@ -166,11 +173,12 @@ def _thread_categories(
     conn: sqlite3.Connection,
     thread_pk: int,
     categories: tuple[str, ...],
+    label_keys: dict[str, str] | None = None,
 ) -> list[str]:
     wanted = set(categories)
     rows = conn.execute(
         f"""
-        SELECT DISTINCT labels.catalogue_key
+        SELECT DISTINCT labels.name, labels.catalogue_key
         FROM messages
         JOIN message_labels ON message_labels.msg_pk = messages.msg_pk
         JOIN labels
@@ -181,7 +189,42 @@ def _thread_categories(
         """,
         (thread_pk,),
     ).fetchall()
-    return sorted(str(key) for (key,) in rows if key in wanted)
+    found: set[str] = set()
+    for name, stored in rows:
+        key = effective_key(str(name), None if stored is None else str(stored), label_keys)
+        if key in wanted:
+            found.add(key)
+    return sorted(found)
+
+
+def _override_matches(
+    conn: sqlite3.Connection,
+    label_keys: dict[str, str],
+) -> dict[str, dict[str, int]]:
+    categories = sorted(set(label_keys.values()))
+    messages: dict[str, set[int]] = {category: set() for category in categories}
+    threads: dict[str, set[int]] = {category: set() for category in categories}
+    rows = conn.execute(
+        f"""
+        SELECT messages.msg_pk, messages.thread_pk, labels.name
+        FROM message_labels
+        JOIN messages ON messages.msg_pk = message_labels.msg_pk
+        JOIN labels
+          ON labels.account_id = message_labels.account_id
+         AND labels.gmail_label_id = message_labels.gmail_label_id
+         AND {GMAIL_LABEL_SQL}
+        """
+    ).fetchall()
+    for msg_pk, thread_pk, name in rows:
+        category = label_keys.get(str(name))
+        if category is None:
+            continue
+        messages[category].add(int(msg_pk))
+        threads[category].add(int(thread_pk))
+    return {
+        category: {"messages": len(messages[category]), "threads": len(threads[category])}
+        for category in categories
+    }
 
 
 def _uncategorized(conn: sqlite3.Connection) -> int:

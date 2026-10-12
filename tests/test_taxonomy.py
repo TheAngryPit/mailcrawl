@@ -231,6 +231,91 @@ class DefaultTaxonomyTest(unittest.TestCase):
         self.assertEqual(preview["inactive_reason"], "gmail_default")
         self.assertEqual(preview["inactive_rules"], ["2", "2-read", "3", "4"])
 
+    def test_dry_run_override_flips_stored_names_into_rules_2_3_and_4(self) -> None:
+        export = self.home / "export"
+        _export(
+            export,
+            [
+                {"example_label_id": "Label_9", "example_name": "Example type/Receipt", "example_kind": "user"},
+                {"example_label_id": "Label_8", "example_name": "Example origin/Person", "example_kind": "user"},
+                {"example_label_id": "Label_7", "example_name": "Example origin/Machine", "example_kind": "user"},
+                {"example_label_id": "Label_6", "example_name": "Example type/Bulletin", "example_kind": "user"},
+                {"example_label_id": "Label_5", "example_name": "Example type/Listing", "example_kind": "user"},
+                {"example_label_id": "Label_4", "example_name": "Example type/Notice", "example_kind": "user"},
+                {"example_label_id": "Label_3", "example_name": "Example type/Parcel", "example_kind": "user"},
+                {"example_label_id": "Label_2", "example_name": "Example type/Account", "example_kind": "user"},
+                {"example_label_id": "Label_1", "example_name": "Example type/Agreement", "example_kind": "user"},
+                {"example_label_id": "Label_0", "example_name": "Example note/Brief", "example_kind": "user"},
+                {"example_label_id": "CATEGORY_PERSONAL", "example_name": "CATEGORY_PERSONAL", "example_kind": "system"},
+            ],
+            [
+                _message(1, ["Label_9", "CATEGORY_PERSONAL"]),
+                _message(
+                    2,
+                    ["Label_6", "Label_7"],
+                    {"list-unsubscribe": "<https://example.com/unsub>"},
+                ),
+                _message(3, ["Label_2"]),
+            ],
+        )
+        override = self.home / "hive.json"
+        override.write_text(
+            json.dumps(
+                {
+                    "thehive": {
+                        "human": ["Example origin/Person"],
+                        "automated": ["Example origin/Machine"],
+                        "newsletter": ["Example type/Bulletin"],
+                        "job_alert": ["Example type/Listing"],
+                        "notification": ["Example type/Notice"],
+                        "invoice_receipt": ["Example type/Receipt"],
+                        "purchase_delivery": ["Example type/Parcel"],
+                        "account_security": ["Example type/Account"],
+                        "contract": ["Example type/Agreement"],
+                        "correspondence": ["Example note/Brief"],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._init("thehive")
+        imported = self._run("import", "gog-export", "--account", "thehive", "--dir", str(export))
+        self.assertIsNone(self._keys("thehive")["Label_9"])
+        self.assertNotEqual("Label_9", "Example type/Receipt")
+        conn = connect(self.home / "thehive.db")
+        try:
+            conn.execute(
+                "UPDATE labels SET catalogue_key = 'newsletter' WHERE gmail_label_id = 'Label_9'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.assertEqual(imported["taxonomy_warnings"], 0)
+        bare = self._run("dry-run", "--account", "thehive")
+        self.assertEqual(bare["by_rule"].get("2", 0), 0)
+        self.assertEqual(bare["by_rule"].get("3", 0), 0)
+        self.assertEqual(bare["by_rule"].get("4", 0), 0)
+        self.assertNotIn("override_matches", bare)
+        preview = self._run("dry-run", "--account", "thehive", "--taxonomy", str(override))
+        self.assertEqual(preview["inactive_rules"], [])
+        self.assertEqual(preview["taxonomy_warnings"], 0)
+        self.assertEqual(preview["by_rule"].get("2", 0), 1)
+        self.assertEqual(preview["by_rule"].get("3", 0), 1)
+        self.assertEqual(preview["by_rule"].get("4", 0), 1)
+        self.assertEqual(preview["by_rule"].get("5", 0), 0)
+        self.assertEqual(self._keys("thehive")["Label_9"], "newsletter")
+        matches = preview["override_matches"]
+        self.assertIsInstance(matches, dict)
+        blob = json.dumps(matches)
+        self.assertNotIn("Example", blob)
+        self.assertNotIn("Label_", blob)
+        self.assertEqual(matches["invoice_receipt"], {"messages": 1, "threads": 1})
+        self.assertEqual(matches["newsletter"], {"messages": 1, "threads": 1})
+        self.assertEqual(matches["automated"], {"messages": 1, "threads": 1})
+        self.assertEqual(matches["account_security"], {"messages": 1, "threads": 1})
+        self.assertEqual(matches["correspondence"], {"messages": 0, "threads": 0})
+        self.assertEqual(preview["decisions_by_category"]["invoice_receipt"], {"3": 1})
+
     def test_example_schema_turns_content_rules_on(self) -> None:
         self._init("vcl")
         preview = self._run(
