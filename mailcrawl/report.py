@@ -4,17 +4,12 @@ from __future__ import annotations
 
 import datetime
 import sqlite3
-from collections.abc import Iterable
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
-from mailcrawl.taxonomy import GMAIL_CATEGORIES, inactive_content_rules, inactive_reason
+from mailcrawl.taxonomy import CATEGORIES, empty_no_override, header_is_automated
 
 
-def stats(
-    conn: sqlite3.Connection,
-    *,
-    categories: Iterable[str] | None = None,
-) -> dict[str, object]:
+def stats(conn: sqlite3.Connection, *, has_override: bool = False) -> dict[str, object]:
     messages = int(conn.execute("SELECT count(*) FROM messages").fetchone()[0])
     threads = int(conn.execute("SELECT count(*) FROM threads").fetchone()[0])
     senders = int(conn.execute("SELECT count(*) FROM senders").fetchone()[0])
@@ -26,21 +21,17 @@ def stats(
         if key is None:
             continue
         by_month[key] = by_month.get(key, 0) + 1
-    active = _active(categories)
     return {
-        "by_category": _category_counts(conn, active),
+        "by_category": _category_counts(conn),
         "by_month": by_month,
+        "empty_no_override": empty_no_override(has_override),
         "messages": messages,
         "senders": senders,
         "threads": threads,
     }
 
 
-def dry_run(
-    conn: sqlite3.Connection,
-    *,
-    categories: Iterable[str] | None = None,
-) -> dict[str, object]:
+def dry_run(conn: sqlite3.Connection, *, has_override: bool = False) -> dict[str, object]:
     by_state: dict[str, int] = {}
     by_rule: dict[str, int] = {}
     by_label: dict[str, int] = {}
@@ -98,27 +89,19 @@ def dry_run(
             month = _month(int(stamp))
             if month is not None:
                 by_month[month] = by_month.get(month, 0) + 1
-    active = _active(categories)
     return {
-        "by_category": _category_counts(conn, active),
+        "by_category": _category_counts(conn),
         "by_label": by_label,
         "by_month": by_month,
         "by_rule": by_rule,
         "by_sender": by_sender,
         "by_state": by_state,
-        "inactive_reason": inactive_reason(active),
-        "inactive_rules": inactive_content_rules(active),
+        "empty_no_override": empty_no_override(has_override),
     }
 
 
-def _active(categories: Iterable[str] | None) -> tuple[str, ...]:
-    if categories is None:
-        return GMAIL_CATEGORIES
-    return tuple(categories)
-
-
-def _category_counts(conn: sqlite3.Connection, categories: tuple[str, ...]) -> dict[str, int]:
-    counts = {name: 0 for name in categories}
+def _category_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    counts = {name: 0 for name in CATEGORIES}
     rows = conn.execute(
         f"""
         SELECT messages.msg_pk, labels.catalogue_key
@@ -135,6 +118,14 @@ def _category_counts(conn: sqlite3.Connection, categories: tuple[str, ...]) -> d
         found = by_message.setdefault(int(msg_pk), set())
         if key in counts:
             found.add(str(key))
+    for msg_pk, name, value in conn.execute(
+        """
+        SELECT msg_pk, name, value FROM headers
+        WHERE name IN ('list-unsubscribe', 'list-id', 'precedence')
+        """
+    ):
+        if header_is_automated(((str(name), str(value)),)):
+            by_message.setdefault(int(msg_pk), set()).add("automated")
     for found in by_message.values():
         for name in found:
             counts[name] += 1

@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
-from mailcrawl.taxonomy import CONTENT, ORIGIN
+from mailcrawl.taxonomy import CATEGORIES, header_is_automated
 
 RULES_VERSION = "rules-v0"
 _DAY = 86400
-_KEY_ROLES = CONTENT + ORIGIN
+_KEY_ROLES = CATEGORIES
 
 
 @dataclass(frozen=True)
@@ -345,6 +345,8 @@ def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfi
                 automated_label = True
             elif _header_human(conn, int(message["msg_pk"])):
                 header_human = True
+        if _header_automated(conn, int(message["msg_pk"])):
+            key_hits["automated"].append({"type": "header", "name": "automated"})
         if _listish(conn, int(message["msg_pk"])):
             listish = True
     last = messages[-1] if messages else None
@@ -410,6 +412,14 @@ def _message_labels(conn: sqlite3.Connection, msg_pk: int) -> list[dict[str, obj
             }
         )
     return labels
+
+
+def _header_automated(conn: sqlite3.Connection, msg_pk: int) -> bool:
+    rows = conn.execute(
+        "SELECT name, value FROM headers WHERE msg_pk = ?",
+        (msg_pk,),
+    ).fetchall()
+    return header_is_automated((str(row["name"]), str(row["value"])) for row in rows)
 
 
 def _header_human(conn: sqlite3.Connection, msg_pk: int) -> bool:

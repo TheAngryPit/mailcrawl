@@ -163,21 +163,11 @@ What it does not prove: hash equality. 1,634 of the 2,055 shared messages had a 
 Checking a hypothesis needs a per-message comparison of sanitized header names and line-ending counts on the Mac. Real values never leave the Mac.
 
 ### 4.2 Default taxonomy
-The default taxonomy is Gmail's own categories. System labels are `INBOX`, `SENT`, `STARRED`, `IMPORTANT`, `UNREAD`, `DRAFT`, `SPAM`, `TRASH`, and `CHAT`. Category tabs are `CATEGORY_PERSONAL`, `CATEGORY_SOCIAL`, `CATEGORY_PROMOTIONS`, `CATEGORY_UPDATES`, and `CATEGORY_FORUMS`. A label with one of those ids stores that id as its category key. No other content type is invented. A label id that starts with `pseudo:` is never a category.
+Rules 0 to 8 match category keys on two axes. Content type is `newsletter`, `job_alert`, `notification`, `invoice_receipt`, `purchase_delivery`, `account_security`, `contract`, and `correspondence`. Origin is `human` and `automated`. The package ships that taxonomy. `--taxonomy` is a local override file. There is no second catalogue.
 
-Rules 2, 2-read, 3, and 4 need content types that are not in that default. They do not fire and they do not guess. `dry-run` lists them in `inactive_rules` and sets `inactive_reason` to `gmail_default`. `stats` counts messages in `by_category` and does not apply those rules.
+With no override, only generic signals apply. `List-Unsubscribe`, `List-Id`, and a `Precedence` value of `bulk` mark `automated`. System label `CATEGORY_PROMOTIONS` marks `newsletter`. `CATEGORY_UPDATES` marks `notification`. `CATEGORY_PERSONAL` marks `correspondence`. `job_alert`, `invoice_receipt`, `purchase_delivery`, `account_security`, `contract`, and `human` have no generic signal. They stay empty. `stats` and `dry-run` list them in `empty_no_override` and count messages in `by_category`. A label id that starts with `pseudo:` is never a signal.
 
-Two customizations use one JSON file. Lookup order is the `--taxonomy` flag, then the environment variable `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`. Sections are `thehive`, `vcl`, `personal`, and an optional `default`. `pessoal` is accepted and means `personal`. An account section replaces that category's `default` list. Each value is a list of label names.
-
-Map a custom label onto a Gmail category:
-
-```json
-{"default": {"CATEGORY_PROMOTIONS": ["Example type/Bulletin"]}}
-```
-
-That keeps `inactive_reason` at `gmail_default`.
-
-Or opt into another schema. The keys in the file are the schema. `testdata/catalogue/taxonomy.synthetic.json` is an example, not the default. It maps example label names to `newsletter`, `job_alert`, `notification`, `invoice_receipt`, `purchase_delivery`, `account_security`, `contract`, `correspondence`, `human`, and `automated`. When those keys are present, the matching content-type rules can fire. `dry-run` leaves `inactive_rules` empty. A schema that omits some of those keys lists the rules that still cannot fire and sets `inactive_reason` to `schema`.
+An override is one JSON object. Lookup order is the `--taxonomy` flag, then the environment variable `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`. Sections are `thehive`, `vcl`, `personal`, and an optional `default`. `pessoal` is accepted and means `personal`. An account section replaces that category's `default` list. Each value is a list of label names.
 
 ```json
 {
@@ -186,11 +176,11 @@ Or opt into another schema. The keys in the file are the schema. `testdata/catal
 }
 ```
 
-Invalid JSON, a file that is not an object, an unknown account, or a value that is not a list of label names exits 2. A label name the account does not have is counted in `taxonomy_warnings` and listed in `missing_labels`. The command still exits 0.
+Invalid JSON, a file that is not an object, an unknown category, an unknown account, or a value that is not a list of label names exits 2. A label name the account does not have is counted in `taxonomy_warnings` and listed in `missing_labels`. The command still exits 0.
 
-`*.local.json` and a `taxonomy.json` at the repository root are gitignored. The example schema contains example label names only.
+`*.local.json` and a `taxonomy.json` at the repository root are gitignored. `testdata/catalogue/taxonomy.synthetic.json` is the synthetic override used by tests. It contains example label names only.
 
-The rule roles `finance`, `purchase`, and `brief` are `invoice_receipt`, `purchase_delivery`, and `correspondence`. `rules_version` stays `rules-v0`. Those rules fire when the opted-in schema supplies the key.
+The rule roles `finance`, `purchase`, and `brief` are now `invoice_receipt`, `purchase_delivery`, and `correspondence`. `rules_version` stays `rules-v0`. The same rule numbers fire when the label key is the new category name.
 
 ## 5. Phase 1 proof
 A phase 1 change is done when, on a clean Linux runner with no network credentials and a temporary `HOME`, this exits 0:
@@ -232,7 +222,7 @@ These points are closed.
 9. `headers` stores an allow-list, in lower case. The names are `list-unsubscribe`, `list-unsubscribe-post`, `list-id`, `precedence`, `auto-submitted`, `x-mailer`, `feedback-id`, `message-id`, `in-reply-to`, `references`, `reply-to`, `return-path`, `authentication-results`, and `received-spf`. Other headers are dropped.
 10. `snippet` and `gmail_history_id` are NULL when the export omits them. `subject_norm` trims the subject, removes a leading run of `Re:`, `Fwd:`, and `Fw:` without regard to case, and collapses whitespace. It does not fold accents.
 11. Attachment parsing handles `text/plain` and `text/html` only. PDF, OCR, Office, `ics`, `attachment_fields`, and image embeddings stay behind an interface with no required implementation. An unsupported type is `unsupported`. A missing backend is `skipped`. A row with no `file_sha256` is `skipped` with reason `no_bytes`. OCR thresholds are v0 constants: fewer than 25 characters per page tries OCR, and `ocr_conf` below 60 is `low_confidence`. Those thresholds are exercised only when a backend is present. This revision adds that interface in `mailcrawl/extract.py`. The default backend does not invoke `pdftotext` or `tesseract`. Image embeddings and `attachment_fields` are not created.
-12. The default taxonomy is the Gmail categories in section 4.2. Content-type rules stay off until an override schema supplies their keys. `invoice_receipt`, `purchase_delivery`, and `correspondence` replace `finance`, `purchase`, and `brief` inside that example schema. Real label names never appear in code or tests. They stay in a local file outside Git.
+12. Rules match the category keys in section 4.2. `invoice_receipt`, `purchase_delivery`, and `correspondence` replace `finance`, `purchase`, and `brief`. Real label names never appear in code or tests. They stay in a local file outside Git.
 13. Guards run first. A guard can only force `needs_review` or block `noise` and `resolved`. Later rules choose the other states. `STARRED` and `IMPORTANT` are Gmail system label ids. Rules never read a `pseudo:` label.
 14. These definitions are v0, tunable, and marked v0 in code. A human participant is a sender whose origin label is human. When that label is missing, the sender has no `List-Unsubscribe`, no `Precedence` of `bulk` or `list`, and no `Auto-Submitted` other than `no`. The label beats the header. Unrecognized Account & Security means a sender with no `sender_decisions` row. The read-list is `sender_decisions.route = 'read'`. There is no extra domain file. `read_later_expiry_days` is 30, and expiry is tested on fixtures. Open questions, concrete tasks, and closing language are short clue lists in Portuguese and English. They live in a configuration file, not in the engine. The minimum question clues are a `?` at the end of a sentence outside a quote, or a start of `can you`, `could you`, `podes`, `consegues`, or `pode`. The minimum task clues are `please`, `por favor`, `preciso que`, `need you to`, and `can you send`. The minimum closing clues are `thanks`, `obrigado`, `cumprimentos`, `best regards`, `perfect`, and `combinado`. That list is not final. The client plus-three-business-days path is unimplemented. Everyone uses plus seven days. `sender_decisions.client_sla_days` exists and is NULL by default. `sender_decisions.route` may be `imbox`, `feed`, `paper_trail`, or `read`. Priority comes from `sender_decisions.priority`. When that row is missing, priority is NULL.
 15. Coverage is the fraction of threads with a current decision. `needs_review` counts as covered. The report is counts by `next_state` and by `rule_id`. A sample of 100 and a 2% threshold are not a fixture gate.

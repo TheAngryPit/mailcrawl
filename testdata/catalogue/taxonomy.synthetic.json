@@ -1,6 +1,6 @@
 {
   "synthetic": true,
-  "note": "Example schema to opt into. Not the default. Real label names stay off git.",
+  "note": "Stand-in override. Real label names stay off git.",
   "default": {
     "human": ["Example origin/Person"],
     "automated": ["Example origin/Machine"],

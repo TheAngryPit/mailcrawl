@@ -881,29 +881,33 @@ JSON
 import json, os, sqlite3, sys
 stats = json.loads(os.environ["STATS_JSON"])
 dry = json.loads(os.environ["DRY_JSON"])
+empty = [
+    "account_security",
+    "contract",
+    "human",
+    "invoice_receipt",
+    "job_alert",
+    "purchase_delivery",
+]
+if stats.get("empty_no_override") != empty or dry.get("empty_no_override") != empty:
+    sys.exit(f"empty {stats.get('empty_no_override')}")
 counts = stats.get("by_category") or {}
-if counts.get("CATEGORY_PROMOTIONS") != 1 or counts.get("CATEGORY_UPDATES") != 1:
+if counts.get("newsletter") != 1 or counts.get("notification") != 1 or counts.get("correspondence") != 1:
     sys.exit(f"labels {counts}")
-if counts.get("CATEGORY_PERSONAL") != 1 or counts.get("INBOX") != 1:
-    sys.exit(f"labels {counts}")
-if "newsletter" in counts or "automated" in counts or "invoice_receipt" in counts:
-    sys.exit(f"invented {counts}")
+if counts.get("automated") != 4 or counts.get("invoice_receipt") != 0:
+    sys.exit(f"automated {counts}")
 if dry.get("by_category") != counts:
     sys.exit("dry-run categories drifted")
-if dry.get("inactive_reason") != "gmail_default":
-    sys.exit(dry.get("inactive_reason"))
-if dry.get("inactive_rules") != ["2", "2-read", "3", "4"]:
-    sys.exit(dry.get("inactive_rules"))
 conn = sqlite3.connect(os.environ["DB_PATH"])
 try:
     rows = dict(conn.execute("SELECT gmail_label_id, catalogue_key FROM labels"))
 finally:
     conn.close()
-if rows.get("CATEGORY_PROMOTIONS") != "CATEGORY_PROMOTIONS":
+if rows.get("CATEGORY_PROMOTIONS") != "newsletter":
     sys.exit(rows)
 if "pseudo:archived" in rows:
     sys.exit("pseudo label stored")
-print("default taxonomy gmail categories ok")
+print("default taxonomy generic signals ok")
 PY
     log "default taxonomy: generic signals drifted"
     return 1
@@ -960,7 +964,7 @@ PY
   printf '{"default": {"not_a_category": ["Example/Shared"]}}' >"$bad"
   code=0
   mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" --taxonomy "$bad" >/dev/null || code=$?
-  [[ "$code" -eq 0 ]] || { log "default taxonomy: own schema exited $code"; return 1; }
+  [[ "$code" -eq 2 ]] || { log "default taxonomy: unknown category exited $code"; return 1; }
   printf '{"default": {"newsletter": "Example/Shared"}}' >"$bad"
   code=0
   mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" --taxonomy "$bad" >/dev/null || code=$?
@@ -1058,34 +1062,6 @@ finally:
 if key != os.environ["WANT"]:
     sys.exit(key)
 PY
-  local map="$home/gmail-map.json"
-  printf '%s\n' '{"default": {"CATEGORY_PROMOTIONS": ["Example/Shared"]}}' >"$map"
-  mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" --taxonomy "$map" >/dev/null
-  MAP_DB="$home/.local/share/mailcrawl/personal.db" python3 - <<'PY' || { log "default taxonomy: custom label did not map onto a Gmail category"; return 1; }
-import os, sqlite3, sys
-conn = sqlite3.connect(os.environ["MAP_DB"])
-try:
-    key = conn.execute("SELECT catalogue_key FROM labels WHERE gmail_label_id = 'Lshare'").fetchone()
-finally:
-    conn.close()
-if key is None or key[0] != "CATEGORY_PROMOTIONS":
-    sys.exit(key)
-PY
-  local map_dry example_dry
-  map_dry="$(mailcrawl_in "$home" --json dry-run --account personal --taxonomy "$map")"
-  printf '%s' "$map_dry" | python3 -c '
-import json, sys
-doc = json.load(sys.stdin)
-ok = doc.get("inactive_reason") == "gmail_default" and doc.get("inactive_rules") == ["2", "2-read", "3", "4"]
-sys.exit(0 if ok else 1)
-' || { log "default taxonomy: gmail map activated content rules"; return 1; }
-  example_dry="$(mailcrawl_in "$home" --json dry-run --account personal --taxonomy "$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json")"
-  printf '%s' "$example_dry" | python3 -c '
-import json, sys
-doc = json.load(sys.stdin)
-ok = doc.get("inactive_rules") == [] and doc.get("inactive_reason") is None
-sys.exit(0 if ok else 1)
-' || { log "default taxonomy: example schema left content rules inactive"; return 1; }
   rm -rf "$TAXONOMY_HOME"
   trap - EXIT
 }

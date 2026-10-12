@@ -29,7 +29,7 @@ Preconditions:
 
 ## Gotchas
 
-- Gmail category counts and `inactive_rules` are checked by the default-taxonomy drive.
+- Category counts and `empty_no_override` are checked by the default-taxonomy drive.
 - The drive uses a temp home under `/tmp/mailcrawl-verify-scratch/$RUN_ID` and blocks network proxies. It does not run `gog` and it does not write to Gmail.
 - Cleanup removes that scratch directory. Evidence stays in `$EVIDENCE_DIR`.
 - Sender counts use sender ids. They do not print addresses. Native gog import and body cleaning stay separate drives.

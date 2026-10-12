@@ -18,13 +18,7 @@ from mailcrawl.report import dry_run, stats
 from mailcrawl.rules import apply_rules, load_rules
 from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
-from mailcrawl.taxonomy import (
-    active_categories,
-    load_taxonomy,
-    missing_labels,
-    present_label_names,
-    resolve_taxonomy,
-)
+from mailcrawl.taxonomy import load_taxonomy, missing_labels, present_label_names, resolve_taxonomy
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -246,7 +240,7 @@ def _counted(args: argparse.Namespace, report) -> dict[str, object]:
     loaded = None if catalogue is None else load_taxonomy(catalogue)
     conn = _account_db(args)
     try:
-        counted = report(conn, categories=active_categories(loaded, alias))
+        counted = report(conn, has_override=loaded is not None)
         absent = [] if loaded is None else missing_labels(loaded, alias, present_label_names(conn))
     finally:
         conn.close()
