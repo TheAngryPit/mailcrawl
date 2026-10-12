@@ -6,7 +6,7 @@ Import stores the phase 1 text in `body_text_raw` and the cleaned text in `body_
 
 - `raw-kept`. The v0 fixture message `fixture-001` keeps `> quoted line stays` and the `-- ` signature in `body_text_raw`.
 - `cleaned-indexed`. `body_text` for that message is `This body is fake fixture text.` `search quoted` returns no hits. `search fake` returns `fixture-001`.
-- `schema-v2`. The account database is `user_version` 2 and has `decisions`, `sender_decisions`, and `thread_mutes`. It has no `plans`, `proposals`, `embeddings`, or `clips`.
+- `schema-v2`. The account database is `user_version` 3 and has `decisions`, `sender_decisions`, and `thread_mutes`. It has no `plans`, `proposals`, `embeddings`, or `clips`.
 - `html-blockquote-stays`. A synthetic HTML blockquote that does not use a `>` line stays searchable.
 
 ## How to get to it (user POV)

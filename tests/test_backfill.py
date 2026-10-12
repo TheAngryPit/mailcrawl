@@ -65,12 +65,12 @@ class OldTaxonomyBackfillTest(unittest.TestCase):
                 str(NOW),
             ]
         )
-        self.assertEqual(dry["by_rule"], {"0": 1, "5": 2, "else": 1})
+        self.assertEqual(dry["by_rule"], {"0": 1, "5": 1, "else": 2})
         self.assertEqual(
             dry["by_state"],
-            {"needs_review_else": 1, "needs_review_rule0": 1, "reply": 2},
+            {"needs_review_else": 2, "needs_review_rule0": 1, "reply": 1},
         )
-        self.assertEqual(dry["undecided"], 1)
+        self.assertEqual(dry["undecided"], 2)
         self.assertEqual(
             dry["decisions_by_category"],
             {"CATEGORY_PERSONAL": {"5": 1}, "STARRED": {"0": 1}},

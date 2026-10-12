@@ -279,7 +279,7 @@ try:
     if body != "This body is fake fixture text.":
         sys.exit("cleaned body is not the kept sentence")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 2:
+    if version != 3:
         sys.exit(f"user_version {version}")
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table in ("decisions", "sender_decisions", "thread_mutes"):
@@ -479,7 +479,7 @@ PY
 import json, sys
 doc = json.load(sys.stdin)
 ok = (
-    doc.get("rules_version") == "rules-v2"
+    doc.get("rules_version") == "rules-v3"
     and doc.get("threads") == 2
     and doc.get("covered") == 2
     and doc.get("by_state") == {"needs_review": 1, "reply": 1}

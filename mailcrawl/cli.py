@@ -222,10 +222,17 @@ def _rules(args: argparse.Namespace) -> int:
         raise UsageError("account is not initialized")
     config = load_rules(Path(args.rules))
     now = int(time.time()) if args.now is None else args.now
-    owners, domains = _identity(args)
+    owners, domains, security_senders = _identity(args)
     conn = connect(db_path)
     try:
-        report = apply_rules(conn, now=now, config=config, owners=owners, domains=domains)
+        report = apply_rules(
+            conn,
+            now=now,
+            config=config,
+            owners=owners,
+            domains=domains,
+            security_senders=security_senders,
+        )
     finally:
         conn.close()
     _emit(
@@ -243,14 +250,21 @@ def _rules(args: argparse.Namespace) -> int:
 
 
 def _stats(args: argparse.Namespace) -> int:
-    owners, domains = _identity(args)
+    owners, domains, security_senders = _identity(args)
 
     def report(
         conn: sqlite3.Connection,
         categories: tuple[str, ...],
         names: dict[str, str] | None,
     ) -> dict[str, object]:
-        return stats(conn, categories=categories, label_keys=names, owners=owners, domains=domains)
+        return stats(
+            conn,
+            categories=categories,
+            label_keys=names,
+            owners=owners,
+            domains=domains,
+            security_senders=security_senders,
+        )
 
     _emit(args, {**_counted(args, report), "ok": True})
     return 0
@@ -260,7 +274,7 @@ def _dry_run(args: argparse.Namespace) -> int:
     now = int(time.time()) if args.now is None else args.now
     config = None if not args.rules else load_rules(Path(args.rules))
     export_path, sample, seed = _export_args(args)
-    owners, domains = _identity(args)
+    owners, domains, security_senders = _identity(args)
 
     def report(
         conn: sqlite3.Connection,
@@ -278,13 +292,14 @@ def _dry_run(args: argparse.Namespace) -> int:
             seed=seed,
             owners=owners,
             domains=domains,
+            security_senders=security_senders,
         )
 
     _emit(args, {**_counted(args, report), "ok": True})
     return 0
 
 
-def _identity(args: argparse.Namespace) -> tuple[frozenset[str], frozenset[str]]:
+def _identity(args: argparse.Namespace) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
     return account_identity(config_path(args.config), canonical_alias(args.account))
 
 

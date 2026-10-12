@@ -1,7 +1,7 @@
 {
   "schema": "mailcrawl.rules.v0",
   "synthetic": true,
-  "rules_version": "rules-v2",
+  "rules_version": "rules-v3",
   "read_later_expiry_days": 30,
   "review_days": 7,
   "unrecognized_days": 7,
@@ -20,9 +20,31 @@
   "question": ["can you", "could you", "podes", "consegues", "pode"],
   "task": ["please", "por favor", "preciso que", "need you to", "can you send"],
   "closing": ["thanks", "obrigado", "cumprimentos", "best regards", "perfect", "combinado"],
-  "machine_local": ["no-reply", "no_reply", "noreply", "notification"],
+  "machine_local": ["no-reply", "no_reply", "noreply", "notification", "news", "info", "team", "newsletter"],
   "transfer_notice": ["download is ready", "transfer complete"],
   "receipt_words": ["invoice", "receipt", "fatura", "recibo"],
   "calendar_response": ["accepted this invitation", "declined this invitation", "tentatively accepted"],
-  "automated_reference": ["meeting notes", "weekly report", "monthly report", "shared a document", "invitation has expired"]
+  "automated_reference": ["meeting notes", "weekly report", "monthly report", "shared a document", "invitation has expired"],
+  "phrases": {
+    "en": {
+      "automated_reference": ["viewed your file", "downloaded your file", "file was downloaded"],
+      "transfer_notice": ["transfer complete"],
+      "out_of_office": ["out of office"],
+      "billing_action": ["payment failed", "action required", "payment declined"],
+      "sales": ["special offer", "book a demo", "partnership opportunity"],
+      "security_wording": ["security alert", "password reset", "unusual sign-in", "verify your account"],
+      "auto_reply_subject": ["automatic reply", "auto-reply", "automatic response", "out of office"]
+    },
+    "pt": {
+      "question": ["diz-me se", "diz me se", "confirma", "achas que"],
+      "automated_reference": ["notas da reunião", "notas de reunião", "relatório semanal", "relatório mensal", "relatorio semanal", "relatorio mensal", "visualizou o ficheiro", "descarregou o ficheiro", "o ficheiro foi visualizado"],
+      "transfer_notice": ["transferência concluída", "transferencia concluida", "a transferência está pronta"],
+      "out_of_office": ["fora do escritório", "fora do escritorio"],
+      "billing_action": ["pagamento falhou", "ação necessária", "acao necessaria"],
+      "sales": ["proposta comercial", "agendar uma chamada"],
+      "security_wording": ["alerta de segurança", "alerta de seguranca", "reposição da palavra-passe", "verifique a sua conta"],
+      "auto_reply_subject": ["resposta automática", "resposta automatica", "ausência temporária", "ausencia temporaria"],
+      "receipt_words": ["fatura", "recibo"]
+    }
+  }
 }

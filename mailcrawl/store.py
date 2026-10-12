@@ -1,4 +1,4 @@
-"""Open one account database and migrate it to schema v2."""
+"""Open one account database and migrate it to the current schema."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ DUMP_TABLES = (
 
 
 class UnsupportedSchema(Exception):
-    """The database user_version is not 0, 1, or 2."""
+    """The database user_version is not 0, 1, 2, or 3."""
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -40,6 +40,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         return
     if version == 1:
         _migrate_v1(conn)
+        return
+    if version == 2:
+        _migrate_v2(conn)
         return
     raise UnsupportedSchema(f"user_version {version}")
 
@@ -61,6 +64,64 @@ def _migrate_v1(conn: sqlite3.Connection) -> None:
     _execute_statements(conn, V2_TABLES_SQL)
     conn.execute(f"PRAGMA user_version = {USER_VERSION}")
     conn.commit()
+
+
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("BEGIN")
+    conn.execute(
+        """
+        CREATE TABLE decisions_v3 (
+          decision_id INTEGER PRIMARY KEY,
+          thread_pk INTEGER NOT NULL REFERENCES threads,
+          next_state TEXT NOT NULL CHECK (next_state IN (
+            'reply','action','waiting','read_later','reference','noise','needs_review','resolved','screener'
+          )),
+          priority INTEGER CHECK (priority BETWEEN 0 AND 3),
+          owner TEXT CHECK (owner IN ('me','other','none')),
+          review_date INTEGER,
+          due_date INTEGER,
+          lane TEXT CHECK (lane IN ('imbox','feed','paper_trail','screened_out')),
+          pinned_aside INTEGER NOT NULL DEFAULT 0,
+          muted INTEGER NOT NULL DEFAULT 0,
+          confidence REAL,
+          source TEXT NOT NULL CHECK (source IN ('rule','embedding-cluster','llm','human','legacy-label')),
+          rule_id TEXT,
+          rules_version TEXT NOT NULL,
+          evidence TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          superseded_by INTEGER REFERENCES decisions_v3(decision_id),
+          CHECK (next_state <> 'waiting' OR review_date IS NOT NULL)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO decisions_v3(
+          decision_id, thread_pk, next_state, priority, owner, review_date, due_date,
+          lane, pinned_aside, muted, confidence, source, rule_id, rules_version,
+          evidence, created_at, superseded_by
+        )
+        SELECT
+          decision_id, thread_pk, next_state, priority, owner, review_date, due_date,
+          lane, pinned_aside, muted, confidence, source, rule_id, rules_version,
+          evidence, created_at, superseded_by
+        FROM decisions
+        """
+    )
+    conn.execute("DROP TABLE decisions")
+    conn.execute("ALTER TABLE decisions_v3 RENAME TO decisions")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX decisions_current
+        ON decisions(thread_pk) WHERE superseded_by IS NULL
+        """
+    )
+    conn.execute(f"PRAGMA user_version = {USER_VERSION}")
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = ON")
 
 
 def _execute_statements(conn: sqlite3.Connection, script: str) -> None:

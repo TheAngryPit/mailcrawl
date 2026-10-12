@@ -228,7 +228,7 @@ try:
     if body != "This body is fake fixture text.":
         raise SystemExit("cleaned body is not the kept sentence")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 2:
+    if version != 3:
         raise SystemExit(f"user_version {version}")
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table in ("decisions", "sender_decisions", "thread_mutes"):
@@ -412,7 +412,7 @@ printf '%s' "${rules_out}" | grep -q secretbodyqx && fail "rules output included
 RULES_JSON="${rules_out}" python3 <<'PY' || fail "rules counts drifted"
 import json, os
 doc = json.loads(os.environ["RULES_JSON"])
-if doc.get("rules_version") != "rules-v2" or doc.get("threads") != 2 or doc.get("covered") != 2:
+if doc.get("rules_version") != "rules-v3" or doc.get("threads") != 2 or doc.get("covered") != 2:
     raise SystemExit(doc)
 if doc.get("by_state") != {"needs_review": 1, "reply": 1}:
     raise SystemExit(doc.get("by_state"))

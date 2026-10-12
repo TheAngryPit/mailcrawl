@@ -5,3 +5,4 @@ synthetic = true
 email = "ada@example.com"
 owners = ["ada@example.com", "ada.other@example.com"]
 domains = ["example.com"]
+security_senders = ["alerts@example.com"]

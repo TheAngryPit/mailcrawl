@@ -29,6 +29,7 @@ def stats(
     label_keys: dict[str, str] | None = None,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
+    security_senders: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     messages = int(conn.execute("SELECT count(*) FROM messages").fetchone()[0])
     threads = int(conn.execute("SELECT count(*) FROM threads").fetchone()[0])
@@ -44,7 +45,13 @@ def stats(
     backfill_categories(conn)
     active = _active(categories)
     rule0, fallthrough = _review_split(
-        conn, now=None, config=None, label_keys=label_keys, owners=owners, domains=domains
+        conn,
+        now=None,
+        config=None,
+        label_keys=label_keys,
+        owners=owners,
+        domains=domains,
+        security_senders=security_senders,
     )
     return {
         "by_category": _category_counts(conn, active),
@@ -70,6 +77,7 @@ def dry_run(
     seed: int = 0,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
+    security_senders: frozenset[str] = frozenset(),
 ) -> dict[str, object]:
     backfill_categories(conn)
     active = _active(categories)
@@ -85,7 +93,13 @@ def dry_run(
     export_rows: list[tuple[str, str, str, str]] = []
     undecided = 0
     for preview in preview_rules(
-        conn, now=stamp_now, config=config, label_keys=label_keys, owners=owners, domains=domains
+        conn,
+        now=stamp_now,
+        config=config,
+        label_keys=label_keys,
+        owners=owners,
+        domains=domains,
+        security_senders=security_senders,
     ):
         state = preview.next_state
         rule_id = preview.rule_id
@@ -248,6 +262,7 @@ def _review_split(
     label_keys: dict[str, str] | None = None,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
+    security_senders: frozenset[str] = frozenset(),
 ) -> tuple[int, int]:
     if config is None:
         config = load_rules(bundled_rules_path())
@@ -255,7 +270,13 @@ def _review_split(
     rule0 = 0
     fallthrough = 0
     for preview in preview_rules(
-        conn, now=stamp_now, config=config, label_keys=label_keys, owners=owners, domains=domains
+        conn,
+        now=stamp_now,
+        config=config,
+        label_keys=label_keys,
+        owners=owners,
+        domains=domains,
+        security_senders=security_senders,
     ):
         if preview.rule_id == "0" and preview.next_state == "needs_review":
             rule0 += 1
