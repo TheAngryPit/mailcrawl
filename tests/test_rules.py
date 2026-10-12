@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mailcrawl.rules import RULES_VERSION, apply_rules, load_rules
+from mailcrawl.cli import main
+from mailcrawl.configfile import account_identity, write_account
+from mailcrawl.rules import RULES_VERSION, apply_rules, load_rules, preview_rules
 from mailcrawl.store import connect, init_account
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -192,6 +194,122 @@ class RulesEngineTest(unittest.TestCase):
         self.assertEqual(report.threads, 1)
         self.assertEqual(report.covered, 1)
 
+    def test_rules_v2_keeps_machine_mail_and_owners_out_of_reply(self) -> None:
+        both = self._thread(
+            "hello there",
+            labels=[
+                ("Lh", "Example origin/Person", "human"),
+                ("La", "Example origin/Machine", "automated"),
+            ],
+        )
+        machine = self._thread("hello there", address="no-reply@example.com")
+        transfer = self._thread("Your download is ready")
+        invoice = self._thread("Your invoice is attached")
+        security_list = self._thread(
+            "bulletin",
+            labels=[
+                ("Ls", "Example type/Account", "account_security"),
+                ("Ln", "Example type/Bulletin", "newsletter"),
+                ("La", "Example origin/Machine", "automated"),
+            ],
+            headers=[("list-unsubscribe", "<https://example.com/unsub>")],
+        )
+        listed_task = self._thread(
+            "please send the file",
+            headers=[("list-unsubscribe", "<https://example.com/unsub>")],
+        )
+        promo_task = self._thread(
+            "please send the file",
+            labels=[("CATEGORY_PROMOTIONS", "CATEGORY_PROMOTIONS", "CATEGORY_PROMOTIONS")],
+        )
+        draft = self._thread("Can you confirm?", from_me=1, labels=[("DRAFT", "DRAFT", None)])
+        calendar = self._thread("Accepted this invitation")
+        notes = self._thread(
+            "weekly report",
+            labels=[("La", "Example origin/Machine", "automated")],
+        )
+        human_report = self._thread("weekly report")
+        short_close = self._thread("Thanks")
+        long_close = self._thread("Thanks\n" + ("hello there " * 20))
+        owner = self._thread("Can you confirm?", address="owner@example.com")
+        to_self = self._thread(
+            "note",
+            from_me=1,
+            to_hdr="Ada <ada@example.com>",
+        )
+        apply_rules(
+            self.conn,
+            now=NOW,
+            config=self.config,
+            owners=frozenset({"owner@example.com", "ada@example.com"}),
+        )
+        self.assertNotEqual(self._current(both)["rule_id"], "5")
+        self.assertEqual(self._current(both)["rule_id"], "else")
+        self.assertEqual(self._current(machine)["rule_id"], "else")
+        self.assertEqual(self._current(transfer)["rule_id"], "auto-ref")
+        self.assertEqual(self._current(transfer)["next_state"], "reference")
+        self.assertEqual(self._current(transfer)["lane"], "paper_trail")
+        self.assertNotIn("download", self._current(transfer)["evidence"])
+        self.assertEqual(self._current(invoice)["rule_id"], "3")
+        self.assertEqual(self._current(invoice)["lane"], "paper_trail")
+        self.assertNotIn("invoice", self._current(invoice)["evidence"])
+        self.assertEqual(self._current(security_list)["rule_id"], "2")
+        self.assertNotEqual(self._current(listed_task)["rule_id"], "7")
+        self.assertNotEqual(self._current(promo_task)["rule_id"], "7")
+        self.assertEqual(self._current(draft)["rule_id"], "draft")
+        self.assertEqual(self._current(draft)["next_state"], "resolved")
+        self.assertEqual(self._current(draft)["lane"], "screened_out")
+        self.assertEqual(self._current(calendar)["rule_id"], "housekeeping")
+        self.assertEqual(self._current(calendar)["next_state"], "resolved")
+        self.assertEqual(self._current(notes)["rule_id"], "auto-ref")
+        self.assertEqual(self._current(human_report)["rule_id"], "5")
+        self.assertEqual(self._current(short_close)["rule_id"], "8")
+        self.assertEqual(self._current(short_close)["next_state"], "resolved")
+        self.assertEqual(self._current(long_close)["rule_id"], "5")
+        self.assertEqual(self._current(owner)["rule_id"], "6")
+        self.assertEqual(self._current(owner)["next_state"], "waiting")
+        self.assertEqual(self._current(to_self)["rule_id"], "housekeeping")
+        self.assertNotEqual(self._current(to_self)["next_state"], "waiting")
+
+    def test_owner_domain_is_from_me_through_config(self) -> None:
+        self._thread("Can you confirm?", address="owner@example.com")
+        self.conn.commit()
+        config = Path(self.tmp.name) / "config.toml"
+        config.write_text(
+            '[accounts.vcl]\nemail = "ada@example.com"\nowners = []\ndomains = ["example.com"]\n',
+            encoding="utf-8",
+        )
+        write_account(config, "vcl", "ada@example.com")
+        kept = config.read_text(encoding="utf-8")
+        self.assertIn('domains = ["example.com"]', kept)
+        code = main(
+            [
+                "--json",
+                "--home",
+                self.tmp.name,
+                "--config",
+                str(config),
+                "dry-run",
+                "--account",
+                "vcl",
+                "--now",
+                str(NOW),
+                "--rules",
+                str(RULES),
+            ]
+        )
+        self.assertEqual(code, 0)
+        row = self.conn.execute(
+            "SELECT rule_id FROM decisions WHERE superseded_by IS NULL"
+        ).fetchone()
+        self.assertIsNone(row)
+        owners, domains = account_identity(config, "vcl")
+        preview = preview_rules(
+            self.conn, now=NOW, config=self.config, owners=owners, domains=domains
+        )
+        self.assertEqual(preview[0].rule_id, "6")
+        self.assertNotEqual(preview[0].rule_id, "5")
+
     def test_doubtful_line_is_not_a_question(self) -> None:
         thread = self._thread("On the meeting we decided.", from_me=1)
         apply_rules(self.conn, now=NOW, config=self.config)
@@ -217,11 +335,22 @@ class RulesEngineTest(unittest.TestCase):
         when: int = NOW - DAY,
         sender_decision: tuple[str, str, int | None] | None = None,
         mute: bool = False,
+        address: str | None = None,
+        to_hdr: str | None = None,
     ) -> int:
         self.n += 1
-        sender_id = self._sender(f"bao{self.n}@example.com", sender_decision)
+        sender_id = self._sender(address or f"bao{self.n}@example.com", sender_decision)
         thread_pk = self._insert_thread(f"thread-{self.n}")
-        self._message(thread_pk, body, when, from_me=from_me, sender_id=sender_id, labels=labels, headers=headers)
+        self._message(
+            thread_pk,
+            body,
+            when,
+            from_me=from_me,
+            sender_id=sender_id,
+            labels=labels,
+            headers=headers,
+            to_hdr=to_hdr,
+        )
         if mute:
             self.conn.execute(
                 "INSERT INTO thread_mutes(thread_pk, muted_at) VALUES (?, ?)",
@@ -239,6 +368,7 @@ class RulesEngineTest(unittest.TestCase):
         sender_id: int | None = None,
         labels: list[tuple[str, str, str | None]] | None = None,
         headers: list[tuple[str, str]] | None = None,
+        to_hdr: str | None = None,
     ) -> None:
         self.n += 1
         if sender_id is None:
@@ -247,8 +377,8 @@ class RulesEngineTest(unittest.TestCase):
             """
             INSERT INTO messages(
               account_id, gmail_message_id, thread_pk, internal_date, sender_id,
-              body_text, is_from_me, raw_sha256, provenance_hash, imported_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'raw', 'prov', ?)
+              body_text, is_from_me, to_hdr, raw_sha256, provenance_hash, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', 'prov', ?)
             RETURNING msg_pk
             """,
             (
@@ -259,6 +389,7 @@ class RulesEngineTest(unittest.TestCase):
                 sender_id,
                 body,
                 from_me,
+                to_hdr,
                 when,
             ),
         ).fetchone()[0]

@@ -412,7 +412,7 @@ printf '%s' "${rules_out}" | grep -q secretbodyqx && fail "rules output included
 RULES_JSON="${rules_out}" python3 <<'PY' || fail "rules counts drifted"
 import json, os
 doc = json.loads(os.environ["RULES_JSON"])
-if doc.get("rules_version") != "rules-v1" or doc.get("threads") != 2 or doc.get("covered") != 2:
+if doc.get("rules_version") != "rules-v2" or doc.get("threads") != 2 or doc.get("covered") != 2:
     raise SystemExit(doc)
 if doc.get("by_state") != {"needs_review": 1, "reply": 1}:
     raise SystemExit(doc.get("by_state"))

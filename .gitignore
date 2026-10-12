@@ -95,6 +95,9 @@ ocr-out/
 *.local.json
 /taxonomy.json
 
+# Local account config. The synthetic example under testdata/ stays tracked.
+/config.toml
+
 # Python
 __pycache__/
 *.py[cod]

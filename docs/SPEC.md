@@ -54,7 +54,7 @@ Phase 1 is read-only Python and it does all of the following:
 - Import a Google Takeout mbox idempotently with `mailcrawl import mbox <file> --alias <thehive|vcl|personal>`. It streams the file and writes through the same writer as `import gog-export`. See section 4.1.
 - Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`. Import writes `msg_fts` from the cleaned body. `mailcrawl search` reads it.
 - Parse attachment bytes through `mailcrawl.extract`. `text/plain` and `text/html` are extracted. Other types stay behind that interface. No external binary is required.
-- Apply rules 0 to 8 with `mailcrawl rules`. `rules_version` is `rules-v1`. The command prints counts only.
+- Apply rules 0 to 8 with `mailcrawl rules`. `rules_version` is `rules-v2`. The command prints counts only.
 - Print archive counts with `mailcrawl stats` and would-be decision counts with `mailcrawl dry-run`. Both commands print counts only. Dry-run evaluates rules and does not write decisions. Neither command writes a plan file or touches Gmail.
 - Speak JSON on the CLI. `init`, `import`, and `search` accept `--json` before the command.
 - Test against synthetic fixtures only.
@@ -169,7 +169,7 @@ Rules 2, 2-read, 3, and 4 need content types that are not in that default. They 
 
 An archive imported before those keys existed has the Gmail label id stored and `catalogue_key` empty. `backfill` copies the id into `catalogue_key` for the system labels and category tabs above. It does not change a key that is already set, it does not invent a content type, and it does not update message rows. A `pseudo:` id is skipped. `stats` and `dry-run` run the same fill before they count, so an old archive does not need a reimport. Running `backfill` twice changes nothing the second time. `testdata/fixtures/old-taxonomy/pre-category.sql` is the synthetic old archive.
 
-`stats` reports `uncategorized` as the number of messages with none of the five category tabs. `dry-run` evaluates the current rules against the current taxonomy and does not read or write the `decisions` table. `by_rule` and `by_state` are the would-be decisions. `decisions_by_category` counts those decisions under each category the thread carries. `undecided` is the number of threads whose would-be rule is `else`. `--now` and `--rules` select the clock and the rules file. The default rules file is `testdata/rules/rules-v0.json`. Its `rules_version` is `rules-v1`.
+`stats` reports `uncategorized` as the number of messages with none of the five category tabs. `dry-run` evaluates the current rules against the current taxonomy and does not read or write the `decisions` table. `by_rule` and `by_state` are the would-be decisions. `decisions_by_category` counts those decisions under each category the thread carries. `undecided` is the number of threads whose would-be rule is `else`. `--now` and `--rules` select the clock and the rules file. The default rules file is `testdata/rules/rules-v0.json`. Its `rules_version` is `rules-v2`.
 
 The taxonomy file maps label names, not label ids. `dry-run` and `stats` apply that map while they count. A name in the file wins over a `catalogue_key` already stored, including a key left blank or set to something else. The count does not write `catalogue_key`. Import is still the path that stores the key. When a taxonomy file is loaded, `dry-run` adds `override_matches`: each category in the file, with `messages` and `threads`. That object has no label names. A label id, including a `mbox:` id, is not the lookup key.
 
@@ -198,7 +198,7 @@ Invalid JSON, a file that is not an object, an unknown account, or a value that 
 
 `*.local.json` and a `taxonomy.json` at the repository root are gitignored. The example schema contains example label names only.
 
-The rule roles `finance`, `purchase`, and `brief` are `invoice_receipt`, `purchase_delivery`, and `correspondence`. `rules_version` is `rules-v1`. Those rules fire when the opted-in schema supplies the key.
+The rule roles `finance`, `purchase`, and `brief` are `invoice_receipt`, `purchase_delivery`, and `correspondence`. `rules_version` is `rules-v2`. Those rules fire when the opted-in schema supplies the key.
 
 ### 4.3 Rule answers in rules-v1
 
@@ -207,6 +207,35 @@ Rule `0` keys only on the Gmail label id `STARRED`. A thread with `IMPORTANT` an
 A thread with `SPAM` or `TRASH` that has not already matched rules `0` through `4` matches rule `spam-trash`. The state is `resolved`. The lane is `screened_out`. This rule runs before rules `5`, `6`, `7`, `8`, and `else`, so that thread does not become `reply` or `action`. A starred thread still matches rule `0` first. A muted thread still matches rule `1` first.
 
 Rule `else` stays state `needs_review` on the decision row. `dry-run` does not put rule `0` and rule `else` in one `needs_review` count. Rule `0` is `needs_review_rule0`. Rule `else` is `needs_review_else`. `undecided` is still the `else` count. `stats` reports `needs_review_rule0` and `needs_review_else` the same way. Another rule that returns `needs_review`, such as rule `4`, keeps the state name `needs_review` in `dry-run`.
+
+### 4.4 Rule answers in rules-v2
+
+`rules_version` is `rules-v2`. The rules file path stays `testdata/rules/rules-v0.json`. Dry-run still does not write the `decisions` table. `--export-decisions` still writes the local CSV.
+
+Owner aliases live in the local config, `~/.config/mailcrawl/config.toml` or the file named by `--config`. Each account section may list `owners` and `domains`. The account `email` already counts as from me at import. `owners` are extra addresses. A domain matches the part after `@`, compared in lower case. Mail from any of those counts as from me. It never matches rule `5`. It can match rule `6` (`waiting`) or rule `8` (`resolved`). A later `init` keeps `owners` and `domains`. A `config.toml` at the repository root is gitignored. `testdata/config/owners.synthetic.toml` is the synthetic example.
+
+```toml
+[accounts.thehive]
+email = "ada@example.com"
+owners = ["ada@example.com", "ada.other@example.com"]
+domains = ["example.com"]
+```
+
+Automated mail beats a human category. A thread that has both a human category and an automated category, a last sender whose local part is `no-reply`, `no_reply`, `noreply`, or `notification`, or a transfer notice, does not match rule `5`. Transfer notices are the phrases `download is ready` and `transfer complete`.
+
+Security protection is only real security mail. `account_security` is protected, and can match rule `4`, only when the thread has no list header and no `CATEGORY_PROMOTIONS` label. A list header or the promotions tab clears that protection, so rule `2` can match first.
+
+The human test needs more than missing list headers. A no-reply or notification sender is not human. Receipt or invoice wording matches rule `3` with state `reference` and lane `paper_trail` even when the thread has no invoice label. The words are `invoice`, `receipt`, `fatura`, and `recibo`.
+
+A thread whose every message carries `DRAFT` matches rule `draft` before rules `5` through `8`. The state is `resolved`. The lane is `screened_out`. It is not `waiting`.
+
+Own housekeeping matches rule `housekeeping` before rules `5` through `8` and before `else`. A calendar response, or a message whose `To` addresses are all owner addresses or owner domains, is state `resolved` and lane `screened_out`. An empty `To` is not a message to self. The calendar phrases are `accepted this invitation`, `declined this invitation`, and `tentatively accepted`.
+
+Automated reference matches rule `auto-ref` before rules `5` through `8` and before `else`, and only when the thread is not human. Meeting notes, a periodic report, a sharing notice, an expired invite, or a transfer notice is state `reference` and lane `paper_trail`. The phrases are `meeting notes`, `weekly report`, `monthly report`, `shared a document`, and `invitation has expired`, plus the transfer notices above. The same wording from a human sender stays on the human rules.
+
+Rule `7` does not match list mail or promotions, even when the body has a task phrase.
+
+A short closing from the other side matches rule `8` before rule `5`. The state is `resolved` and the lane is `imbox`. Short means the stripped body is at most 80 characters and at most two non-empty lines, and it matches a closing clue without a question or a task. A longer human reply that also contains a closing clue stays rule `5`. A closing from me still matches the later rule `8` when it is not protected.
 
 ## 5. Phase 1 proof
 A phase 1 change is done when, on a clean Linux runner with no network credentials and a temporary `HOME`, this exits 0:
@@ -250,10 +279,10 @@ These points are closed.
 11. Attachment parsing handles `text/plain` and `text/html` only. PDF, OCR, Office, `ics`, `attachment_fields`, and image embeddings stay behind an interface with no required implementation. An unsupported type is `unsupported`. A missing backend is `skipped`. A row with no `file_sha256` is `skipped` with reason `no_bytes`. OCR thresholds are v0 constants: fewer than 25 characters per page tries OCR, and `ocr_conf` below 60 is `low_confidence`. Those thresholds are exercised only when a backend is present. This revision adds that interface in `mailcrawl/extract.py`. The default backend does not invoke `pdftotext` or `tesseract`. Image embeddings and `attachment_fields` are not created.
 12. The default taxonomy is the Gmail categories in section 4.2. Content-type rules stay off until an override schema supplies their keys. `invoice_receipt`, `purchase_delivery`, and `correspondence` replace `finance`, `purchase`, and `brief` inside that example schema. Real label names never appear in code or tests. They stay in a local file outside Git.
 13. Guards run first. A guard can only force `needs_review` or block `noise` and `resolved`. Later rules choose the other states. `STARRED` and `IMPORTANT` are Gmail system label ids. Rule `0` keys only on `STARRED`. `IMPORTANT` alone does not match rule `0`. Rule `spam-trash` is not a guard. It is the rule in section 4.3. Rules never read a `pseudo:` label.
-14. These definitions are v0, tunable, and marked v0 in code. A human participant is a sender whose origin label is human. When that label is missing, the sender has no `List-Unsubscribe`, no `Precedence` of `bulk` or `list`, and no `Auto-Submitted` other than `no`. The label beats the header. Unrecognized Account & Security means a sender with no `sender_decisions` row. The read-list is `sender_decisions.route = 'read'`. There is no extra domain file. `read_later_expiry_days` is 30, and expiry is tested on fixtures. Open questions, concrete tasks, and closing language are short clue lists in Portuguese and English. They live in a configuration file, not in the engine. The minimum question clues are a `?` at the end of a sentence outside a quote, or a start of `can you`, `could you`, `podes`, `consegues`, or `pode`. The minimum task clues are `please`, `por favor`, `preciso que`, `need you to`, and `can you send`. The minimum closing clues are `thanks`, `obrigado`, `cumprimentos`, `best regards`, `perfect`, and `combinado`. That list is not final. The client plus-three-business-days path is unimplemented. Everyone uses plus seven days. `sender_decisions.client_sla_days` exists and is NULL by default. `sender_decisions.route` may be `imbox`, `feed`, `paper_trail`, or `read`. Priority comes from `sender_decisions.priority`. When that row is missing, priority is NULL.
+14. These definitions are v0, tunable, and marked v0 in code. A human participant, as of `rules-v2` in section 4.4, has a human origin and not an automated origin, is not a no-reply or notification sender, and is not a transfer notice. When the origin label is missing, the sender also has no `List-Unsubscribe`, no `Precedence` of `bulk` or `list`, and no `Auto-Submitted` other than `no`. The label beats the header. Unrecognized Account & Security means a sender with no `sender_decisions` row. The read-list is `sender_decisions.route = 'read'`. Owner addresses and own domains live in the local config in section 4.4. There is no separate domain file. `read_later_expiry_days` is 30, and expiry is tested on fixtures. Open questions, concrete tasks, and closing language are short clue lists in Portuguese and English. They live in a configuration file, not in the engine. The minimum question clues are a `?` at the end of a sentence outside a quote, or a start of `can you`, `could you`, `podes`, `consegues`, or `pode`. The minimum task clues are `please`, `por favor`, `preciso que`, `need you to`, and `can you send`. The minimum closing clues are `thanks`, `obrigado`, `cumprimentos`, `best regards`, `perfect`, and `combinado`. That list is not final. The client plus-three-business-days path is unimplemented. Everyone uses plus seven days. `sender_decisions.client_sla_days` exists and is NULL by default. `sender_decisions.route` may be `imbox`, `feed`, `paper_trail`, or `read`. Priority comes from `sender_decisions.priority`. When that row is missing, priority is NULL.
 15. Coverage is the fraction of threads with a current decision. `needs_review` counts as covered. The report is counts by `next_state` and by `rule_id`. A sample of 100 and a 2% threshold are not a fixture gate.
 16. Dry-run prints counts only: state, label, sender, month, and rule. It does not write a plan file and it does not touch Gmail. Plans are phase 4.
-17. `rules_version` is `rules-v1`. It was `rules-v0` before the rule `0` and `spam-trash` changes in section 4.3. A change to a rule, a constant, or a list increments it. `evidence` stores ids and rule or label names only, never email text.
+17. `rules_version` is `rules-v2`. It was `rules-v1` before the owner, human, housekeeping, and reference changes in section 4.4, and `rules-v0` before the rule `0` and `spam-trash` changes in section 4.3. A change to a rule, a constant, or a list increments it. `evidence` stores ids and rule or label names only, never email text.
 18. No language model runs on the crawl. The first matching rule wins. There is no Gmail write, no network, and no `gog`.
 
 ## 7. Scope
@@ -267,7 +296,7 @@ Body cleaning, schema v2, the attachment interface, rules 0 to 8, `stats`, and d
 An inference stays marked as still to be decided. An open approval stays marked as still to be decided.
 
 ### Phase 2. Cleaned text, parser interface, rules, and counts
-Body cleaning, the attachment interface, rules 0 to 8, `stats`, and dry-run counts are done. `rules_version` is `rules-v1`. There is no model. Dry-run prints counts only. It writes no plan file and it does not touch Gmail.
+Body cleaning, the attachment interface, rules 0 to 8, `stats`, and dry-run counts are done. `rules_version` is `rules-v2`. There is no model. Dry-run prints counts only. It writes no plan file and it does not touch Gmail.
 
 A full thehive backup is not part of phase 2. Cache deletion is not part of phase 2. A sample of 100 and an error under 2% are not a fixture gate. Coverage is the counts in section 6 point 15.
 

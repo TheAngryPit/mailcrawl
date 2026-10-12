@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from mailcrawl.configfile import account_email, write_account
+from mailcrawl.configfile import account_email, account_identity, write_account
 from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
@@ -222,9 +222,10 @@ def _rules(args: argparse.Namespace) -> int:
         raise UsageError("account is not initialized")
     config = load_rules(Path(args.rules))
     now = int(time.time()) if args.now is None else args.now
+    owners, domains = _identity(args)
     conn = connect(db_path)
     try:
-        report = apply_rules(conn, now=now, config=config)
+        report = apply_rules(conn, now=now, config=config, owners=owners, domains=domains)
     finally:
         conn.close()
     _emit(
@@ -242,12 +243,14 @@ def _rules(args: argparse.Namespace) -> int:
 
 
 def _stats(args: argparse.Namespace) -> int:
+    owners, domains = _identity(args)
+
     def report(
         conn: sqlite3.Connection,
         categories: tuple[str, ...],
         names: dict[str, str] | None,
     ) -> dict[str, object]:
-        return stats(conn, categories=categories, label_keys=names)
+        return stats(conn, categories=categories, label_keys=names, owners=owners, domains=domains)
 
     _emit(args, {**_counted(args, report), "ok": True})
     return 0
@@ -257,6 +260,7 @@ def _dry_run(args: argparse.Namespace) -> int:
     now = int(time.time()) if args.now is None else args.now
     config = None if not args.rules else load_rules(Path(args.rules))
     export_path, sample, seed = _export_args(args)
+    owners, domains = _identity(args)
 
     def report(
         conn: sqlite3.Connection,
@@ -272,10 +276,16 @@ def _dry_run(args: argparse.Namespace) -> int:
             export_path=export_path,
             sample=sample,
             seed=seed,
+            owners=owners,
+            domains=domains,
         )
 
     _emit(args, {**_counted(args, report), "ok": True})
     return 0
+
+
+def _identity(args: argparse.Namespace) -> tuple[frozenset[str], frozenset[str]]:
+    return account_identity(config_path(args.config), canonical_alias(args.account))
 
 
 def _export_args(args: argparse.Namespace) -> tuple[Path | None, int | None, int]:
