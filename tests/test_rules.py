@@ -42,6 +42,46 @@ class RulesEngineTest(unittest.TestCase):
         self.assertNotIn("secretbodyqx", blob)
         self.assertIn("STARRED", blob)
 
+    def test_spam_and_trash_follow_the_same_rules_as_a_plain_thread(self) -> None:
+        spam_reply = self._thread("hello there", labels=[("SPAM", "SPAM", None)])
+        trash_reply = self._thread("hello there", labels=[("TRASH", "TRASH", None)])
+        spam_action = self._thread(
+            "please send the file",
+            labels=[("SPAM", "SPAM", None)],
+            headers=[("list-unsubscribe", "<https://example.com/unsub>")],
+        )
+        trash_action = self._thread(
+            "please send the file",
+            labels=[("TRASH", "TRASH", None)],
+            headers=[("list-unsubscribe", "<https://example.com/unsub>")],
+        )
+        spam_else = self._thread("note", labels=[("SPAM", "SPAM", None)], from_me=1)
+        apply_rules(self.conn, now=NOW, config=self.config)
+        self.assertEqual(self._current(spam_reply)["rule_id"], "5")
+        self.assertEqual(self._current(spam_reply)["next_state"], "reply")
+        self.assertEqual(self._current(trash_reply)["rule_id"], "5")
+        self.assertEqual(self._current(trash_reply)["next_state"], "reply")
+        self.assertEqual(self._current(spam_action)["rule_id"], "7")
+        self.assertEqual(self._current(spam_action)["next_state"], "action")
+        self.assertEqual(self._current(trash_action)["rule_id"], "7")
+        self.assertEqual(self._current(trash_action)["next_state"], "action")
+        self.assertEqual(self._current(spam_else)["rule_id"], "else")
+        self.assertEqual(self._current(spam_else)["next_state"], "needs_review")
+
+    def test_important_alone_is_rule_0_and_else_is_the_other_needs_review(self) -> None:
+        important = self._thread("hello there", labels=[("IMPORTANT", "IMPORTANT", None)])
+        starred = self._thread("hello there", labels=[("STARRED", "STARRED", None)])
+        plain = self._thread("hello there")
+        fallthrough = self._thread("note", from_me=1)
+        apply_rules(self.conn, now=NOW, config=self.config)
+        self.assertEqual(self._current(important)["rule_id"], "0")
+        self.assertEqual(self._current(important)["next_state"], "needs_review")
+        self.assertEqual(self._current(starred)["rule_id"], "0")
+        self.assertEqual(self._current(plain)["rule_id"], "5")
+        self.assertEqual(self._current(plain)["next_state"], "reply")
+        self.assertEqual(self._current(fallthrough)["rule_id"], "else")
+        self.assertEqual(self._current(fallthrough)["next_state"], "needs_review")
+
     def test_muted_thread_is_noise_and_finance_is_not(self) -> None:
         muted = self._thread("hello", mute=True)
         finance = self._thread(
