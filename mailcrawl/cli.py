@@ -239,7 +239,14 @@ def _rules(args: argparse.Namespace) -> int:
 
 
 def _stats(args: argparse.Namespace) -> int:
-    _emit(args, {**_counted(args, stats), "ok": True})
+    def report(
+        conn: sqlite3.Connection,
+        categories: tuple[str, ...],
+        names: dict[str, str] | None,
+    ) -> dict[str, object]:
+        return stats(conn, categories=categories, label_keys=names)
+
+    _emit(args, {**_counted(args, report), "ok": True})
     return 0
 
 
@@ -247,8 +254,12 @@ def _dry_run(args: argparse.Namespace) -> int:
     now = int(time.time()) if args.now is None else args.now
     config = None if not args.rules else load_rules(Path(args.rules))
 
-    def report(conn: sqlite3.Connection, categories: tuple[str, ...]) -> dict[str, object]:
-        return dry_run(conn, categories=categories, now=now, config=config)
+    def report(
+        conn: sqlite3.Connection,
+        categories: tuple[str, ...],
+        names: dict[str, str] | None,
+    ) -> dict[str, object]:
+        return dry_run(conn, categories=categories, now=now, config=config, label_keys=names)
 
     _emit(args, {**_counted(args, report), "ok": True})
     return 0
@@ -271,7 +282,8 @@ def _counted(args: argparse.Namespace, report) -> dict[str, object]:
     loaded = None if catalogue is None else load_taxonomy(catalogue)
     conn = _account_db(args)
     try:
-        counted = report(conn, categories=active_categories(loaded, alias))
+        names = None if loaded is None else loaded.names_for(alias)
+        counted = report(conn, active_categories(loaded, alias), names)
         absent = [] if loaded is None else missing_labels(loaded, alias, present_label_names(conn))
     finally:
         conn.close()
