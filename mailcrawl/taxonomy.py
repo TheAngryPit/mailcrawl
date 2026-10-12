@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -12,6 +11,27 @@ from pathlib import Path
 
 from mailcrawl.configfile import taxonomy_path
 from mailcrawl.paths import UsageError
+
+GMAIL_SYSTEM = (
+    "INBOX",
+    "SENT",
+    "STARRED",
+    "IMPORTANT",
+    "UNREAD",
+    "DRAFT",
+    "SPAM",
+    "TRASH",
+    "CHAT",
+)
+GMAIL_TABS = (
+    "CATEGORY_PERSONAL",
+    "CATEGORY_SOCIAL",
+    "CATEGORY_PROMOTIONS",
+    "CATEGORY_UPDATES",
+    "CATEGORY_FORUMS",
+)
+GMAIL_CATEGORIES = GMAIL_SYSTEM + GMAIL_TABS
+GMAIL_SET = frozenset(GMAIL_CATEGORIES)
 
 CONTENT = (
     "newsletter",
@@ -24,21 +44,9 @@ CONTENT = (
     "correspondence",
 )
 ORIGIN = ("human", "automated")
-CATEGORIES = CONTENT + ORIGIN
-CATEGORY_SET = frozenset(CATEGORIES)
-
-GENERIC_LABELS = {
-    "CATEGORY_PROMOTIONS": "newsletter",
-    "CATEGORY_UPDATES": "notification",
-    "CATEGORY_PERSONAL": "correspondence",
-}
-NO_GENERIC_SIGNAL = tuple(
-    name for name in CATEGORIES if name not in set(GENERIC_LABELS.values()) and name != "automated"
-)
 
 _ACCOUNTS = frozenset({"thehive", "vcl", "personal"})
 _META = frozenset({"synthetic", "note"})
-_AUTO_HEADERS = frozenset({"list-unsubscribe", "list-id"})
 
 
 @dataclass(frozen=True)
@@ -69,29 +77,53 @@ class Taxonomy:
 
 
 def axis_of(category: str) -> str:
+    if category in GMAIL_SET:
+        return "gmail"
     if category in ORIGIN:
         return "origin"
     return "content type"
 
 
 def generic_category(gmail_label_id: str) -> str | None:
-    return GENERIC_LABELS.get(gmail_label_id)
+    if gmail_label_id in GMAIL_SET:
+        return gmail_label_id
+    return None
 
 
-def header_is_automated(headers: Iterable[tuple[str, str]]) -> bool:
-    for name, value in headers:
-        key = str(name).strip().lower()
-        if key in _AUTO_HEADERS:
-            return True
-        if key == "precedence" and re.search(r"(?<!\w)bulk(?!\w)", str(value).strip().lower()):
-            return True
-    return False
+def active_categories(taxonomy: Taxonomy | None, alias: str) -> tuple[str, ...]:
+    if taxonomy is None:
+        return GMAIL_CATEGORIES
+    found = list(GMAIL_CATEGORIES)
+    seen = set(found)
+    for name in taxonomy.names_for(alias).values():
+        if name not in seen:
+            found.append(name)
+            seen.add(name)
+    return tuple(found)
 
 
-def empty_no_override(has_override: bool) -> list[str]:
-    if has_override:
-        return []
-    return sorted(NO_GENERIC_SIGNAL)
+def inactive_content_rules(categories: Iterable[str]) -> list[str]:
+    present = set(categories)
+    inactive: list[str] = []
+    content = bool({"newsletter", "job_alert", "notification"} & present) and "automated" in present
+    if not content:
+        inactive.append("2")
+    if "newsletter" not in present:
+        inactive.append("2-read")
+    if not ({"invoice_receipt", "purchase_delivery"} & present):
+        inactive.append("3")
+    if "account_security" not in present:
+        inactive.append("4")
+    return inactive
+
+
+def inactive_reason(categories: Iterable[str]) -> str | None:
+    present = set(categories)
+    if not inactive_content_rules(present):
+        return None
+    if present <= GMAIL_SET:
+        return "gmail_default"
+    return "schema"
 
 
 def resolve_taxonomy(flag: str | None, config: Path) -> Path | None:
@@ -154,8 +186,8 @@ def _existing(path: Path, shown: str) -> Path:
 def _categories(table: dict[str, object]) -> dict[str, tuple[str, ...]]:
     mapped: dict[str, tuple[str, ...]] = {}
     for category, names in table.items():
-        if category not in CATEGORY_SET:
-            raise UsageError(f"unknown taxonomy category {category}")
+        if not isinstance(category, str) or not category.strip():
+            raise UsageError("taxonomy category needs a name")
         if not isinstance(names, list):
             raise UsageError(f"taxonomy category {category} needs a list of label names")
         clean: list[str] = []

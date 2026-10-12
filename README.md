@@ -52,11 +52,17 @@ python3 -m mailcrawl --json import mbox <file> --alias personal [--labels <label
 
 ## Customize the taxonomy
 
-The default taxonomy has two axes. Content type is `newsletter`, `job_alert`, `notification`, `invoice_receipt`, `purchase_delivery`, `account_security`, `contract`, and `correspondence`. Origin is `human` and `automated`.
+The default taxonomy is Gmail's own categories. That is the system labels plus `CATEGORY_PERSONAL`, `CATEGORY_SOCIAL`, `CATEGORY_PROMOTIONS`, `CATEGORY_UPDATES`, and `CATEGORY_FORUMS`. Nothing else is inferred. A `pseudo:` label is never a category. Rules that need a content type stay off. `dry-run` says so with `inactive_reason` `gmail_default` and lists rules `2`, `2-read`, `3`, and `4` in `inactive_rules`.
 
-With no override, only generic signals apply. `List-Unsubscribe`, `List-Id`, and `Precedence: bulk` mark `automated`. `CATEGORY_PROMOTIONS` marks `newsletter`. `CATEGORY_UPDATES` marks `notification`. `CATEGORY_PERSONAL` marks `correspondence`. Categories with no generic signal stay empty. `stats` and `dry-run` list them in `empty_no_override`. A `pseudo:` label is never a signal.
+One JSON file customizes this. `--taxonomy` is read first, then `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`. `pessoal` means `personal`. A bad file exits 2. A label the account does not have is a warning in `taxonomy_warnings`, and the command still succeeds.
 
-Put account-specific label names in one JSON file. `--taxonomy` is read first, then `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`. `pessoal` means `personal`. A bad file exits 2. A label the account does not have is a warning in `taxonomy_warnings`, and the command still succeeds.
+Map a custom label onto a Gmail category:
+
+```json
+{"default": {"CATEGORY_PROMOTIONS": ["Example type/Bulletin"]}}
+```
+
+Or opt into your own schema. The keys are the schema. This example turns on the content types rules already know:
 
 ```json
 {
@@ -69,7 +75,7 @@ Put account-specific label names in one JSON file. `--taxonomy` is read first, t
 }
 ```
 
-Real label names stay in that local file. The repository only has example names, in `testdata/catalogue/taxonomy.synthetic.json`.
+`testdata/catalogue/taxonomy.synthetic.json` is that example schema with example label names. It is not the default. Real label names stay in the local file.
 
 ## How agents use it
 

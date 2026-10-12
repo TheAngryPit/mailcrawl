@@ -87,32 +87,24 @@ class DefaultTaxonomyTest(unittest.TestCase):
         self.assertEqual(imported["taxonomy_warnings"], 0)
         self.assertEqual(imported["missing_labels"], [])
         keys = self._keys("personal")
-        self.assertEqual(keys["CATEGORY_PROMOTIONS"], "newsletter")
-        self.assertEqual(keys["CATEGORY_UPDATES"], "notification")
-        self.assertEqual(keys["CATEGORY_PERSONAL"], "correspondence")
+        self.assertEqual(keys["CATEGORY_PROMOTIONS"], "CATEGORY_PROMOTIONS")
+        self.assertEqual(keys["CATEGORY_UPDATES"], "CATEGORY_UPDATES")
+        self.assertEqual(keys["CATEGORY_PERSONAL"], "CATEGORY_PERSONAL")
+        self.assertEqual(keys["INBOX"], "INBOX")
         self.assertNotIn("pseudo:archived", keys)
         counted = self._run("stats", "--account", "personal")
         preview = self._run("dry-run", "--account", "personal")
-        self.assertEqual(counted["by_category"]["newsletter"], 1)
-        self.assertEqual(counted["by_category"]["notification"], 1)
-        self.assertEqual(counted["by_category"]["correspondence"], 1)
-        self.assertEqual(counted["by_category"]["automated"], 4)
-        self.assertEqual(counted["by_category"]["invoice_receipt"], 0)
-        self.assertEqual(counted["by_category"]["human"], 0)
-        self.assertEqual(
-            counted["empty_no_override"],
-            [
-                "account_security",
-                "contract",
-                "human",
-                "invoice_receipt",
-                "job_alert",
-                "purchase_delivery",
-            ],
-        )
+        self.assertEqual(counted["by_category"]["CATEGORY_PROMOTIONS"], 1)
+        self.assertEqual(counted["by_category"]["CATEGORY_UPDATES"], 1)
+        self.assertEqual(counted["by_category"]["CATEGORY_PERSONAL"], 1)
+        self.assertEqual(counted["by_category"]["INBOX"], 1)
+        self.assertNotIn("newsletter", counted["by_category"])
+        self.assertNotIn("automated", counted["by_category"])
+        self.assertNotIn("invoice_receipt", counted["by_category"])
         self.assertEqual(preview["by_category"], counted["by_category"])
-        self.assertEqual(preview["empty_no_override"], counted["empty_no_override"])
-        self.assertNotIn("pseudo:archived", json.dumps(counted["by_category"]))
+        self.assertEqual(preview["inactive_rules"], ["2", "2-read", "3", "4"])
+        self.assertEqual(preview["inactive_reason"], "gmail_default")
+        self.assertNotIn("inactive_rules", counted)
 
     def test_override_per_account_and_default_and_pessoal(self) -> None:
         export = self.home / "export"
@@ -169,10 +161,12 @@ class DefaultTaxonomyTest(unittest.TestCase):
         self.assertIsNone(self._keys("personal")["L2"])
         self.assertEqual(self._keys("personal")["L3"], "contract")
         counted = self._run("stats", "--account", "personal", "--taxonomy", str(override))
-        self.assertEqual(counted["empty_no_override"], [])
+        preview = self._run("dry-run", "--account", "personal", "--taxonomy", str(override))
         self.assertEqual(counted["by_category"]["newsletter"], 1)
         self.assertEqual(counted["by_category"]["contract"], 1)
         self.assertEqual(counted["taxonomy_warnings"], 0)
+        self.assertEqual(preview["inactive_rules"], ["2", "3", "4"])
+        self.assertEqual(preview["inactive_reason"], "schema")
 
     def test_validation_errors_exit_2(self) -> None:
         export = self.home / "export"
@@ -182,10 +176,6 @@ class DefaultTaxonomyTest(unittest.TestCase):
             "not-json": ("{", "taxonomy file is not valid JSON"),
             "not-object": ("[]", "taxonomy file must be a JSON object"),
             "unknown-account": ('{"work": {}}', "unknown taxonomy account work"),
-            "unknown-category": (
-                '{"default": {"not_a_category": ["Example/Shared"]}}',
-                "unknown taxonomy category not_a_category",
-            ),
             "not-a-list": (
                 '{"default": {"newsletter": "Example/Shared"}}',
                 "taxonomy category newsletter needs a list of label names",
@@ -211,6 +201,70 @@ class DefaultTaxonomyTest(unittest.TestCase):
             self.assertEqual(code, 2, name)
             self.assertIn(detail, str(doc.get("detail")))
             self.assertFalse(doc.get("ok"))
+
+    def test_custom_label_maps_onto_a_gmail_category(self) -> None:
+        export = self.home / "export"
+        _export(
+            export,
+            [{"example_label_id": "L1", "example_name": "Example/Bulletin", "example_kind": "user"}],
+            [_message(1, ["L1"])],
+        )
+        override = self.home / "gmail-map.json"
+        override.write_text(
+            json.dumps({"default": {"CATEGORY_PROMOTIONS": ["Example/Bulletin"]}}),
+            encoding="utf-8",
+        )
+        self._init("personal")
+        imported = self._run(
+            "import",
+            "gog-export",
+            "--account",
+            "personal",
+            "--dir",
+            str(export),
+            "--taxonomy",
+            str(override),
+        )
+        self.assertEqual(imported["taxonomy_warnings"], 0)
+        self.assertEqual(self._keys("personal")["L1"], "CATEGORY_PROMOTIONS")
+        preview = self._run("dry-run", "--account", "personal", "--taxonomy", str(override))
+        self.assertEqual(preview["inactive_reason"], "gmail_default")
+        self.assertEqual(preview["inactive_rules"], ["2", "2-read", "3", "4"])
+
+    def test_example_schema_turns_content_rules_on(self) -> None:
+        self._init("vcl")
+        preview = self._run(
+            "dry-run",
+            "--account",
+            "vcl",
+            "--taxonomy",
+            str(ROOT / "testdata" / "catalogue" / "taxonomy.synthetic.json"),
+        )
+        self.assertEqual(preview["inactive_rules"], [])
+        self.assertIsNone(preview["inactive_reason"])
+        self.assertGreater(preview["taxonomy_warnings"], 0)
+
+    def test_own_schema_category_is_accepted(self) -> None:
+        export = self.home / "export"
+        _export(export, [], [_message(1, ["INBOX"])])
+        override = self.home / "own.json"
+        override.write_text(
+            json.dumps({"default": {"not_a_category": ["Example/Shared"]}}),
+            encoding="utf-8",
+        )
+        self._init("personal")
+        imported = self._run(
+            "import",
+            "gog-export",
+            "--account",
+            "personal",
+            "--dir",
+            str(export),
+            "--taxonomy",
+            str(override),
+        )
+        self.assertEqual(imported["ok"], True)
+        self.assertEqual(imported["missing_labels"], ["Example/Shared"])
 
     def test_missing_label_is_a_warning(self) -> None:
         export = self.home / "export"
