@@ -1,5 +1,6 @@
 """stats and dry-run print counts and do not write."""
 
+import csv
 import io
 import json
 import os
@@ -9,7 +10,10 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 
+from mailcrawl.advise import Advice, AdviceCase
 from mailcrawl.cli import main
+from mailcrawl.report import dry_run
+from mailcrawl.rules import load_rules
 from mailcrawl.store import connect, init_account
 
 NOW = 1_700_000_000
@@ -125,6 +129,129 @@ class StatsDryRunTest(unittest.TestCase):
         blob = json.dumps({"stats": stats, "dry": dry})
         self.assertNotIn("@", blob)
         self.assertNotIn("secretbodyqx", blob)
+
+    def test_advise_fills_else_rows_and_leaves_the_rule(self) -> None:
+        self._else_thread()
+        plain_path = self.home / "plain.csv"
+        plain = self._run(
+            [
+                "--json",
+                "--home",
+                str(self.home),
+                "dry-run",
+                "--account",
+                "vcl",
+                "--now",
+                str(NOW),
+                "--rules",
+                str(RULES),
+                "--export-decisions",
+                str(plain_path),
+            ]
+        )
+        self.assertNotIn("advice", plain)
+        self.assertEqual(plain["by_rule"]["else"], 1)
+        self.assertEqual(plain["by_rule"]["5"], 1)
+        plain_rows = {row["gmail_thread_id"]: row for row in self._csv(plain_path)}
+        self.assertEqual(plain_rows["rules-else"]["rule"], "else")
+        self.assertEqual(plain_rows["rules-else"]["suggested_rule"], "")
+        self.assertEqual(plain_rows["rules-else"]["suggested_lane"], "")
+        self.assertEqual(plain_rows["rules-else"]["suggested_confidence"], "")
+        self.assertEqual(plain_rows["rules-2"]["suggested_rule"], "")
+        before = self._decision_count()
+
+        advised_path = self.home / "advised.csv"
+        flagged = self._run(
+            [
+                "--json",
+                "--home",
+                str(self.home),
+                "dry-run",
+                "--account",
+                "vcl",
+                "--now",
+                str(NOW),
+                "--rules",
+                str(RULES),
+                "--advise",
+                "--export-decisions",
+                str(advised_path),
+            ]
+        )
+        self.assertEqual(
+            flagged["advice"],
+            {"applied": False, "else_threads": 1, "model": "por definir"},
+        )
+        self.assertEqual(flagged["by_rule"]["else"], 1)
+        advised_rows = {row["gmail_thread_id"]: row for row in self._csv(advised_path)}
+        self.assertEqual(advised_rows["rules-else"]["rule"], "else")
+        self.assertEqual(advised_rows["rules-else"]["lane"], "imbox")
+        self.assertEqual(advised_rows["rules-else"]["suggested_rule"], "5")
+        self.assertEqual(advised_rows["rules-else"]["suggested_lane"], "imbox")
+        self.assertEqual(advised_rows["rules-else"]["suggested_confidence"], "0.00")
+        self.assertEqual(advised_rows["rules-1"]["rule"], "0")
+        self.assertEqual(advised_rows["rules-1"]["suggested_rule"], "")
+        self.assertEqual(advised_rows["rules-2"]["rule"], "5")
+        self.assertEqual(advised_rows["rules-2"]["suggested_confidence"], "")
+        self.assertEqual(self._decision_count(), before)
+        blob = advised_path.read_text(encoding="utf-8")
+        self.assertNotIn("secretbodyqx", blob)
+        self.assertNotIn("@", blob)
+
+    def test_a_caller_can_replace_the_stub(self) -> None:
+        self._else_thread()
+        seen: list[str] = []
+
+        class Fixed:
+            def advise(self, case: AdviceCase) -> Advice:
+                seen.append(case.rule_id)
+                return Advice("7", "paper_trail", "0.10")
+
+        conn = connect(self.db)
+        try:
+            report = dry_run(
+                conn,
+                now=NOW,
+                config=load_rules(RULES),
+                advisor=Fixed(),
+            )
+        finally:
+            conn.close()
+        self.assertEqual(seen, ["else"])
+        self.assertEqual(report["by_rule"]["else"], 1)
+        self.assertEqual(report["advice"]["applied"], False)
+        self.assertEqual(self._decision_count(), 0)
+
+    def _else_thread(self) -> None:
+        conn = connect(self.db)
+        try:
+            account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+            conn.execute(
+                "INSERT INTO senders(account_id, address_norm, domain) VALUES (?, ?, 'example.com')",
+                (account, "no-reply@example.com"),
+            )
+            sender = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            conn.execute(
+                "INSERT INTO threads(account_id, gmail_thread_id) VALUES (?, ?)",
+                (account, "rules-else"),
+            )
+            thread = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            conn.execute(
+                """
+                INSERT INTO messages(
+                  account_id, gmail_message_id, thread_pk, internal_date, sender_id,
+                  body_text, is_from_me, raw_sha256, provenance_hash, imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 'raw', 'prov', ?)
+                """,
+                (account, "rules-msg-else", thread, NOW - 86400, sender, "hello there", NOW),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _csv(self, path: Path) -> list[dict[str, str]]:
+        with path.open(encoding="utf-8", newline="") as handle:
+            return list(csv.DictReader(handle))
 
     def _run(self, argv: list[str]) -> dict[str, object]:
         buf = io.StringIO()

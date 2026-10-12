@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from mailcrawl.advise import StubAdvisor
 from mailcrawl.configfile import account_email, account_identity, write_account
 from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
@@ -118,6 +119,7 @@ def _parser() -> argparse.ArgumentParser:
     preview.add_argument("--export-decisions")
     preview.add_argument("--sample", type=int)
     preview.add_argument("--seed", type=int)
+    preview.add_argument("--advise", action="store_true")
 
     fill = sub.add_parser("backfill")
     fill.add_argument("--account", required=True)
@@ -296,6 +298,7 @@ def _dry_run(args: argparse.Namespace) -> int:
             domains=domains,
             security_senders=security_senders,
             test_recipients=test_recipients,
+            advisor=StubAdvisor() if args.advise else None,
         )
 
     _emit(args, {**_counted(args, report), "ok": True})

@@ -9,7 +9,9 @@ import sqlite3
 import time
 from collections.abc import Iterable
 from pathlib import Path
+from typing import NamedTuple
 
+from mailcrawl.advise import MODEL_NAME, AdviceCase, Advisor
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.rules import RulesConfig, bundled_rules_path, load_rules, preview_rules
 from mailcrawl.taxonomy import (
@@ -81,6 +83,7 @@ def dry_run(
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
+    advisor: Advisor | None = None,
 ) -> dict[str, object]:
     backfill_categories(conn)
     active = _active(categories)
@@ -93,7 +96,7 @@ def dry_run(
     by_sender: dict[str, int] = {}
     by_month: dict[str, int] = {}
     decisions_by_category: dict[str, dict[str, int]] = {}
-    export_rows: list[tuple[str, str, str, str]] = []
+    export_rows: list[_ExportRow] = []
     undecided = 0
     for preview in preview_rules(
         conn,
@@ -110,11 +113,24 @@ def dry_run(
         reported = _reported_state(state, rule_id)
         by_state[reported] = by_state.get(reported, 0) + 1
         by_rule[rule_id] = by_rule.get(rule_id, 0) + 1
+        suggestion = ("", "", "")
         if rule_id == "else":
             undecided += 1
+            if advisor is not None:
+                advice = advisor.advise(
+                    AdviceCase(preview.thread_pk, rule_id, preview.lane)
+                )
+                suggestion = (advice.rule_id, advice.lane, advice.confidence)
         if export_path is not None:
             export_rows.append(
-                _export_row(conn, preview.thread_pk, rule_id, preview.lane, label_keys)
+                _export_row(
+                    conn,
+                    preview.thread_pk,
+                    rule_id,
+                    preview.lane,
+                    label_keys,
+                    suggestion,
+                )
             )
         for key in _thread_categories(conn, preview.thread_pk, active, label_keys):
             bucket = decisions_by_category.setdefault(key, {})
@@ -173,6 +189,12 @@ def dry_run(
         "inactive_rules": inactive_content_rules(active),
         "undecided": undecided,
     }
+    if advisor is not None:
+        counted["advice"] = {
+            "applied": False,
+            "else_threads": undecided,
+            "model": MODEL_NAME,
+        }
     if label_keys is not None:
         counted["override_matches"] = _override_matches(conn, label_keys)
     if export_path is not None:
@@ -181,18 +203,37 @@ def dry_run(
     return counted
 
 
+class _ExportRow(NamedTuple):
+    gmail_thread_id: str
+    rule: str
+    lane: str
+    override_match: str
+    suggested_rule: str
+    suggested_lane: str
+    suggested_confidence: str
+
+
 def _export_row(
     conn: sqlite3.Connection,
     thread_pk: int,
     rule_id: str,
     lane: str,
     label_keys: dict[str, tuple[str, ...]] | None,
-) -> tuple[str, str, str, str]:
+    suggestion: tuple[str, str, str],
+) -> _ExportRow:
     thread_id = conn.execute(
         "SELECT gmail_thread_id FROM threads WHERE thread_pk = ?",
         (thread_pk,),
     ).fetchone()
-    return (str(thread_id[0]), rule_id, lane, _override_cell(conn, thread_pk, label_keys))
+    return _ExportRow(
+        str(thread_id[0]),
+        rule_id,
+        lane,
+        _override_cell(conn, thread_pk, label_keys),
+        suggestion[0],
+        suggestion[1],
+        suggestion[2],
+    )
 
 
 def _override_cell(
@@ -222,16 +263,16 @@ def _override_cell(
 
 
 def _stratified(
-    rows: list[tuple[str, str, str, str]],
+    rows: list[_ExportRow],
     count: int,
     seed: int,
-) -> list[tuple[str, str, str, str]]:
-    grouped: dict[str, list[tuple[str, str, str, str]]] = {}
+) -> list[_ExportRow]:
+    grouped: dict[str, list[_ExportRow]] = {}
     for row in rows:
-        grouped.setdefault(row[1], []).append(row)
+        grouped.setdefault(row.rule, []).append(row)
     rng = random.Random(seed)
-    chosen: list[tuple[str, str, str, str]] = []
-    rest: list[tuple[str, str, str, str]] = []
+    chosen: list[_ExportRow] = []
+    rest: list[_ExportRow] = []
     for rule in sorted(grouped):
         bucket = list(grouped[rule])
         rng.shuffle(bucket)
@@ -243,11 +284,21 @@ def _stratified(
     return chosen
 
 
-def _write_decisions(path: Path, rows: list[tuple[str, str, str, str]]) -> int:
-    ordered = sorted(rows, key=lambda row: row[0])
+def _write_decisions(path: Path, rows: list[_ExportRow]) -> int:
+    ordered = sorted(rows, key=lambda row: row.gmail_thread_id)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
-        writer.writerow(["gmail_thread_id", "rule", "lane", "override_match"])
+        writer.writerow(
+            [
+                "gmail_thread_id",
+                "rule",
+                "lane",
+                "override_match",
+                "suggested_rule",
+                "suggested_lane",
+                "suggested_confidence",
+            ]
+        )
         writer.writerows(ordered)
     return len(ordered)
 
