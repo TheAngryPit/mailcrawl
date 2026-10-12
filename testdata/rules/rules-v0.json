@@ -1,7 +1,7 @@
 {
   "schema": "mailcrawl.rules.v0",
   "synthetic": true,
-  "rules_version": "rules-v0",
+  "rules_version": "rules-v1",
   "read_later_expiry_days": 30,
   "review_days": 7,
   "unrecognized_days": 7,

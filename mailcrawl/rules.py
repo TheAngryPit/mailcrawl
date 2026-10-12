@@ -11,7 +11,7 @@ from pathlib import Path
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.taxonomy import CONTENT, ORIGIN
 
-RULES_VERSION = "rules-v0"
+RULES_VERSION = "rules-v1"
 _DAY = 86400
 _KEY_ROLES = CONTENT + ORIGIN
 
@@ -275,6 +275,16 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
             0,
             _labels(facts.keys.get("account_security", ())) + ({"type": "rule", "name": "4"},),
         )
+    if facts.bin_labels:
+        return _outcome(
+            "resolved",
+            "spam-trash",
+            "screened_out",
+            None,
+            None,
+            0,
+            _labels(facts.bin_labels) + ({"type": "rule", "name": "spam-trash"},),
+        )
     if facts.human and not facts.last_from_me:
         priority = facts.priority if _priority_ok(facts.priority) else None
         evidence: tuple[dict[str, object], ...] = ({"type": "rule", "name": "5"},)
@@ -310,6 +320,7 @@ def _structural_noise(facts: "_Facts") -> bool:
 class _Facts:
     starred: bool
     star_labels: tuple[dict[str, object], ...]
+    bin_labels: tuple[dict[str, object], ...]
     protected: bool
     muted: bool
     denied: bool
@@ -344,6 +355,7 @@ def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfi
     ).fetchone()
     key_hits: dict[str, list[dict[str, object]]] = {role: [] for role in _KEY_ROLES}
     star_labels: list[dict[str, object]] = []
+    bin_labels: list[dict[str, object]] = []
     listish = False
     human_label = False
     automated_label = False
@@ -352,8 +364,10 @@ def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfi
     for message in messages:
         labels = _message_labels(conn, int(message["msg_pk"]))
         for label in labels:
-            if label["id"] in ("STARRED", "IMPORTANT"):
+            if label["id"] == "STARRED":
                 star_labels.append(label)
+            if label["id"] in ("SPAM", "TRASH"):
+                bin_labels.append(label)
             for role, key in config.keys.items():
                 if label["key"] == key:
                     key_hits[role].append(label)
@@ -393,6 +407,7 @@ def _load(conn: sqlite3.Connection, thread_pk: int, now: int, config: RulesConfi
     return _Facts(
         starred=bool(star_labels),
         star_labels=tuple(star_labels),
+        bin_labels=tuple(bin_labels),
         protected=protected,
         muted=muted,
         denied=denied,
