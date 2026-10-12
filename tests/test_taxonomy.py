@@ -648,6 +648,102 @@ class DefaultTaxonomyTest(unittest.TestCase):
         )
         self.assertEqual(self._keys("personal")["L1"], "correspondence")
 
+    def test_one_label_maps_to_several_categories(self) -> None:
+        export = self.home / "export"
+        _export(
+            export,
+            [
+                {"example_label_id": "L1", "example_name": "Example/Source", "example_kind": "user"},
+                {"example_label_id": "L2", "example_name": "Example/Both", "example_kind": "user"},
+            ],
+            [
+                _message(
+                    1,
+                    ["L1"],
+                    {"list-unsubscribe": "<https://example.com/unsub>"},
+                    body="hello there",
+                ),
+                _message(2, ["L1"], body="A security alert was opened"),
+                _message(3, ["L2"], body="hello there"),
+            ],
+        )
+        override = self.home / "multi.json"
+        override.write_text(
+            json.dumps(
+                {
+                    "synthetic": True,
+                    "default": {
+                        "automated": ["Example/Source", "Example/Both"],
+                        "notification": ["Example/Source"],
+                        "account_security": ["Example/Source"],
+                        "human": ["Example/Both"],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        self._init("personal")
+        imported = self._run(
+            "import",
+            "gog-export",
+            "--account",
+            "personal",
+            "--dir",
+            str(export),
+            "--taxonomy",
+            str(override),
+        )
+        self.assertEqual(imported["ok"], True)
+        self.assertIsNone(self._keys("personal")["L1"])
+        self.assertIsNone(self._keys("personal")["L2"])
+        preview = self._run(
+            "dry-run",
+            "--account",
+            "personal",
+            "--taxonomy",
+            str(override),
+            "--now",
+            "1700000000",
+            "--rules",
+            str(ROOT / "testdata" / "rules" / "rules-v0.json"),
+        )
+        self.assertEqual(preview["inactive_rules"], ["2-read", "3"])
+        self.assertEqual(preview["inactive_reason"], "schema")
+        matches = preview["override_matches"]
+        self.assertEqual(matches["automated"], {"messages": 3, "threads": 3})
+        self.assertEqual(matches["notification"], {"messages": 2, "threads": 2})
+        self.assertEqual(matches["human"], {"messages": 1, "threads": 1})
+        self.assertEqual(preview["by_rule"]["2"], 1)
+        self.assertEqual(preview["by_rule"]["4"], 1)
+        self.assertNotIn("5", preview["by_rule"])
+        exported = self.home / "decisions.csv"
+        self._run(
+            "dry-run",
+            "--account",
+            "personal",
+            "--taxonomy",
+            str(override),
+            "--now",
+            "1700000000",
+            "--rules",
+            str(ROOT / "testdata" / "rules" / "rules-v0.json"),
+            "--export-decisions",
+            str(exported),
+        )
+        rows = {row["gmail_thread_id"]: row for row in self._csv(exported)}
+        self.assertEqual(rows["tax-thread-1"]["rule"], "2")
+        self.assertEqual(rows["tax-thread-2"]["rule"], "4")
+        self.assertNotEqual(rows["tax-thread-3"]["rule"], "5")
+        self.assertEqual(rows["tax-thread-1"]["override_match"], "account_security|automated|notification")
+        self.assertEqual(self._decision_count("personal"), 0)
+
+    def _decision_count(self, alias: str) -> int:
+        conn = connect(self.home / f"{alias}.db")
+        try:
+            return int(conn.execute("SELECT count(*) FROM decisions").fetchone()[0])
+        finally:
+            conn.close()
+
     def _init(self, alias: str, *extra: str) -> None:
         code = main(["--json", "--home", str(self.home), *extra, "init", "--account", alias, "--email", "ada@example.com"])
         self.assertEqual(code, 0)

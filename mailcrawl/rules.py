@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
-from mailcrawl.taxonomy import CONTENT, ORIGIN, effective_key
+from mailcrawl.taxonomy import CONTENT, ORIGIN, effective_keys
 from mailcrawl.textnorm import parse_address
 
 RULES_VERSION = "rules-v3"
@@ -104,7 +104,7 @@ def preview_rules(
     *,
     now: int,
     config: RulesConfig,
-    label_keys: dict[str, str] | None = None,
+    label_keys: dict[str, tuple[str, ...]] | None = None,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
@@ -495,7 +495,7 @@ def _load(
     thread_pk: int,
     now: int,
     config: RulesConfig,
-    label_keys: dict[str, str] | None = None,
+    label_keys: dict[str, tuple[str, ...]] | None = None,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
@@ -657,7 +657,7 @@ def _load(
 def _message_labels(
     conn: sqlite3.Connection,
     msg_pk: int,
-    label_keys: dict[str, str] | None = None,
+    label_keys: dict[str, tuple[str, ...]] | None = None,
 ) -> list[dict[str, object]]:
     rows = conn.execute(
         f"""
@@ -673,18 +673,22 @@ def _message_labels(
     labels: list[dict[str, object]] = []
     for row in rows:
         stored = row["catalogue_key"]
-        labels.append(
-            {
-                "type": "label",
-                "id": row["gmail_label_id"],
-                "name": row["name"],
-                "key": effective_key(
-                    str(row["name"]),
-                    None if stored is None else str(stored),
-                    label_keys,
-                ),
-            }
+        keys = effective_keys(
+            str(row["name"]),
+            None if stored is None else str(stored),
+            label_keys,
         )
+        if not keys:
+            keys = (None,)
+        for key in keys:
+            labels.append(
+                {
+                    "type": "label",
+                    "id": row["gmail_label_id"],
+                    "name": row["name"],
+                    "key": key,
+                }
+            )
     return labels
 
 
