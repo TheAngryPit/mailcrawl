@@ -271,6 +271,106 @@ class RulesEngineTest(unittest.TestCase):
         self.assertEqual(self._current(to_self)["rule_id"], "housekeeping")
         self.assertNotEqual(self._current(to_self)["next_state"], "waiting")
 
+    def test_rules_v3_uses_locale_phrases_and_tabs(self) -> None:
+        notes = self._thread(
+            "notas da reunião",
+            labels=[("La", "Example origin/Machine", "automated")],
+        )
+        promo = self._thread(
+            "hello there",
+            labels=[
+                ("Lh", "Example origin/Person", "human"),
+                ("CATEGORY_PROMOTIONS", "CATEGORY_PROMOTIONS", "CATEGORY_PROMOTIONS"),
+            ],
+        )
+        human_invoice = self._thread("hello there")
+        self._message(human_invoice, "Your invoice is attached", NOW - 100, from_me=0)
+        billing = self._thread("Payment failed for this order")
+        auto_header = self._thread(
+            "please send the file",
+            headers=[("auto-submitted", "auto-generated")],
+        )
+        auto_subject = self._thread("hello there", subject="Resposta automática")
+        mine = self._thread("Thanks", from_me=1)
+        template = self._thread(
+            "<table><tr><td>Hello there friend</td></tr><tr><td>Second row</td></tr></table>",
+            from_me=1,
+        )
+        confirm = self._thread("Diz-me se chegou.", from_me=1)
+        updates = self._thread(
+            "A security alert was opened",
+            labels=[("CATEGORY_UPDATES", "CATEGORY_UPDATES", "CATEGORY_UPDATES")],
+        )
+        listed = self._thread(
+            "hello there",
+            labels=[("Lh", "Example origin/Person", "human")],
+            headers=[("list-unsubscribe", "<https://example.com/unsub>")],
+        )
+        bulk = self._thread(
+            "hello there",
+            labels=[("Lh", "Example origin/Person", "human")],
+            headers=[("precedence", "bulk")],
+        )
+        info = self._thread(
+            "hello there",
+            address="info@example.com",
+            labels=[("Lh", "Example origin/Person", "human")],
+        )
+        newsletter = self._thread(
+            "hello there",
+            address="newsletter@example.com",
+            labels=[("Lh", "Example origin/Person", "human")],
+        )
+        mail_domain = self._thread(
+            "hello there",
+            address="person@mail.example.com",
+            labels=[("Lh", "Example origin/Person", "human")],
+        )
+        security_else = self._thread(
+            "hello there",
+            labels=[("Ls", "Example type/Account", "account_security")],
+            headers=[("list-unsubscribe", "<https://example.com/unsub>")],
+        )
+        allow = self._thread("hello there", address="alerts@example.com")
+        sales = self._thread("A special offer for you", address="ada.sales@example.com")
+        self._thread("hello there", address="ada.known@example.com")
+        repeat = self._thread("A special offer for you", address="ada.known@example.com")
+        apply_rules(
+            self.conn,
+            now=NOW,
+            config=self.config,
+            security_senders=frozenset({"alerts@example.com"}),
+        )
+        self.assertEqual(self._current(notes)["rule_id"], "auto-ref")
+        self.assertEqual(self._current(notes)["lane"], "paper_trail")
+        self.assertEqual(self._current(promo)["rule_id"], "2")
+        self.assertNotEqual(self._current(promo)["rule_id"], "5")
+        self.assertEqual(self._current(human_invoice)["rule_id"], "5")
+        self.assertEqual(self._current(billing)["rule_id"], "7")
+        self.assertEqual(self._current(billing)["next_state"], "action")
+        self.assertNotEqual(self._current(billing)["next_state"], "reference")
+        self.assertEqual(self._current(auto_header)["rule_id"], "auto-reply")
+        self.assertEqual(self._current(auto_header)["next_state"], "noise")
+        self.assertEqual(self._current(auto_subject)["rule_id"], "auto-reply")
+        self.assertEqual(self._current(mine)["rule_id"], "8")
+        self.assertEqual(self._current(mine)["next_state"], "resolved")
+        self.assertEqual(self._current(template)["rule_id"], "test-send")
+        self.assertEqual(self._current(template)["next_state"], "resolved")
+        self.assertEqual(self._current(confirm)["rule_id"], "6")
+        self.assertEqual(self._current(confirm)["next_state"], "waiting")
+        self.assertEqual(self._current(updates)["rule_id"], "4")
+        self.assertNotEqual(self._current(listed)["rule_id"], "5")
+        self.assertNotEqual(self._current(bulk)["rule_id"], "5")
+        self.assertNotEqual(self._current(info)["rule_id"], "5")
+        self.assertEqual(self._current(newsletter)["rule_id"], "2")
+        self.assertNotEqual(self._current(mail_domain)["rule_id"], "5")
+        self.assertEqual(self._current(security_else)["rule_id"], "4")
+        self.assertNotEqual(self._current(security_else)["rule_id"], "else")
+        self.assertEqual(self._current(allow)["rule_id"], "4")
+        self.assertEqual(self._current(sales)["rule_id"], "screener")
+        self.assertEqual(self._current(sales)["next_state"], "screener")
+        self.assertEqual(self._current(repeat)["rule_id"], "5")
+
     def test_owner_domain_is_from_me_through_config(self) -> None:
         self._thread("Can you confirm?", address="owner@example.com")
         self.conn.commit()
@@ -303,7 +403,7 @@ class RulesEngineTest(unittest.TestCase):
             "SELECT rule_id FROM decisions WHERE superseded_by IS NULL"
         ).fetchone()
         self.assertIsNone(row)
-        owners, domains = account_identity(config, "vcl")
+        owners, domains, _security = account_identity(config, "vcl")
         preview = preview_rules(
             self.conn, now=NOW, config=self.config, owners=owners, domains=domains
         )
@@ -337,6 +437,7 @@ class RulesEngineTest(unittest.TestCase):
         mute: bool = False,
         address: str | None = None,
         to_hdr: str | None = None,
+        subject: str | None = None,
     ) -> int:
         self.n += 1
         sender_id = self._sender(address or f"bao{self.n}@example.com", sender_decision)
@@ -350,6 +451,7 @@ class RulesEngineTest(unittest.TestCase):
             labels=labels,
             headers=headers,
             to_hdr=to_hdr,
+            subject=subject,
         )
         if mute:
             self.conn.execute(
@@ -369,6 +471,7 @@ class RulesEngineTest(unittest.TestCase):
         labels: list[tuple[str, str, str | None]] | None = None,
         headers: list[tuple[str, str]] | None = None,
         to_hdr: str | None = None,
+        subject: str | None = None,
     ) -> None:
         self.n += 1
         if sender_id is None:
@@ -377,8 +480,8 @@ class RulesEngineTest(unittest.TestCase):
             """
             INSERT INTO messages(
               account_id, gmail_message_id, thread_pk, internal_date, sender_id,
-              body_text, is_from_me, to_hdr, raw_sha256, provenance_hash, imported_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'raw', 'prov', ?)
+              body_text, is_from_me, to_hdr, subject, raw_sha256, provenance_hash, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'raw', 'prov', ?)
             RETURNING msg_pk
             """,
             (
@@ -390,6 +493,7 @@ class RulesEngineTest(unittest.TestCase):
                 body,
                 from_me,
                 to_hdr,
+                subject,
                 when,
             ),
         ).fetchone()[0]
@@ -437,10 +541,19 @@ class RulesEngineTest(unittest.TestCase):
             """
             INSERT INTO senders(account_id, address_norm, domain)
             VALUES (?, ?, 'example.com')
+            ON CONFLICT(account_id, address_norm) DO NOTHING
             RETURNING sender_id
             """,
             (self.account, address),
         ).fetchone()
+        if row is None:
+            row = self.conn.execute(
+                """
+                SELECT sender_id FROM senders
+                WHERE account_id = ? AND address_norm = ?
+                """,
+                (self.account, address),
+            ).fetchone()
         sender_id = int(row[0])
         if decision is not None:
             status, route, priority = decision

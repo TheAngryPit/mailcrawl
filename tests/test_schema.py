@@ -83,7 +83,7 @@ class SchemaV1Test(unittest.TestCase):
             conn.execute("PRAGMA foreign_keys = ON")
             migrate(conn)
             migrate(conn)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], USER_VERSION)
             count = conn.execute(
                 "SELECT count(*) FROM sqlite_master WHERE name = 'messages'"
             ).fetchone()[0]
@@ -94,10 +94,10 @@ class SchemaV1Test(unittest.TestCase):
     def test_later_user_version_fails_closed(self) -> None:
         conn = sqlite3.connect(":memory:")
         try:
-            conn.execute("PRAGMA user_version = 3")
+            conn.execute("PRAGMA user_version = 4")
             with self.assertRaises(UnsupportedSchema):
                 migrate(conn)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
             names = {
                 row[0]
                 for row in conn.execute(
@@ -157,7 +157,7 @@ class SchemaV1Test(unittest.TestCase):
                 "INSERT INTO attachments(msg_pk, extracted_text) VALUES (1, 'attachwordqx')"
             )
             migrate(conn)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], USER_VERSION)
             raw, cleaned = conn.execute(
                 "SELECT body_text_raw, body_text FROM messages"
             ).fetchone()
@@ -194,6 +194,37 @@ class SchemaV1Test(unittest.TestCase):
                 self.assertNotIn(banned, names)
         finally:
             conn.close()
+
+    def test_v2_gains_the_screener_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "personal.db"
+            fresh = connect(path)
+            try:
+                fresh.execute("PRAGMA user_version = 2")
+                fresh.commit()
+            finally:
+                fresh.close()
+            again = connect(path)
+            try:
+                self.assertEqual(again.execute("PRAGMA user_version").fetchone()[0], USER_VERSION)
+                again.execute(
+                    "INSERT INTO accounts(alias, email_hash, created_at) VALUES (?,?,?)",
+                    ("personal", "abc", 1),
+                )
+                again.execute(
+                    "INSERT INTO threads(account_id, gmail_thread_id) VALUES (1, 'thread-1')"
+                )
+                again.execute(
+                    """
+                    INSERT INTO decisions(
+                      thread_pk, next_state, source, rules_version, evidence, created_at
+                    ) VALUES (1, 'screener', 'rule', 'rules-v3', '[]', 1)
+                    """
+                )
+                state = again.execute("SELECT next_state FROM decisions").fetchone()[0]
+                self.assertEqual(state, "screener")
+            finally:
+                again.close()
 
     def test_sender_route_read_and_waiting_needs_a_date(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

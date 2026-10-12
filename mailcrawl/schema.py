@@ -1,6 +1,6 @@
-"""SQLite schema v2. Ingest, FTS, and the empty phase 2 decision tables."""
+"""SQLite schema v2 tables. user_version 3 adds the screener decision state."""
 
-USER_VERSION = 2
+USER_VERSION = 3
 
 TABLES = (
     "accounts",
@@ -216,7 +216,7 @@ CREATE TABLE IF NOT EXISTS decisions (
   decision_id INTEGER PRIMARY KEY,
   thread_pk INTEGER NOT NULL REFERENCES threads,
   next_state TEXT NOT NULL CHECK (next_state IN (
-    'reply','action','waiting','read_later','reference','noise','needs_review','resolved'
+    'reply','action','waiting','read_later','reference','noise','needs_review','resolved','screener'
   )),
   priority INTEGER CHECK (priority BETWEEN 0 AND 3),
   owner TEXT CHECK (owner IN ('me','other','none')),

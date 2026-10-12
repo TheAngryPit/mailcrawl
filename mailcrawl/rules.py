@@ -12,7 +12,7 @@ from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.taxonomy import CONTENT, ORIGIN, effective_key
 from mailcrawl.textnorm import parse_address
 
-RULES_VERSION = "rules-v2"
+RULES_VERSION = "rules-v3"
 _DAY = 86400
 _KEY_ROLES = CONTENT + ORIGIN
 
@@ -32,6 +32,10 @@ class RulesConfig:
     receipt_words: tuple[str, ...]
     calendar_response: tuple[str, ...]
     automated_reference: tuple[str, ...]
+    billing_action: tuple[str, ...]
+    sales: tuple[str, ...]
+    security_wording: tuple[str, ...]
+    auto_reply_subject: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -68,14 +72,18 @@ def load_rules(path: Path) -> RulesConfig:
         review_days=int(document["review_days"]),
         unrecognized_days=int(document["unrecognized_days"]),
         keys=mapped,
-        question=_phrases(document.get("question")),
-        task=_phrases(document.get("task")),
-        closing=_phrases(document.get("closing")),
-        machine_local=_phrases(document.get("machine_local")),
-        transfer_notice=_phrases(document.get("transfer_notice")),
-        receipt_words=_phrases(document.get("receipt_words")),
-        calendar_response=_phrases(document.get("calendar_response")),
-        automated_reference=_phrases(document.get("automated_reference")),
+        question=_merged_phrases(document, "question"),
+        task=_merged_phrases(document, "task"),
+        closing=_merged_phrases(document, "closing"),
+        machine_local=_merged_phrases(document, "machine_local"),
+        transfer_notice=_merged_phrases(document, "transfer_notice"),
+        receipt_words=_merged_phrases(document, "receipt_words"),
+        calendar_response=_merged_phrases(document, "calendar_response"),
+        automated_reference=_merged_phrases(document, "automated_reference", also=("out_of_office",)),
+        billing_action=_merged_phrases(document, "billing_action"),
+        sales=_merged_phrases(document, "sales"),
+        security_wording=_merged_phrases(document, "security_wording"),
+        auto_reply_subject=_merged_phrases(document, "auto_reply_subject"),
     )
 
 
@@ -99,12 +107,15 @@ def preview_rules(
     label_keys: dict[str, str] | None = None,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
+    security_senders: frozenset[str] = frozenset(),
 ) -> list[Preview]:
     found: list[Preview] = []
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
     for thread in threads:
         thread_pk = int(thread[0])
-        facts = _load(conn, thread_pk, now, config, label_keys, owners, domains)
+        facts = _load(
+            conn, thread_pk, now, config, label_keys, owners, domains, security_senders
+        )
         outcome = _classify(facts, now, config)
         found.append(Preview(thread_pk, outcome.next_state, outcome.rule_id, outcome.lane))
     return found
@@ -117,11 +128,12 @@ def apply_rules(
     config: RulesConfig,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
+    security_senders: frozenset[str] = frozenset(),
 ) -> Coverage:
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
     for thread in threads:
         thread_pk = int(thread[0])
-        _apply_thread(conn, thread_pk, now, config, owners, domains)
+        _apply_thread(conn, thread_pk, now, config, owners, domains, security_senders)
     conn.commit()
     return coverage_counts(conn)
 
@@ -143,6 +155,10 @@ def coverage_counts(conn: sqlite3.Connection) -> Coverage:
 
 
 def _phrases(value: object) -> tuple[str, ...]:
+    return tuple(_phrase_items(value))
+
+
+def _phrase_items(value: object) -> list[str]:
     if not isinstance(value, list) or not value:
         raise ValueError("rules file needs a phrase list")
     phrases: list[str] = []
@@ -150,7 +166,33 @@ def _phrases(value: object) -> tuple[str, ...]:
         if not isinstance(item, str) or not item.strip():
             raise ValueError("rules phrase must be text")
         phrases.append(item.strip().lower())
-    return tuple(phrases)
+    return phrases
+
+
+def _merged_phrases(document: dict[str, object], name: str, *, also: tuple[str, ...] = ()) -> tuple[str, ...]:
+    locales = document.get("phrases")
+    if not isinstance(locales, dict) or "en" not in locales or "pt" not in locales:
+        raise ValueError("rules file needs en and pt phrase lists")
+    found: list[str] = []
+    for phrase_name in (name, *also):
+        top = document.get(phrase_name)
+        if isinstance(top, list):
+            found.extend(_phrase_items(top))
+        for locale in sorted(locales):
+            block = locales[locale]
+            if not isinstance(block, dict):
+                raise ValueError("phrase locale must be an object")
+            extra = block.get(phrase_name)
+            if extra is None:
+                continue
+            found.extend(_phrase_items(extra))
+    if not found:
+        raise ValueError(f"rules file needs {name}")
+    unique: list[str] = []
+    for phrase in found:
+        if phrase not in unique:
+            unique.append(phrase)
+    return tuple(unique)
 
 
 def _apply_thread(
@@ -160,8 +202,9 @@ def _apply_thread(
     config: RulesConfig,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
+    security_senders: frozenset[str] = frozenset(),
 ) -> None:
-    facts = _load(conn, thread_pk, now, config, None, owners, domains)
+    facts = _load(conn, thread_pk, now, config, None, owners, domains, security_senders)
     current = conn.execute(
         """
         SELECT decision_id, thread_pk, next_state, rule_id, lane, priority,
@@ -272,15 +315,21 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
             0,
             ({"type": "rule", "name": "2"},),
         )
+    if facts.newsletter_sender and not protected:
+        return _outcome("noise", "2", "feed", None, None, 0, ({"type": "rule", "name": "2"},))
+    if facts.promotions and not facts.custom_content() and not protected:
+        return _outcome("noise", "2", "feed", None, None, 0, ({"type": "rule", "name": "2"},))
+    if _any_phrase(facts.body, config.billing_action):
+        return _outcome("action", "7", "imbox", None, None, 0, ({"type": "rule", "name": "7"},))
     if (
         facts.has_key("invoice_receipt")
         or facts.has_key("purchase_delivery")
-        or _any_phrase(facts.body, config.receipt_words)
+        or (_receipt_words_apply(facts) and _any_phrase(facts.body, config.receipt_words))
     ):
         role = "invoice_receipt" if facts.has_key("invoice_receipt") else "purchase_delivery"
         evidence = _labels(facts.keys.get(role, ())) + ({"type": "rule", "name": "3"},)
         return _outcome("reference", "3", "paper_trail", None, None, 0, evidence)
-    if facts.real_security:
+    if facts.real_security or facts.security_sender or _tab_security(facts, config):
         fresh = facts.last_at is not None and (now - facts.last_at) < config.unrecognized_days * _DAY
         if facts.sender_known is False and fresh:
             return _outcome(
@@ -323,6 +372,16 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
             0,
             ({"type": "rule", "name": "housekeeping"},),
         )
+    if _auto_reply(facts, config) and not protected:
+        return _outcome(
+            "noise",
+            "auto-reply",
+            "feed",
+            None,
+            None,
+            0,
+            ({"type": "rule", "name": "auto-reply"},),
+        )
     if _automated_reference(facts, config):
         return _outcome(
             "reference",
@@ -333,8 +392,25 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
             0,
             ({"type": "rule", "name": "auto-ref"},),
         )
-    if not facts.last_from_me and _short_closing(facts.body, config) and not protected:
+    if facts.last_from_me and _template_body(facts.body) and not protected:
+        return _outcome(
+            "resolved",
+            "test-send",
+            "screened_out",
+            None,
+            None,
+            0,
+            ({"type": "rule", "name": "test-send"},),
+        )
+    if _short_closing(facts.body, config) and not protected:
         return _outcome("resolved", "8", "imbox", None, None, 0, ({"type": "rule", "name": "8"},))
+    if (
+        facts.human
+        and not facts.last_from_me
+        and facts.first_contact
+        and _any_phrase(facts.body, config.sales)
+    ):
+        return _outcome("screener", "screener", "imbox", None, None, 0, ({"type": "rule", "name": "screener"},))
     if facts.human and not facts.last_from_me:
         priority = facts.priority if _priority_ok(facts.priority) else None
         evidence: tuple[dict[str, object], ...] = ({"type": "rule", "name": "5"},)
@@ -356,6 +432,16 @@ def _classify(facts: "_Facts", now: int, config: RulesConfig) -> _Outcome:
     if _closing(facts.body, config) and not _question(facts.body, config) and not _task(facts.body, config):
         if not protected:
             return _outcome("resolved", "8", "imbox", None, None, 0, ({"type": "rule", "name": "8"},))
+    if facts.has_key("account_security"):
+        return _outcome(
+            "reference",
+            "4",
+            "paper_trail",
+            None,
+            None,
+            0,
+            _labels(facts.keys.get("account_security", ())) + ({"type": "rule", "name": "4"},),
+        )
     return _outcome("needs_review", "else", "imbox", None, None, 0, ({"type": "rule", "name": "else"},))
 
 
@@ -385,12 +471,23 @@ class _Facts:
     keys: dict[str, tuple[dict[str, object], ...]]
     listish: bool
     promotions: bool
+    updates: bool
     draft_only: bool
     real_security: bool
     to_self: bool
+    automated: bool
+    newsletter_sender: bool
+    security_sender: bool
+    first_contact: bool
+    message_count: int
+    subject: str
+    auto_submitted: bool
 
     def has_key(self, role: str) -> bool:
         return bool(self.keys.get(role))
+
+    def custom_content(self) -> bool:
+        return any(self.keys.get(role) for role in CONTENT)
 
 
 def _load(
@@ -401,12 +498,13 @@ def _load(
     label_keys: dict[str, str] | None = None,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
+    security_senders: frozenset[str] = frozenset(),
 ) -> _Facts:
     messages = conn.execute(
         """
         SELECT messages.msg_pk, messages.sender_id, messages.is_from_me,
                messages.internal_date, messages.body_text, messages.to_hdr,
-               senders.address_norm
+               messages.subject, senders.address_norm
         FROM messages
         LEFT JOIN senders ON senders.sender_id = messages.sender_id
         WHERE messages.thread_pk = ?
@@ -423,6 +521,9 @@ def _load(
     bin_labels: list[dict[str, object]] = []
     listish = False
     promotions = False
+    updates = False
+    blocks_human = False
+    auto_submitted = False
     human_label = False
     automated_label = False
     header_human = False
@@ -440,6 +541,8 @@ def _load(
                 has_draft = True
             if label["id"] == "CATEGORY_PROMOTIONS" or label["key"] == "CATEGORY_PROMOTIONS":
                 promotions = True
+            if label["id"] == "CATEGORY_UPDATES" or label["key"] == "CATEGORY_UPDATES":
+                updates = True
             for role, key in config.keys.items():
                 if label["key"] == key:
                     key_hits[role].append(label)
@@ -460,6 +563,10 @@ def _load(
                 header_human = True
         if _listish(conn, int(message["msg_pk"])):
             listish = True
+        if _blocks_human(conn, int(message["msg_pk"])):
+            blocks_human = True
+        if _auto_submitted(conn, int(message["msg_pk"])):
+            auto_submitted = True
     last = messages[-1] if messages else None
     sender_id = external_senders[-1] if external_senders else None
     decision = _sender_decision(conn, sender_id)
@@ -486,8 +593,11 @@ def _load(
     both_origins = human_label and automated_label
     human = (
         not machine_sender
+        and not _mail_domain(last_address)
         and not transfer
         and not both_origins
+        and not promotions
+        and not blocks_human
         and (human_label or (header_human and not automated_label))
     )
     real_security = bool(key_hits["account_security"]) and not listish and not promotions
@@ -498,6 +608,20 @@ def _load(
     if mute is not None and (mute["until"] is None or int(mute["until"]) >= now):
         muted = True
     to_hdr = None if last is None else last["to_hdr"]
+    subject = "" if last is None or last["subject"] is None else str(last["subject"])
+    replied = any(
+        bool(message["is_from_me"]) or _is_owner(message["address_norm"], owners, domains)
+        for message in messages
+    )
+    seen_threads = 0
+    if sender_id is not None:
+        seen_threads = int(
+            conn.execute(
+                "SELECT count(DISTINCT thread_pk) FROM messages WHERE sender_id = ?",
+                (sender_id,),
+            ).fetchone()[0]
+        )
+    address = "" if not isinstance(last_address, str) else last_address.strip().lower()
     return _Facts(
         starred=bool(star_labels),
         star_labels=tuple(star_labels),
@@ -516,9 +640,17 @@ def _load(
         keys={role: tuple(items) for role, items in key_hits.items()},
         listish=listish,
         promotions=promotions,
+        updates=updates,
         draft_only=bool(draft_flags) and all(draft_flags),
         real_security=real_security,
         to_self=last_from_me and _only_owners(to_hdr, owners, domains),
+        automated=automated_label,
+        newsletter_sender=_machine_address(last_address, ("newsletter",)),
+        security_sender=address in security_senders,
+        first_contact=seen_threads == 1 and not replied,
+        message_count=len(messages),
+        subject=subject,
+        auto_submitted=auto_submitted,
     )
 
 
@@ -571,6 +703,33 @@ def _header_human(conn: sqlite3.Connection, msg_pk: int) -> bool:
     if auto is not None and auto.strip().lower() != "no":
         return False
     return True
+
+
+def _blocks_human(conn: sqlite3.Connection, msg_pk: int) -> bool:
+    rows = conn.execute(
+        "SELECT name, value FROM headers WHERE msg_pk = ?",
+        (msg_pk,),
+    ).fetchall()
+    for row in rows:
+        name = str(row["name"]).lower()
+        value = str(row["value"]).strip().lower()
+        if name == "list-unsubscribe":
+            return True
+        if name == "precedence" and re.search(r"(?<!\w)bulk(?!\w)", value):
+            return True
+    return False
+
+
+def _auto_submitted(conn: sqlite3.Connection, msg_pk: int) -> bool:
+    rows = conn.execute(
+        "SELECT value FROM headers WHERE msg_pk = ? AND lower(name) = 'auto-submitted'",
+        (msg_pk,),
+    ).fetchall()
+    for row in rows:
+        value = str(row["value"]).strip().lower()
+        if value and value != "no":
+            return True
+    return False
 
 
 def _listish(conn: sqlite3.Connection, msg_pk: int) -> bool:
@@ -633,9 +792,41 @@ def _machine_address(address: object, tokens: tuple[str, ...]) -> bool:
     local = address.split("@", 1)[0].lower()
     parts = set(re.split(r"[._+\-]", local))
     for token in tokens:
-        if token == local or token in parts or token in local:
+        if token == local or token in parts:
+            return True
+        if "-" in token and local.startswith(token + "-"):
             return True
     return False
+
+
+def _mail_domain(address: object) -> bool:
+    if not isinstance(address, str) or "@" not in address:
+        return False
+    return address.rsplit("@", 1)[1].strip().lower().startswith("mail.")
+
+
+def _receipt_words_apply(facts: _Facts) -> bool:
+    return not (facts.human and facts.message_count > 1 and not facts.automated)
+
+
+def _tab_security(facts: _Facts, config: RulesConfig) -> bool:
+    if not facts.updates or facts.custom_content():
+        return False
+    text = f"{facts.subject}\n{facts.body}"
+    return _any_phrase(text, config.security_wording)
+
+
+def _auto_reply(facts: _Facts, config: RulesConfig) -> bool:
+    if facts.auto_submitted:
+        return True
+    return _any_phrase(facts.subject, config.auto_reply_subject)
+
+
+def _template_body(body: str) -> bool:
+    text = body.strip()
+    if len(text) < 40:
+        return False
+    return len(re.findall(r"</?[a-zA-Z][^>]*>", text)) >= 3
 
 
 def _any_phrase(body: str, phrases: tuple[str, ...]) -> bool:
@@ -666,14 +857,9 @@ def _short_closing(body: str, config: RulesConfig) -> bool:
 
 def _question(body: str, config: RulesConfig) -> bool:
     for line in body.splitlines():
-        stripped = line.strip()
-        if stripped.endswith("?"):
+        if line.strip().endswith("?"):
             return True
-        lowered = stripped.lower()
-        for phrase in config.question:
-            if lowered == phrase or lowered.startswith(phrase + " "):
-                return True
-    return False
+    return _any_phrase(body, config.question)
 
 
 def _task(body: str, config: RulesConfig) -> bool:
