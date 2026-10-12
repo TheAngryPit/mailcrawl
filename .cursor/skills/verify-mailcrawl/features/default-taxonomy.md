@@ -1,6 +1,6 @@
 # Default taxonomy
 
-The default taxonomy is Gmail's own categories. System labels and `CATEGORY_PERSONAL`, `CATEGORY_SOCIAL`, `CATEGORY_PROMOTIONS`, `CATEGORY_UPDATES`, and `CATEGORY_FORUMS` store their id as the category key. No other content type is invented. `--taxonomy` is one local JSON override. It maps label names, and that map wins over a stored `catalogue_key` while `dry-run` counts. It can map a custom label onto a Gmail category, or it can supply another schema. `dry-run` lists content-type rules that cannot fire. `override_matches` counts messages and threads per category and does not list label names.
+The default taxonomy is Gmail's own categories. System labels and `CATEGORY_PERSONAL`, `CATEGORY_SOCIAL`, `CATEGORY_PROMOTIONS`, `CATEGORY_UPDATES`, and `CATEGORY_FORUMS` store their id as the category key. No other content type is invented. `--taxonomy` is one local JSON override. It maps label names, including one name under several categories, and that map wins over a stored `catalogue_key` while `dry-run` counts. It can map a custom label onto a Gmail category, or it can supply another schema. `dry-run` lists content-type rules that cannot fire. `override_matches` counts messages and threads per category and does not list label names.
 
 ## Sub-features
 

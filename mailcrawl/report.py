@@ -16,7 +16,7 @@ from mailcrawl.taxonomy import (
     GMAIL_CATEGORIES,
     GMAIL_TABS,
     backfill_categories,
-    effective_key,
+    effective_keys,
     inactive_content_rules,
     inactive_reason,
 )
@@ -26,7 +26,7 @@ def stats(
     conn: sqlite3.Connection,
     *,
     categories: Iterable[str] | None = None,
-    label_keys: dict[str, str] | None = None,
+    label_keys: dict[str, tuple[str, ...]] | None = None,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
@@ -71,7 +71,7 @@ def dry_run(
     categories: Iterable[str] | None = None,
     now: int | None = None,
     config: RulesConfig | None = None,
-    label_keys: dict[str, str] | None = None,
+    label_keys: dict[str, tuple[str, ...]] | None = None,
     export_path: Path | None = None,
     sample: int | None = None,
     seed: int = 0,
@@ -182,7 +182,7 @@ def _export_row(
     thread_pk: int,
     rule_id: str,
     lane: str,
-    label_keys: dict[str, str] | None,
+    label_keys: dict[str, tuple[str, ...]] | None,
 ) -> tuple[str, str, str, str]:
     thread_id = conn.execute(
         "SELECT gmail_thread_id FROM threads WHERE thread_pk = ?",
@@ -194,7 +194,7 @@ def _export_row(
 def _override_cell(
     conn: sqlite3.Connection,
     thread_pk: int,
-    label_keys: dict[str, str] | None,
+    label_keys: dict[str, tuple[str, ...]] | None,
 ) -> str:
     if not label_keys:
         return ""
@@ -211,8 +211,10 @@ def _override_cell(
         """,
         (thread_pk,),
     ).fetchall()
-    found = sorted({label_keys[str(name)] for (name,) in rows if str(name) in label_keys})
-    return "|".join(found)
+    found: set[str] = set()
+    for (name,) in rows:
+        found.update(label_keys.get(str(name), ()))
+    return "|".join(sorted(found))
 
 
 def _stratified(
@@ -259,7 +261,7 @@ def _review_split(
     *,
     now: int | None,
     config: RulesConfig | None,
-    label_keys: dict[str, str] | None = None,
+    label_keys: dict[str, tuple[str, ...]] | None = None,
     owners: frozenset[str] = frozenset(),
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
@@ -289,7 +291,7 @@ def _thread_categories(
     conn: sqlite3.Connection,
     thread_pk: int,
     categories: tuple[str, ...],
-    label_keys: dict[str, str] | None = None,
+    label_keys: dict[str, tuple[str, ...]] | None = None,
 ) -> list[str]:
     wanted = set(categories)
     rows = conn.execute(
@@ -307,17 +309,17 @@ def _thread_categories(
     ).fetchall()
     found: set[str] = set()
     for name, stored in rows:
-        key = effective_key(str(name), None if stored is None else str(stored), label_keys)
-        if key in wanted:
-            found.add(key)
+        for key in effective_keys(str(name), None if stored is None else str(stored), label_keys):
+            if key in wanted:
+                found.add(key)
     return sorted(found)
 
 
 def _override_matches(
     conn: sqlite3.Connection,
-    label_keys: dict[str, str],
+    label_keys: dict[str, tuple[str, ...]],
 ) -> dict[str, dict[str, int]]:
-    categories = sorted(set(label_keys.values()))
+    categories = sorted({category for names in label_keys.values() for category in names})
     messages: dict[str, set[int]] = {category: set() for category in categories}
     threads: dict[str, set[int]] = {category: set() for category in categories}
     rows = conn.execute(
@@ -332,11 +334,9 @@ def _override_matches(
         """
     ).fetchall()
     for msg_pk, thread_pk, name in rows:
-        category = label_keys.get(str(name))
-        if category is None:
-            continue
-        messages[category].add(int(msg_pk))
-        threads[category].add(int(thread_pk))
+        for category in label_keys.get(str(name), ()):
+            messages[category].add(int(msg_pk))
+            threads[category].add(int(thread_pk))
     return {
         category: {"messages": len(messages[category]), "threads": len(threads[category])}
         for category in categories

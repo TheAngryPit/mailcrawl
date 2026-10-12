@@ -53,27 +53,27 @@ _META = frozenset({"synthetic", "note"})
 class Taxonomy:
     sections: dict[str, dict[str, tuple[str, ...]]]
 
-    def names_for(self, alias: str) -> dict[str, str]:
+    def names_for(self, alias: str) -> dict[str, tuple[str, ...]]:
         lists: dict[str, tuple[str, ...]] = {}
         for source in ("default", alias):
             for category, names in self.sections.get(source, {}).items():
                 lists[category] = names
-        by_name: dict[str, str] = {}
-        for category, names in lists.items():
-            for name in names:
-                other = by_name.get(name)
-                if other is not None and other != category:
-                    raise UsageError(
-                        f"taxonomy label {name} is in more than one category"
-                    )
-                by_name[name] = category
-        return by_name
+        by_name: dict[str, list[str]] = {}
+        for category in sorted(lists):
+            for name in lists[category]:
+                found = by_name.setdefault(name, [])
+                if category not in found:
+                    found.append(category)
+        return {name: tuple(categories) for name, categories in by_name.items()}
 
     def catalogue(self, alias: str) -> dict[str, dict[str, str]]:
-        return {
-            name: {"key": category, "axis": axis_of(category)}
-            for name, category in self.names_for(alias).items()
-        }
+        stored: dict[str, dict[str, str]] = {}
+        for name, categories in self.names_for(alias).items():
+            if len(categories) != 1:
+                continue
+            category = categories[0]
+            stored[name] = {"key": category, "axis": axis_of(category)}
+        return stored
 
 
 def axis_of(category: str) -> str:
@@ -95,10 +95,11 @@ def active_categories(taxonomy: Taxonomy | None, alias: str) -> tuple[str, ...]:
         return GMAIL_CATEGORIES
     found = list(GMAIL_CATEGORIES)
     seen = set(found)
-    for name in taxonomy.names_for(alias).values():
-        if name not in seen:
-            found.append(name)
-            seen.add(name)
+    for categories in taxonomy.names_for(alias).values():
+        for name in categories:
+            if name not in seen:
+                found.append(name)
+                seen.add(name)
     return tuple(found)
 
 
@@ -166,17 +167,17 @@ def load_taxonomy(path: Path) -> Taxonomy:
     return loaded
 
 
-def effective_key(
+def effective_keys(
     name: str,
     stored: str | None,
-    label_keys: dict[str, str] | None,
-) -> str | None:
+    label_keys: dict[str, tuple[str, ...]] | None,
+) -> tuple[str, ...]:
     """A taxonomy file maps label names. That map wins over a stored key for this read."""
     if label_keys is not None and name in label_keys:
         return label_keys[name]
     if stored:
-        return stored
-    return None
+        return (stored,)
+    return ()
 
 
 def missing_labels(taxonomy: Taxonomy, alias: str, present: set[str]) -> list[str]:

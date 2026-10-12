@@ -255,7 +255,7 @@ def _stats(args: argparse.Namespace) -> int:
     def report(
         conn: sqlite3.Connection,
         categories: tuple[str, ...],
-        names: dict[str, str] | None,
+        names: dict[str, tuple[str, ...]] | None,
     ) -> dict[str, object]:
         return stats(
             conn,
@@ -279,7 +279,7 @@ def _dry_run(args: argparse.Namespace) -> int:
     def report(
         conn: sqlite3.Connection,
         categories: tuple[str, ...],
-        names: dict[str, str] | None,
+        names: dict[str, tuple[str, ...]] | None,
     ) -> dict[str, object]:
         return dry_run(
             conn,
