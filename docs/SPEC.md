@@ -175,7 +175,7 @@ The taxonomy file maps label names, not label ids. One label name may be listed 
 
 The first matching rule still wins. Section 4.6 lists the `rules-v4` order. A label that is both `automated` and `notification` can match rule `2` when the thread is list mail. A label that is both `human` and `automated` does not match rule `5`. An `account_security` category that already matched an earlier rule stays on that earlier rule. `correspondence`, `human`, and `automated` do not by themselves block the Gmail tab fallback.
 
-`--export-decisions` writes one local CSV row per thread. The columns are `gmail_thread_id`, `rule`, `lane`, and `override_match`. `override_match` is the matching category keys, sorted and joined with `|`, or blank when the thread matches none. The file has no label names. `*.csv` is gitignored. The JSON count stays the full archive and adds `exported` for the number of rows written. `--sample N` keeps every rule that fired, including `else` and `spam-trash`, then fills up to N from the rest. If N is smaller than the number of rules, the file still has one row per rule. `--seed` makes that choice repeatable and defaults to 0. `--sample` without the export path exits 2. The export does not write the database and does not touch Gmail.
+`--export-decisions` writes one local CSV row per thread. The columns are `gmail_thread_id`, `rule`, `lane`, `override_match`, `suggested_rule`, `suggested_lane`, and `suggested_confidence`. `override_match` is the matching category keys, sorted and joined with `|`, or blank when the thread matches none. The suggestion columns are blank unless `--advise` is set, and then only on a thread whose rule is `else`. Section 8 phase 7 describes that suggestion. It does not change `rule` or `by_rule`. The file has no label names. `*.csv` is gitignored. The JSON count stays the full archive and adds `exported` for the number of rows written. `--sample N` keeps every rule that fired, including `else` and `spam-trash`, then fills up to N from the rest. If N is smaller than the number of rules, the file still has one row per rule. `--seed` makes that choice repeatable and defaults to 0. `--sample` without the export path exits 2. The export does not write the database and does not touch Gmail.
 
 Two customizations use one JSON file. Lookup order is the `--taxonomy` flag, then the environment variable `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`. Sections are `thehive`, `vcl`, `personal`, and an optional `default`. `pessoal` is accepted and means `personal`. An account section replaces that category's `default` list. Each value is a list of label names.
 
@@ -271,7 +271,7 @@ An `account_security` category that has not already matched an earlier rule matc
 
 ### 4.6 Rule answers in rules-v4
 
-`rules_version` is `rules-v4`. The rules file path stays `testdata/rules/rules-v0.json`. Dry-run still does not write the `decisions` table. `--export-decisions` still writes the same four columns. The label map does not need an edit. One label may still sit in several categories, and the thread still carries that union.
+`rules_version` is `rules-v4`. The rules file path stays `testdata/rules/rules-v0.json`. Dry-run still does not write the `decisions` table. `--export-decisions` still writes `gmail_thread_id`, `rule`, `lane`, and `override_match`, plus the suggestion columns in section 4.2. The label map does not need an edit. One label may still sit in several categories, and the thread still carries that union.
 
 A specific content key is `newsletter`, `job_alert`, `notification`, `invoice_receipt`, `purchase_delivery`, `account_security`, or `contract`. `correspondence`, `human`, and `automated` are not specific content keys. When none of the specific keys match, `CATEGORY_PROMOTIONS` matches rule `2` and `CATEGORY_UPDATES` matches rule `auto-ref` with state `reference` and lane `paper_trail`. Security wording on that updates tab still matches rule `4` first. `inactive_rules` is unchanged. It still lists rules `2`, `2-read`, `3`, and `4` on the Gmail default.
 
@@ -395,11 +395,19 @@ Schedules and routines need approval. That approval is still to be decided.
 ### Phase 7. Optional local language model
 The work is a small local decision model. It is advisory only. It may suggest triage decisions and reply drafts for messages that deterministic rules leave in `needs_review`. It has no tools. It does not write to Gmail. Pit approves before any write.
 
-The concrete model is undefined. Pit mentioned a "laya decision model". That model is not identified yet.
+`mailcrawl dry-run --advise` asks that model for threads whose rule is `else`. The flag is off by default. The call receives the thread id, the rule `else`, and the lane. It does not receive message text, addresses, or label names. It returns a suggested rule, a suggested lane, and a confidence string. `by_rule` stays the deterministic rule. The `decisions` table is not written. The export adds `suggested_rule`, `suggested_lane`, and `suggested_confidence`. Those cells are blank when the flag is off, and blank for every thread that is not `else`. The JSON object `advice` appears only when the flag is on. `advice.applied` is false. `advice.model` is `por definir`. `advice.else_threads` is the `else` count.
 
-Acceptance is that the slice beats the rules baseline on an audit sample, and that it uses no tools.
+The shipped backend is `StubAdvisor` in `mailcrawl/advise.py`. It is a deterministic stand-in for tests and for the flag. It suggests rule `5`, lane `imbox`, and confidence `0.00`. It does not load a model, and it does not open a network connection. CI does not download a model. A caller can pass another object with the same `advise` method. That object is the only backend the dry-run calls.
+
+SPEC-FLAG: The local model is still `por definir`. Pit mentioned a "laya decision model". That name is not an identified model. Choosing the model is still to be decided.
+
+SPEC-FLAG: The confidence threshold that would make a suggestion worth reading is still to be decided. The stub uses `0.00`. Nothing in this revision treats a suggestion as accepted.
+
+SPEC-FLAG: Whether the advisor may later read subject or body text, and whether it may suggest a reply draft, is still to be decided. This revision sends neither text nor a draft.
 
 Any cloud language model needs approval. The default is no. That choice is still to be decided.
+
+Acceptance is that the slice beats the rules baseline on an audit sample, and that it uses no tools. That comparison is still to be decided. It waits on the model choice above.
 
 ### Not yet specified
 The phase plan leaves these items unspecified. They are undecided.
