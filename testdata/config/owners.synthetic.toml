@@ -1,0 +1,7 @@
+# Synthetic owner list. Real addresses stay in ~/.config/mailcrawl/config.toml.
+synthetic = true
+
+[accounts.thehive]
+email = "ada@example.com"
+owners = ["ada@example.com", "ada.other@example.com"]
+domains = ["example.com"]

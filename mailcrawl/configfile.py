@@ -32,6 +32,17 @@ def account_email(path: Path, alias: str) -> str:
     return email.strip()
 
 
+def account_identity(path: Path, alias: str) -> tuple[frozenset[str], frozenset[str]]:
+    document = load_config(path)
+    accounts = document.get("accounts")
+    if not isinstance(accounts, dict):
+        return frozenset(), frozenset()
+    row = accounts.get(canonical_alias(alias))
+    if not isinstance(row, dict):
+        return frozenset(), frozenset()
+    return _address_set(row.get("owners")), _address_set(row.get("domains"))
+
+
 def taxonomy_path(path: Path) -> Path | None:
     document = load_config(path)
     value = document.get("taxonomy")
@@ -48,23 +59,54 @@ def write_account(path: Path, alias: str, email: str) -> None:
     accounts = document.get("accounts")
     if not isinstance(accounts, dict):
         accounts = {}
-    accounts[canonical] = {"email": email.strip()}
+    current = accounts.get(canonical)
+    row = dict(current) if isinstance(current, dict) else {}
+    row["email"] = email.strip()
+    accounts[canonical] = row
     taxonomy = document.get("taxonomy")
     lines: list[str] = []
     if isinstance(taxonomy, str) and taxonomy and '"' not in taxonomy:
         lines.append(f'taxonomy = "{taxonomy}"')
         lines.append("")
     for name in sorted(accounts):
-        row = accounts[name]
-        if not isinstance(row, dict):
+        account = accounts[name]
+        if not isinstance(account, dict):
             continue
-        addr = row.get("email")
+        addr = account.get("email")
         if not isinstance(addr, str):
             continue
         lines.append(f"[accounts.{name}]")
         lines.append(f'email = "{addr}"')
+        owners = _string_list(account.get("owners"))
+        domains = _string_list(account.get("domains"))
+        if owners:
+            lines.append(f"owners = {_toml_strings(owners)}")
+        if domains:
+            lines.append(f"domains = {_toml_strings(domains)}")
         lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
     path.write_text("\n".join(lines), encoding="utf-8")
     os.chmod(path, 0o600)
+
+
+def _address_set(value: object) -> frozenset[str]:
+    return frozenset(item.lower() for item in _string_list(value))
+
+
+def _string_list(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    found: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        if '"' in item or "\n" in item:
+            raise UsageError("owner address contains a character the config file cannot store")
+        found.append(item.strip())
+    return tuple(found)
+
+
+def _toml_strings(values: tuple[str, ...]) -> str:
+    inner = ", ".join(f'"{item}"' for item in values)
+    return f"[{inner}]"
