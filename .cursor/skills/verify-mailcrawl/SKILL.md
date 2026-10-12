@@ -27,7 +27,7 @@ Attachment parsing extracts text parts and leaves every other type behind an int
 
 Rules 0 to 8 print counts and do not print message text. See [rules-v0](./features/rules-v0.md).
 
-`stats` and `dry-run` print counts and do not write a plan file. See [stats-dry-run](./features/stats-dry-run.md).
+`stats` and `dry-run` print counts. Dry-run evaluates rules and does not write decisions. See [stats-dry-run](./features/stats-dry-run.md).
 
 The default taxonomy applies generic signals and reads one local override. See [default-taxonomy](./features/default-taxonomy.md).
 

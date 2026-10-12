@@ -55,7 +55,7 @@ Phase 1 is read-only Python and it does all of the following:
 - Index text with FTS5 using the tokenizer `unicode61 remove_diacritics 2`. Import writes `msg_fts` from the cleaned body. `mailcrawl search` reads it.
 - Parse attachment bytes through `mailcrawl.extract`. `text/plain` and `text/html` are extracted. Other types stay behind that interface. No external binary is required.
 - Apply rules 0 to 8 with `mailcrawl rules`. `rules_version` is `rules-v0`. The command prints counts only.
-- Print archive counts with `mailcrawl stats` and current-decision counts with `mailcrawl dry-run`. Both commands print counts only. Dry-run does not write a plan file and does not touch Gmail.
+- Print archive counts with `mailcrawl stats` and would-be decision counts with `mailcrawl dry-run`. Both commands print counts only. Dry-run evaluates rules and does not write decisions. Neither command writes a plan file or touches Gmail.
 - Speak JSON on the CLI. `init`, `import`, and `search` accept `--json` before the command.
 - Test against synthetic fixtures only.
 
@@ -167,6 +167,10 @@ The default taxonomy is Gmail's own categories. System labels are `INBOX`, `SENT
 
 Rules 2, 2-read, 3, and 4 need content types that are not in that default. They do not fire and they do not guess. `dry-run` lists them in `inactive_rules` and sets `inactive_reason` to `gmail_default`. `stats` counts messages in `by_category` and does not apply those rules.
 
+An archive imported before those keys existed has the Gmail label id stored and `catalogue_key` empty. `backfill` copies the id into `catalogue_key` for the system labels and category tabs above. It does not change a key that is already set, it does not invent a content type, and it does not update message rows. A `pseudo:` id is skipped. `stats` and `dry-run` run the same fill before they count, so an old archive does not need a reimport. Running `backfill` twice changes nothing the second time. `testdata/fixtures/old-taxonomy/pre-category.sql` is the synthetic old archive.
+
+`stats` reports `uncategorized` as the number of messages with none of the five category tabs. `dry-run` evaluates rules v0 against the current taxonomy and does not read or write the `decisions` table. `by_rule` and `by_state` are the would-be decisions. `decisions_by_category` counts those decisions under each Gmail category the thread carries. `undecided` is the number of threads whose would-be rule is `else`. `--now` and `--rules` select the clock and the rules file. The default rules file is `testdata/rules/rules-v0.json`.
+
 Two customizations use one JSON file. Lookup order is the `--taxonomy` flag, then the environment variable `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`. Sections are `thehive`, `vcl`, `personal`, and an optional `default`. `pessoal` is accepted and means `personal`. An account section replaces that category's `default` list. Each value is a list of label names.
 
 Map a custom label onto a Gmail category:
@@ -215,7 +219,7 @@ make check && scripts/proof.sh
 12. For the v0 fixture message that contains a `>` quote and a `-- ` signature, `body_text_raw` keeps both, `body_text` keeps only the sentence above them, and `search quoted` does not return that message. `search fake` does.
 13. The v0 metadata attachment is `skipped` with reason `no_bytes`. The native text attachment is `ok`. The native octet-stream attachment is `unsupported` and is not searchable. OCR thresholds 25 and 60 run only when a backend is supplied.
 14. `mailcrawl rules` on a synthetic account prints counts. A `STARRED` thread is `needs_review` under rule `0`. A plain thread is `reply` under rule `5`. A second run does not add a decision. The output has no message body.
-15. On that same account, `mailcrawl stats` prints 2 messages, 2 threads, 2 senders, and month `2023-11` with count 2. `mailcrawl dry-run` prints state counts `needs_review` 1 and `reply` 1, rule counts `0` 1 and `5` 1, label `STARRED` once, sender ids `1` and `2` once each, and month `2023-11` with count 2. Neither command prints a message body or an address. The decision count stays 2. No `plans` table is created.
+15. On that same account, `mailcrawl stats` prints 2 messages, 2 threads, 2 senders, and month `2023-11` with count 2. `mailcrawl dry-run` prints state counts `needs_review` 1 and `reply` 1, rule counts `0` 1 and `5` 1, label `STARRED` once, sender ids `1` and `2` once each, and month `2023-11` with count 2. Those counts come from evaluating the rules, including when the `decisions` table is still empty. Neither command prints a message body or an address. A later `rules` run still leaves 2 decision rows, and dry-run does not add more. No `plans` table is created.
 16. The synthetic Takeout mbox imports 5 messages and refuses 1. A second import adds nothing. Four of those messages carry a `pseudo:opened` or `pseudo:archived` label. A gog import of two of those messages afterwards keeps 5 rows, counts 1 duplicate, 1 reconciled, and 0 errors, leaves no provisional label, and keeps all four pseudo-label links.
 
 ## 6. Closed decisions
