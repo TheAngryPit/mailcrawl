@@ -1335,6 +1335,137 @@ print("batch", batch["eligible"], batch["decided"], again["eligible"])
 PY
 publish_log phase4.log
 
+log "check: bench compares two fake embedders on a read-only copy"
+BENCH_DATA="${PROOF_HOME}/bench-data"
+BENCH_CFG="${PROOF_HOME}/bench-config.toml"
+BENCH_MBOX="${PROOF_HOME}/bench.mbox"
+python3 - "${BENCH_MBOX}" <<'PY'
+import base64
+import sys
+from pathlib import Path
+
+encoded = base64.b64encode(base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAMBAQAY3Y20AAAAAElFTkSuQmCC"
+)).decode("ascii")
+Path(sys.argv[1]).write_text(
+    f"""From 1768000000000000701@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Alpha note
+Date: Thu, 15 Jan 2026 12:00:00 +0000
+Message-ID: <proof-bench-alpha@example.com>
+X-GM-THRID: 1768000000000000701
+X-GM-MSGID: 1768000000000000701
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+alpha bench
+
+From 1768000000000000702@example.com Thu Jan 15 12:05:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Beta note
+Date: Thu, 15 Jan 2026 12:05:00 +0000
+Message-ID: <proof-bench-beta@example.com>
+X-GM-THRID: 1768000000000000702
+X-GM-MSGID: 1768000000000000702
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+beta bench
+
+From 1768000000000000703@example.com Thu Jan 15 12:10:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Scan note
+Date: Thu, 15 Jan 2026 12:10:00 +0000
+Message-ID: <proof-bench-scan@example.com>
+X-GM-THRID: 1768000000000000703
+X-GM-MSGID: 1768000000000000703
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="proofbench"
+
+--proofbench
+Content-Type: text/plain; charset="utf-8"
+
+scan bench
+
+--proofbench
+Content-Type: image/png; name="scan.png"
+Content-Disposition: attachment; filename="scan.png"
+Content-Transfer-Encoding: base64
+
+{encoded}
+--proofbench--
+
+""",
+    encoding="utf-8",
+)
+PY
+(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --home "${BENCH_DATA}" --config "${BENCH_CFG}" --json init --account personal --email ada@example.com
+  python3 -m mailcrawl --home "${BENCH_DATA}" --config "${BENCH_CFG}" --json import mbox "${BENCH_MBOX}" --account personal
+)
+python3 - "${BENCH_DATA}/personal.db" <<'PY'
+import sys
+from pathlib import Path
+
+from mailcrawl.decisions import DecisionDraft, decide_once
+from mailcrawl.store import connect
+
+conn = connect(Path(sys.argv[1]))
+try:
+    rows = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
+    for thread_pk in (int(rows[0][0]), int(rows[1][0])):
+        decide_once(
+            conn,
+            thread_pk,
+            10,
+            lambda: DecisionDraft(
+                next_state="reference",
+                lane="paper_trail",
+                rule_id="3",
+                rules_version="rules-v4",
+                origin="human",
+                source_detail="review",
+            ),
+        )
+finally:
+    conn.close()
+PY
+before="$(sha256sum "${BENCH_DATA}/personal.db" | awk '{print $1}')"
+(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --home "${BENCH_DATA}" --json bench --account personal --embedders fake,fake --sample 4
+) | tee "${PROOF_DIR}/bench.json"
+python3 - "${PROOF_DIR}/bench.json" "${PROOF_DIR}/bench.md" "${before}" "${BENCH_DATA}/personal.db" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+report_path, markdown_path, before, source = sys.argv[1:]
+report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+Path(markdown_path).write_text(report["markdown"], encoding="utf-8")
+digest = hashlib.sha256(Path(source).read_bytes()).hexdigest()
+pair = report["pairs"][0]
+if report.get("ok") is not True or digest != before:
+    raise SystemExit(f"bench source {digest} {before} {report.get('ok')}")
+if abs(pair["cosine_min"] - 1.0) > 1e-6 or abs(pair["knn_top10_overlap"] - 1.0) > 1e-6:
+    raise SystemExit(f"bench pair {pair}")
+if report["decisions"][0]["accuracy"] != 1.0 or report["sampled_images"] != 1:
+    raise SystemExit(f"bench decisions {report['decisions']} images {report['sampled_images']}")
+if "db-v2" in report["vector_db"]:
+    raise SystemExit(report["vector_db"])
+print("bench", pair["left"], pair["right"], report["decisions"][0]["accuracy"])
+PY
+publish_log bench.json
+publish_log bench.md
+
 record_fixture_hashes "${FIXTURE_AFTER}"
 if ! diff -q "${FIXTURE_BEFORE}" "${FIXTURE_AFTER}" >/dev/null; then
   diff -u "${FIXTURE_BEFORE}" "${FIXTURE_AFTER}" | tee "${PROOF_DIR}/fixtures-diff.log" || true
@@ -1380,6 +1511,7 @@ doc = {
         "phase4_grey_review",
         "phase4_rerank",
         "phase4_batch",
+        "bench_fake_pair",
         "fixture_sha256_unchanged",
     ],
 }

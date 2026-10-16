@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import sqlite3
@@ -23,6 +24,17 @@ SEARCH_TITLE_PREFIX = "title: "
 LOCAL_VERIFY = (
     "python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox "
     "embed --account thehive --embedder gemma"
+)
+MLX_MODEL_ID = "mlx-community/embeddinggemma-2-8bit"
+MLX_LOCAL_VERIFY = (
+    "python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox "
+    "bench --account thehive --embedders gemma,mlx --sample 32"
+)
+MLX_PROCESSOR_ERROR = (
+    "transformers does not expose EmbeddingGemma2Processor. "
+    "The image path stops instead of falling back to text-only. "
+    "See https://huggingface.co/mlx-community/embeddinggemma-2-8bit. "
+    f"local-verify: {MLX_LOCAL_VERIFY}"
 )
 GEMMA_CONFIG = {"audio_config": None}
 IMAGE_PROCESSING = {"image": {"max_soft_tokens": 280}}
@@ -119,6 +131,102 @@ class GemmaEmbedder:
         self._loaded = model
         return model
 
+    def prepare(self, *, images: bool) -> None:
+        enter_model()
+        self._gemma()
+        if images:
+            self._gemma()
+
+
+class MlxEmbedder:
+    model_id = MLX_MODEL_ID
+    dimension = NATIVE_DIM
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        enter_model()
+        if not texts:
+            return []
+        model, tokenizer, mx = self._text_runtime()
+        inputs = tokenizer(list(texts), padding=True, return_tensors="np")
+        embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
+        mx.eval(embeddings)
+        return _rows(self.model_id, embeddings.tolist())
+
+    def embed_images(self, images: list[bytes]) -> list[list[float]]:
+        enter_model()
+        if not images:
+            return []
+        model, processor, mx = self._vision_runtime()
+        from PIL import Image
+
+        pictures = [Image.open(io.BytesIO(blob)) for blob in images]
+        for picture in pictures:
+            picture.load()
+        inputs = processor(images=pictures, return_tensors="np")
+        embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
+        mx.eval(embeddings)
+        return _rows(self.model_id, embeddings.tolist())
+
+    def prepare(self, *, images: bool) -> None:
+        enter_model()
+        self._text_runtime()
+        if images:
+            self._vision_runtime()
+
+    def _text_runtime(self):
+        enter_model()
+        loaded = getattr(self, "_text", None)
+        if loaded is not None:
+            return loaded
+        try:
+            import mlx.core as mx
+            from mlx_vlm.embedding_loader import load_embedding_model
+            from mlx_vlm.utils import get_model_path
+            from transformers import AutoTokenizer
+        except ImportError as exc:
+            raise UsageError(
+                "the mlx extra is not installed. It is for Apple Silicon. "
+                f"local-verify: {MLX_LOCAL_VERIFY}"
+            ) from exc
+        path = get_model_path(self.model_id)
+        model = load_embedding_model(path)
+        tokenizer = AutoTokenizer.from_pretrained(path)
+        self._text = (model, tokenizer, mx)
+        return self._text
+
+    def _vision_runtime(self):
+        enter_model()
+        loaded = getattr(self, "_vision", None)
+        if loaded is not None:
+            return loaded
+        processor_cls = _embedding_gemma_processor()
+        try:
+            import mlx.core as mx
+            from mlx_vlm import load
+        except ImportError as exc:
+            raise UsageError(
+                "the mlx extra is not installed. It is for Apple Silicon. "
+                f"local-verify: {MLX_LOCAL_VERIFY}"
+            ) from exc
+        model, processor = load(self.model_id)
+        if not isinstance(processor, processor_cls):
+            raise UsageError(
+                "mlx_vlm did not return EmbeddingGemma2Processor. "
+                "The image path stops instead of falling back to text-only. "
+                f"local-verify: {MLX_LOCAL_VERIFY}"
+            )
+        self._vision = (model, processor, mx)
+        return self._vision
+
+
+def _embedding_gemma_processor():
+    enter_model()
+    try:
+        from transformers import EmbeddingGemma2Processor
+    except ImportError as exc:
+        raise UsageError(MLX_PROCESSOR_ERROR) from exc
+    return EmbeddingGemma2Processor
+
 
 class Embedder(Protocol):
     model_id: str
@@ -136,6 +244,8 @@ def open_embedder(name: str) -> Embedder:
         return ScriptedEmbedder()
     if name == "gemma":
         return GemmaEmbedder()
+    if name == "mlx":
+        return MlxEmbedder()
     raise UsageError(f"unknown embedder {name}")
 
 
