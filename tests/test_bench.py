@@ -13,12 +13,20 @@ import unittest
 from pathlib import Path
 
 import mailcrawl.bench as bench_module
-from mailcrawl.bench import ThreadRow, ru_maxrss_mb, run_bench, select_sample
+from mailcrawl.bench import (
+    LABEL_TRUTH_VERIFY,
+    ThreadRow,
+    label_scores,
+    ru_maxrss_mb,
+    run_bench,
+    select_sample,
+)
 from mailcrawl.cli import main
 from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.store import connect
+from mailcrawl.taxonomy import load_taxonomy
 from mailcrawl.vectors import (
     MLX_LOCAL_VERIFY,
     MLX_PROCESSOR_ERROR,
@@ -100,6 +108,10 @@ class BenchTest(unittest.TestCase):
             self.assertEqual(report["sampled_texts"], 3)
             self.assertEqual(report["sampled_images"], 1)
             self.assertEqual(report["n_human"], 2)
+            self.assertEqual(report["truth"], "decisions")
+            self.assertNotIn("n_labelled", report)
+            self.assertIn("human_accuracy", report["markdown"])
+            self.assertNotIn("label_overlap@1", report["markdown"])
             self.assertEqual(report["n_with_images"], 1)
             self.assertEqual(report["n_image_only"], 1)
             pair = report["pairs"][0]
@@ -359,3 +371,195 @@ class BenchChildTest(unittest.TestCase):
         finally:
             Path(out_path).unlink(missing_ok=True)
         self.assertEqual(raw["text_vectors"], expected)
+
+
+def _category_row(thread_pk: int, categories: set[str], *, image_only: bool = False) -> ThreadRow:
+    return ThreadRow(thread_pk, "s", "b", image_only, image_only, None, frozenset(categories))
+
+
+class LabelTruthTest(unittest.TestCase):
+    def test_sample_takes_the_rarest_category_and_skips_unmapped(self) -> None:
+        rows = [
+            _category_row(1, {"common"}),
+            _category_row(2, {"common"}),
+            _category_row(3, {"common"}),
+            _category_row(4, {"rare"}),
+            _category_row(5, {"rare"}),
+            _category_row(8, set()),
+            _category_row(9, {"common"}, image_only=True),
+        ]
+        chosen = [row.thread_pk for row in select_sample(rows, 4, truth="labels")]
+        self.assertEqual(chosen, [9, 4, 5, 1])
+        self.assertNotIn(8, chosen)
+
+    def test_scores_cover_exact_partial_and_no_overlap(self) -> None:
+        same = label_scores(
+            [1, 2, 3, 4],
+            [(1.0, 0.0), (1.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
+            {
+                1: frozenset({"alpha", "beta"}),
+                2: frozenset({"alpha", "beta"}),
+                3: frozenset({"alpha", "beta"}),
+                4: frozenset({"gamma"}),
+            },
+        )
+        self.assertEqual(same["compared"], 4)
+        self.assertEqual(same["overlap_at_1"], 0.75)
+        self.assertEqual(same["jaccard_at_1"], 0.75)
+        self.assertEqual(same["vote_f1_at_10"], 0.8)
+        self.assertEqual(same["recall"], {"alpha": 1.0, "beta": 1.0, "gamma": 0.0})
+        partial = label_scores(
+            [1, 2],
+            [(1.0, 0.0), (1.0, 0.0)],
+            {1: frozenset({"alpha", "beta"}), 2: frozenset({"alpha"})},
+        )
+        self.assertEqual(partial["overlap_at_1"], 1.0)
+        self.assertEqual(partial["jaccard_at_1"], 0.5)
+        self.assertEqual(partial["vote_f1_at_10"], 4 / 6)
+        none = label_scores(
+            [1, 2],
+            [(1.0, 0.0), (1.0, 0.0)],
+            {1: frozenset({"alpha"}), 2: frozenset({"gamma"})},
+        )
+        self.assertEqual(none["overlap_at_1"], 0.0)
+        self.assertEqual(none["jaccard_at_1"], 0.0)
+        self.assertEqual(none["vote_f1_at_10"], 0.0)
+        self.assertEqual(none["recall"], {"alpha": 0.0, "gamma": 0.0})
+
+    def test_label_bench_keeps_every_category_and_skips_unmapped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            taxonomy = home / "taxonomy.json"
+            taxonomy.write_text(
+                json.dumps(
+                    {
+                        "default": {
+                            "alpha": ["Bill"],
+                            "beta": ["Bill", "Receipt"],
+                            "gamma": ["News"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mapping = {
+                name: frozenset(categories)
+                for name, categories in load_taxonomy(taxonomy).names_for("personal").items()
+            }
+            self.assertEqual(mapping["Bill"], frozenset({"alpha", "beta"}))
+            db = home / "personal.db"
+            _seed_labels(db)
+            before = db.read_bytes()
+            report = run_bench(db, ["fake"], 10, truth="labels", label_categories=mapping)
+            self.assertEqual(db.read_bytes(), before)
+            self.assertEqual(report["truth"], "labels")
+            self.assertEqual(report["n_labelled"], 4)
+            self.assertEqual(report["sampled_texts"], 4)
+            self.assertEqual(report["per_category"], {"alpha": 2, "beta": 3, "gamma": 1})
+            self.assertNotIn("n_human", report)
+            self.assertIn("label_overlap@1", report["markdown"])
+            self.assertIn("jaccard@1", report["markdown"])
+            self.assertIn("vote_f1@10", report["markdown"])
+            self.assertEqual(report["labels"][0]["embedder"], "fake")
+            spec = Path("docs/SPEC.md").read_text(encoding="utf-8")
+            self.assertIn(LABEL_TRUTH_VERIFY, spec)
+            shutil.rmtree(Path(str(report["vector_db"])).parent)
+
+    def test_cli_label_truth_and_a_missing_taxonomy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            _archive(home)
+            code, doc = _cli(
+                [
+                    "--json",
+                    "--home",
+                    str(home),
+                    "bench",
+                    "--account",
+                    "personal",
+                    "--embedders",
+                    "fake",
+                    "--sample",
+                    "2",
+                    "--truth",
+                    "labels",
+                ]
+            )
+            self.assertEqual(code, 2)
+            self.assertEqual(doc["error"], "usage")
+            self.assertEqual(doc["detail"], "labels truth needs a taxonomy")
+
+
+def _seed_labels(db: Path) -> None:
+    conn = connect(db)
+    try:
+        conn.execute(
+            "INSERT INTO accounts(alias, email_hash, created_at) VALUES ('personal', 'abc', 1)"
+        )
+        account_id = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        labels = (
+            ("Label_bill", "Bill"),
+            ("Label_receipt", "Receipt"),
+            ("Label_news", "News"),
+            ("Label_other", "Other"),
+        )
+        for label_id, name in labels:
+            conn.execute(
+                """
+                INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at)
+                VALUES (?, ?, ?, 'user', 1)
+                """,
+                (account_id, label_id, name),
+            )
+        threads = (
+            (1, "Bill"),
+            (2, "Bill"),
+            (3, "News"),
+            (4, "Receipt"),
+            (5, "Other"),
+        )
+        for offset, (thread_pk, name) in enumerate(threads, start=1):
+            conn.execute(
+                """
+                INSERT INTO threads(thread_pk, account_id, gmail_thread_id, msg_count)
+                VALUES (?, ?, ?, 1)
+                """,
+                (thread_pk, account_id, f"t-{thread_pk}"),
+            )
+            conn.execute(
+                """
+                INSERT INTO messages(
+                  account_id, gmail_message_id, thread_pk, internal_date, subject,
+                  body_text, raw_sha256, provenance_hash, imported_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    f"m-{thread_pk}",
+                    thread_pk,
+                    offset,
+                    name,
+                    f"body {name} {thread_pk}",
+                    f"sha-{thread_pk}",
+                    f"prov-{thread_pk}",
+                    1,
+                ),
+            )
+            msg_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            label_id = {
+                "Bill": "Label_bill",
+                "News": "Label_news",
+                "Receipt": "Label_receipt",
+                "Other": "Label_other",
+            }[name]
+            conn.execute(
+                """
+                INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+                VALUES (?, ?, ?, 1)
+                """,
+                (msg_pk, account_id, label_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+

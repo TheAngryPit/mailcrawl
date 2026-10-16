@@ -175,6 +175,8 @@ def _parser() -> argparse.ArgumentParser:
     bench.add_argument("--account", required=True)
     bench.add_argument("--embedders", required=True)
     bench.add_argument("--sample", type=int, required=True)
+    bench.add_argument("--truth", choices=("decisions", "labels"), default="decisions")
+    bench.add_argument("--taxonomy")
     return parser
 
 
@@ -415,12 +417,24 @@ def _bench(args: argparse.Namespace) -> int:
     if args.sample is None or args.sample < 1:
         raise UsageError("sample needs a positive count")
     batch_size, max_tokens = embed_limits(config_path(args.config))
+    label_categories = None
+    if args.truth == "labels":
+        catalogue = resolve_taxonomy(args.taxonomy, config_path(args.config))
+        if catalogue is None:
+            raise UsageError("labels truth needs a taxonomy")
+        loaded = load_taxonomy(catalogue)
+        label_categories = {
+            name: frozenset(categories)
+            for name, categories in loaded.names_for(alias).items()
+        }
     report = run_bench(
         home / f"{alias}.db",
         names,
         args.sample,
         batch_size=batch_size,
         max_tokens=max_tokens,
+        truth=args.truth,
+        label_categories=label_categories,
     )
     report["account"] = alias
     _emit(args, report, text=str(report["markdown"]))
