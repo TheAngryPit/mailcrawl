@@ -11,15 +11,17 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from mailcrawl.cli import main
-from mailcrawl.configfile import inference_config, write_account
+from mailcrawl.cli import _embedder, _parser, main
+from mailcrawl.configfile import embedder_name, inference_config, write_account
 from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import BoundaryError, invoke
 from mailcrawl.paths import UsageError
-from mailcrawl.store import connect, index_message
+from mailcrawl.store import connect, index_message, init_account
+from mailcrawl.ingest import import_mbox
 from mailcrawl.vectors import (
     LOCAL_VERIFY,
     CLASSIFICATION_PREFIX,
+    GEMMA_CONFIG,
     NATIVE_DIM,
     FakeEmbedder,
     GemmaEmbedder,
@@ -273,15 +275,281 @@ class VectorSearchTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
+    def test_image_only_thread_copies_a_fake_neighbour(self) -> None:
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
+            "0000000c4944415408d763f8cfc000000301010018dd8db40000000049454e44ae426082"
+        )
+        encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAMBAQAY3Y20AAAAAElFTkSuQmCC"
+        mbox = f"""From 1768000000000000401@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Text note
+Date: Thu, 15 Jan 2026 12:00:00 +0000
+Message-ID: <phase3b-text@example.com>
+X-GM-THRID: 1768000000000000401
+X-GM-MSGID: 1768000000000000401
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+alpha keyword text path stays on the classification prefix
+
+From 1768000000000000402@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Image reviewed
+Date: Thu, 15 Jan 2026 12:05:00 +0000
+Message-ID: <phase3b-reviewed@example.com>
+X-GM-THRID: 1768000000000000402
+X-GM-MSGID: 1768000000000000402
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="imgbound"
+
+--imgbound
+Content-Type: text/plain; charset="utf-8"
+
+scan
+
+--imgbound
+Content-Type: image/png; name="scan.png"
+Content-Disposition: attachment; filename="scan.png"
+Content-Transfer-Encoding: base64
+
+{encoded}
+--imgbound--
+
+From 1768000000000000403@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Image target
+Date: Thu, 15 Jan 2026 12:10:00 +0000
+Message-ID: <phase3b-target@example.com>
+X-GM-THRID: 1768000000000000403
+X-GM-MSGID: 1768000000000000403
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="imgbound2"
+
+--imgbound2
+Content-Type: text/plain; charset="utf-8"
+
+scan
+
+--imgbound2
+Content-Type: image/png; name="scan.png"
+Content-Disposition: attachment; filename="scan.png"
+Content-Transfer-Encoding: base64
+
+{encoded}
+--imgbound2--
+
+From 1768000000000000404@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Logo note
+Date: Thu, 15 Jan 2026 12:15:00 +0000
+Message-ID: <phase3b-logo@example.com>
+X-GM-THRID: 1768000000000000404
+X-GM-MSGID: 1768000000000000404
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="logobound"
+
+--logobound
+Content-Type: text/plain; charset="utf-8"
+
+logo
+
+--logobound
+Content-Type: image/png; name="logo.png"
+Content-Disposition: inline; filename="logo.png"
+Content-Transfer-Encoding: base64
+
+{encoded}
+--logobound--
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mbox_path = root / "images.mbox"
+            mbox_path.write_text(mbox, encoding="utf-8")
+            db_path = init_account(root, "personal", "ada@example.com")
+            conn = connect(db_path)
+            try:
+                imported = import_mbox(
+                    conn,
+                    alias="personal",
+                    mbox_path=mbox_path,
+                    labels_path=None,
+                    taxonomy_path=None,
+                    account_email="ada@example.com",
+                )
+                self.assertEqual(imported.n_new, 4)
+                flags = {
+                    row[0]: int(row[1])
+                    for row in conn.execute(
+                        """
+                        SELECT messages.subject, threads.image_only
+                        FROM messages JOIN threads ON threads.thread_pk = messages.thread_pk
+                        """
+                    )
+                }
+                self.assertEqual(flags["Text note"], 0)
+                self.assertEqual(flags["Image reviewed"], 1)
+                self.assertEqual(flags["Image target"], 1)
+                self.assertEqual(flags["Logo note"], 0)
+                stored = conn.execute(
+                    """
+                    SELECT messages.subject, attachments.stored_path
+                    FROM attachments
+                    JOIN messages ON messages.msg_pk = attachments.msg_pk
+                    ORDER BY messages.subject
+                    """
+                ).fetchall()
+                by_subject = {row[0]: row[1] for row in stored}
+                self.assertIsNone(by_subject["Logo note"])
+                self.assertTrue(Path(by_subject["Image reviewed"]).is_file())
+                self.assertEqual(Path(by_subject["Image reviewed"]).read_bytes(), png)
+                threads = {
+                    row[1]: int(row[0])
+                    for row in conn.execute("SELECT thread_pk, subject FROM messages")
+                }
+                decide_once(
+                    conn,
+                    threads["Image reviewed"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="reference",
+                        lane="paper_trail",
+                        rule_id="3",
+                        rules_version="rules-v4",
+                        origin="human",
+                        source_detail="review",
+                    ),
+                )
+                flags_on = {"embeddings": True}
+                self.assertEqual(embed_threads(conn, FakeEmbedder(), flags_on), 4)
+                text_prefix = conn.execute(
+                    "SELECT prefix FROM vec_classification WHERE thread_pk = ?",
+                    (threads["Text note"],),
+                ).fetchone()[0]
+                image_prefix = conn.execute(
+                    "SELECT prefix FROM vec_classification WHERE thread_pk = ?",
+                    (threads["Image target"],),
+                ).fetchone()[0]
+                self.assertEqual(text_prefix, CLASSIFICATION_PREFIX)
+                self.assertEqual(image_prefix, "")
+                self.assertEqual(conn.execute("SELECT count(*) FROM vec_image").fetchone()[0], 2)
+                first = knn_decide(conn, threads["Image target"], FakeEmbedder(), flags_on, 20)
+                second = knn_decide(conn, threads["Image target"], FakeEmbedder(), flags_on, 30)
+                self.assertEqual(first["origin"], "knn")
+                self.assertEqual(first["source_detail"], "fake-embedder")
+                self.assertEqual(first["next_state"], "reference")
+                self.assertEqual(int(first["decision_id"]), int(second["decision_id"]))
+                evidence = json.loads(first["evidence"])
+                self.assertEqual(
+                    evidence,
+                    [{"distance": 0.0, "neighbour_thread_pk": threads["Image reviewed"]}],
+                )
+                self.assertEqual(embed_threads(conn, FakeEmbedder(), flags_on), 4)
+                self.assertEqual(conn.execute("SELECT count(*) FROM vec_image").fetchone()[0], 2)
+            finally:
+                conn.close()
+
 
 class VectorCliTest(unittest.TestCase):
+    def test_omitted_embedder_resolves_to_gemma(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            self.assertEqual(embedder_name(config), "gemma")
+            config.write_text("[inference]\nembeddings = true\n", encoding="utf-8")
+            self.assertEqual(embedder_name(config), "gemma")
+            for argv in (
+                ["embed", "--account", "personal"],
+                ["knn", "--account", "personal", "--thread", "synthetic"],
+                ["search", "synthetic", "--account", "personal"],
+            ):
+                omitted = _parser().parse_args(["--config", str(config), *argv])
+                self.assertIsNone(omitted.embedder)
+                self.assertEqual(_embedder(omitted), "gemma")
+            flagged = _parser().parse_args(
+                [
+                    "--config",
+                    str(config),
+                    "embed",
+                    "--account",
+                    "personal",
+                    "--embedder",
+                    "fake",
+                ]
+            )
+            self.assertEqual(_embedder(flagged), "fake")
+            config.write_text(
+                "[inference]\nembeddings = true\nembedder = \"fake\"\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(embedder_name(config), "fake")
+            named = _parser().parse_args(
+                ["--config", str(config), "embed", "--account", "personal"]
+            )
+            self.assertEqual(_embedder(named), "fake")
+            self.assertNotIn("sentence_transformers", sys.modules)
+            self.assertNotIn("torch", sys.modules)
+
+    def test_image_encode_uses_the_gemma_guide(self) -> None:
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
+            "0000000c4944415408d763f8cfc000000301010018dd8db40000000049454e44ae426082"
+        )
+        seen: dict[str, object] = {}
+
+        class Recorder:
+            def encode(self, batch, **kwargs):
+                seen["samples"] = [
+                    {
+                        "keys": set(item),
+                        "suffix": Path(item["image"]).suffix,
+                        "bytes": Path(item["image"]).read_bytes(),
+                    }
+                    for item in batch
+                ]
+                seen["kwargs"] = kwargs
+                return [[0.0] * NATIVE_DIM]
+
+        embedder = GemmaEmbedder()
+        embedder._loaded = Recorder()
+        vectors = invoke(
+            "embeddings",
+            lambda: embedder.embed_images([png]),
+            {"embeddings": True},
+        )
+        self.assertEqual(vectors, [[0.0] * NATIVE_DIM])
+        self.assertEqual(
+            seen["samples"],
+            [{"keys": {"image"}, "suffix": ".png", "bytes": png}],
+        )
+        self.assertEqual(
+            seen["kwargs"],
+            {
+                "normalize_embeddings": True,
+                "convert_to_numpy": True,
+                "show_progress_bar": False,
+                "processing_kwargs": {"image": {"max_soft_tokens": 280}},
+            },
+        )
+
     def test_gemma_is_opt_in_and_db_v2_is_refused(self) -> None:
         embedder = open_embedder("gemma")
         self.assertIsInstance(embedder, GemmaEmbedder)
         self.assertEqual(embedder.model_id, "google/embeddinggemma-2")
         self.assertEqual(embedder.dimension, 768)
+        self.assertEqual(GEMMA_CONFIG, {"audio_config": None})
+        self.assertNotIn("vision_config", GEMMA_CONFIG)
         self.assertNotIn("db-v2", LOCAL_VERIFY)
         spec = Path(__file__).resolve().parents[1].joinpath("docs/SPEC.md").read_text(encoding="utf-8")
+        self.assertIn("https://gemma.ai/models/embeddinggemma/multimodal/", spec)
         self.assertIn(LOCAL_VERIFY, spec)
         self.assertIn("vectors", spec)
         with self.assertRaises(BoundaryError):
@@ -360,11 +628,12 @@ class VectorCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text(
-                "[inference]\nembeddings = true\nsearch-embedding = false\n\n",
+                "[inference]\nembedder = \"gemma\"\nembeddings = true\nsearch-embedding = false\n\n",
                 encoding="utf-8",
             )
             write_account(path, "personal", "ada@example.com")
             flags = inference_config(path)
             self.assertEqual(flags, {"embeddings": True, "search-embedding": False})
+            self.assertEqual(path.read_text(encoding="utf-8").count('embedder = "gemma"'), 1)
             write_account(path, "personal", "ada@example.com")
             self.assertEqual(inference_config(path), flags)

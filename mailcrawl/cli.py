@@ -10,7 +10,13 @@ import time
 from pathlib import Path
 
 from mailcrawl.advise import StubAdvisor
-from mailcrawl.configfile import account_email, account_identity, inference_config, write_account
+from mailcrawl.configfile import (
+    account_email,
+    account_identity,
+    embedder_name,
+    inference_config,
+    write_account,
+)
 from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
@@ -120,7 +126,7 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("--vec-weight", type=float, default=1.0)
     search.add_argument("--keyword-weight", type=float, default=1.0)
     search.add_argument("--k", type=int, default=10)
-    search.add_argument("--embedder", default="fake")
+    search.add_argument("--embedder")
     search.add_argument("--jev-client", default="fake")
 
     rules = sub.add_parser("rules")
@@ -147,12 +153,12 @@ def _parser() -> argparse.ArgumentParser:
 
     embed = sub.add_parser("embed")
     embed.add_argument("--account", required=True)
-    embed.add_argument("--embedder", default="fake")
+    embed.add_argument("--embedder")
 
     knn = sub.add_parser("knn")
     knn.add_argument("--account", required=True)
     knn.add_argument("--thread", required=True)
-    knn.add_argument("--embedder", default="fake")
+    knn.add_argument("--embedder")
     knn.add_argument("--now", type=int)
 
     jev = sub.add_parser("jev")
@@ -250,7 +256,7 @@ def _search(args: argparse.Namespace) -> int:
     flags = inference_config(config_path(args.config))
     embedder = None
     if "search-embedding" in enabled_points(flags):
-        embedder = open_embedder(args.embedder)
+        embedder = open_embedder(_embedder(args))
     jev = None
     if "search-reranker" in enabled_points(flags):
         jev = open_client(args.jev_client)
@@ -393,9 +399,15 @@ def _export_args(args: argparse.Namespace) -> tuple[Path | None, int | None, int
     return dest, sample, 0 if seed is None else seed
 
 
+def _embedder(args: argparse.Namespace) -> str:
+    if args.embedder:
+        return args.embedder
+    return embedder_name(config_path(args.config))
+
+
 def _embed(args: argparse.Namespace) -> int:
     data_dir(args.home)
-    embedder = open_embedder(args.embedder)
+    embedder = open_embedder(_embedder(args))
     flags = inference_config(config_path(args.config))
     alias = canonical_alias(args.account)
     conn = _account_db(args)
@@ -412,7 +424,7 @@ def _knn(args: argparse.Namespace) -> int:
     flags = inference_config(config_path(args.config))
     embedder = None
     if "embeddings" in enabled_points(flags):
-        embedder = open_embedder(args.embedder)
+        embedder = open_embedder(_embedder(args))
     now = int(time.time()) if args.now is None else args.now
     conn = _account_db(args)
     try:

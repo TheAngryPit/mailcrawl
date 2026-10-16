@@ -718,7 +718,7 @@ trigram = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'msg_trigram'
 names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 if version != USER_VERSION or flag != 1 or "trigram" not in trigram:
     raise SystemExit(f"migration {version} {flag} {trigram}")
-if "vec_classification" in names or "vec_search" in names or "embeddings" in names:
+if "vec_classification" in names or "vec_search" in names or "vec_image" in names or "embeddings" in names:
     raise SystemExit(f"vec tables {sorted(names)}")
 print(f"user_version {version}")
 print("image_only", flag)
@@ -730,6 +730,14 @@ PY
 log "check: phase 3 vectors stay off until config turns them on"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$PROOF_DIR}"
 mkdir -p "${ARTIFACT_DIR}"
+
+publish_log() {
+  local name="$1"
+  if [[ "${ARTIFACT_DIR}" == "${PROOF_DIR}" ]]; then
+    return 0
+  fi
+  cp "${PROOF_DIR}/${name}" "${ARTIFACT_DIR}/${name}"
+}
 PHASE3_DATA="${PROOF_HOME}/phase3-data"
 PHASE3_CFG="${PROOF_HOME}/phase3-config.toml"
 PHASE3_MBOX="${PROOF_HOME}/phase3.mbox"
@@ -855,7 +863,7 @@ try:
     ).fetchone()[0]
 finally:
     conn.close()
-if "vec_classification" in names or "vec_search" in names:
+if "vec_classification" in names or "vec_search" in names or "vec_image" in names:
     raise SystemExit(f"off vectors {sorted(names)}")
 code, hits = run(["search", "--account", "personal", "--", "alpha"])
 if code != 0 or [hit["source"] for hit in hits["hits"]] != ["fts"]:
@@ -984,11 +992,175 @@ version = fresh.execute("PRAGMA user_version").fetchone()[0]
 names = {row[0] for row in fresh.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 if version != USER_VERSION or version != 7:
     raise SystemExit(f"v5 migration {version}")
-if "vec_classification" in names or "vec_search" in names or "embeddings" in names:
+if "vec_classification" in names or "vec_search" in names or "vec_image" in names or "embeddings" in names:
     raise SystemExit(f"v5 tables {sorted(names)}")
 print("migration", version, "vec absent")
 PY
-cp "${PROOF_DIR}/phase3.log" "${ARTIFACT_DIR}/phase3.log"
+publish_log phase3.log
+
+log "check: phase 3b image_only threads get a fake kNN neighbour"
+PHASE3B_DATA="${PROOF_HOME}/phase3b-data"
+PHASE3B_CFG="${PROOF_HOME}/phase3b-config.toml"
+PHASE3B_MBOX="${PROOF_HOME}/phase3b.mbox"
+python3 - "${PHASE3B_MBOX}" <<'PY'
+import sys
+encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAMBAQAY3Y20AAAAAElFTkSuQmCC"
+text = f"""From 1768000000000000401@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Text note
+Date: Thu, 15 Jan 2026 12:00:00 +0000
+Message-ID: <phase3b-text@example.com>
+X-GM-THRID: 1768000000000000401
+X-GM-MSGID: 1768000000000000401
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+alpha keyword text path stays on the classification prefix
+
+From 1768000000000000402@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Image reviewed
+Date: Thu, 15 Jan 2026 12:05:00 +0000
+Message-ID: <phase3b-reviewed@example.com>
+X-GM-THRID: 1768000000000000402
+X-GM-MSGID: 1768000000000000402
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="imgbound"
+
+--imgbound
+Content-Type: text/plain; charset="utf-8"
+
+scan
+
+--imgbound
+Content-Type: image/png; name="scan.png"
+Content-Disposition: attachment; filename="scan.png"
+Content-Transfer-Encoding: base64
+
+{encoded}
+--imgbound--
+
+From 1768000000000000403@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Image target
+Date: Thu, 15 Jan 2026 12:10:00 +0000
+Message-ID: <phase3b-target@example.com>
+X-GM-THRID: 1768000000000000403
+X-GM-MSGID: 1768000000000000403
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="imgbound2"
+
+--imgbound2
+Content-Type: text/plain; charset="utf-8"
+
+scan
+
+--imgbound2
+Content-Type: image/png; name="scan.png"
+Content-Disposition: attachment; filename="scan.png"
+Content-Transfer-Encoding: base64
+
+{encoded}
+--imgbound2--
+"""
+open(sys.argv[1], "w", encoding="utf-8").write(text)
+PY
+(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --home "${PHASE3B_DATA}" --config "${PHASE3B_CFG}" --json init --account personal --email ada@example.com
+  python3 -m mailcrawl --home "${PHASE3B_DATA}" --config "${PHASE3B_CFG}" --json import mbox "${PHASE3B_MBOX}" --account personal
+) | tee "${PROOF_DIR}/phase3b-import.log"
+PHASE3B_DATA="${PHASE3B_DATA}" PHASE3B_CFG="${PHASE3B_CFG}" REPO_ROOT="${REPO_ROOT}" python3 - <<'PY' | tee "${PROOF_DIR}/phase3b.log"
+import os
+import sqlite3
+import subprocess
+import sys
+
+from mailcrawl.decisions import DecisionDraft, decide_once
+from mailcrawl.store import connect
+from mailcrawl.vectors import CLASSIFICATION_PREFIX, require_vec
+
+home = os.environ["PHASE3B_DATA"]
+config = os.environ["PHASE3B_CFG"]
+repo = os.environ["REPO_ROOT"]
+db_path = os.path.join(home, "personal.db")
+text = open(config, encoding="utf-8").read()
+if "[inference]" not in text:
+    open(config, "w", encoding="utf-8").write("[inference]\nembeddings = true\n\n" + text)
+
+
+def run(args):
+    proc = subprocess.run(
+        [sys.executable, "-m", "mailcrawl", "--home", home, "--config", config, "--json", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise SystemExit(f"{args} {proc.returncode} {proc.stdout} {proc.stderr}")
+    import json
+    return json.loads(proc.stdout)
+
+
+conn = connect(db_path)
+try:
+    threads = {row[1]: int(row[0]) for row in conn.execute("SELECT thread_pk, subject FROM messages")}
+    flags = {
+        row[0]: int(row[1])
+        for row in conn.execute(
+            "SELECT messages.subject, threads.image_only FROM messages JOIN threads ON threads.thread_pk = messages.thread_pk"
+        )
+    }
+    if flags["Text note"] != 0 or flags["Image reviewed"] != 1 or flags["Image target"] != 1:
+        raise SystemExit(f"image_only {flags}")
+    decide_once(
+        conn,
+        threads["Image reviewed"],
+        10,
+        lambda: DecisionDraft(
+            next_state="reference",
+            lane="paper_trail",
+            rule_id="3",
+            rules_version="rules-v4",
+            origin="human",
+            source_detail="review",
+        ),
+    )
+    target = conn.execute(
+        "SELECT gmail_thread_id FROM threads WHERE thread_pk = ?",
+        (threads["Image target"],),
+    ).fetchone()[0]
+finally:
+    conn.close()
+embedded = run(["embed", "--account", "personal", "--embedder", "fake"])
+if embedded.get("embedded") != 3:
+    raise SystemExit(f"image embed {embedded}")
+knn = run(["knn", "--account", "personal", "--thread", target, "--embedder", "fake", "--now", "20"])
+if knn.get("origin") != "knn" or knn.get("source_detail") != "fake-embedder" or knn.get("next_state") != "reference":
+    raise SystemExit(f"image knn {knn}")
+conn = connect(db_path)
+require_vec(conn)
+try:
+    text_prefix = conn.execute(
+        "SELECT prefix FROM vec_classification WHERE thread_pk = ?",
+        (threads["Text note"],),
+    ).fetchone()[0]
+    image_count = conn.execute("SELECT count(*) FROM vec_image").fetchone()[0]
+finally:
+    conn.close()
+if text_prefix != CLASSIFICATION_PREFIX or image_count != 2:
+    raise SystemExit(f"text prefix {text_prefix} images {image_count}")
+print("image knn", knn["origin"], knn["source_detail"], knn["next_state"])
+print("text prefix kept")
+PY
+publish_log phase3b.log
 
 log "check: phase 4 jev stays off until config turns it on"
 PHASE4_DATA="${PROOF_HOME}/phase4-data"
@@ -1161,7 +1333,7 @@ if again.get("eligible") != 0 or again.get("decided") != 0 or again.get("review"
     raise SystemExit(f"batch again {again}")
 print("batch", batch["eligible"], batch["decided"], again["eligible"])
 PY
-cp "${PROOF_DIR}/phase4.log" "${ARTIFACT_DIR}/phase4.log"
+publish_log phase4.log
 
 record_fixture_hashes "${FIXTURE_AFTER}"
 if ! diff -q "${FIXTURE_BEFORE}" "${FIXTURE_AFTER}" >/dev/null; then
@@ -1202,6 +1374,7 @@ doc = {
         "phase3_fake_knn",
         "phase3_fusion",
         "phase3_migration",
+        "phase3b_image_knn",
         "phase4_off_by_default",
         "phase4_fake_decision",
         "phase4_grey_review",
