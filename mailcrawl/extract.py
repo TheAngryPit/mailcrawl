@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -71,6 +73,35 @@ class DefaultBackend:
         raise RuntimeError(f"no backend for {kind}")
 
 
+class PdfExtractError(Exception):
+    pass
+
+
+class PdftotextBackend:
+    def available(self, kind: str) -> bool:
+        return kind == "pdf" and shutil.which("pdftotext") is not None
+
+    def read(self, kind: str, payload: bytes) -> BackendRead:
+        if kind != "pdf":
+            raise PdfExtractError(kind)
+        proc = subprocess.run(
+            ["pdftotext", "-q", "-", "-"],
+            input=payload,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            raise PdfExtractError("pdftotext failed")
+        text = proc.stdout.decode("utf-8", errors="replace").replace("\f", "\n")
+        pages = max(proc.stdout.count(b"\f"), 1 if text.strip() else 0)
+        return BackendRead(text, pages, None)
+
+
+def pdf_backend() -> PdftotextBackend:
+    return PdftotextBackend()
+
+
 def decide_ocr(
     text: str,
     page_count: int,
@@ -109,7 +140,10 @@ def parse_attachment(
     tool = backend if backend is not None else DefaultBackend()
     if not tool.available(kind):
         return _result("skipped", kind, None, digest, "not_needed", None, None)
-    read = tool.read(kind, payload)
+    try:
+        read = tool.read(kind, payload)
+    except (PdfExtractError, OSError, subprocess.TimeoutExpired):
+        return _result("error", kind, None, digest, "not_needed", None, None)
     ocr_status = "not_needed"
     ocr_conf = None
     if kind in ("pdf", "ocr"):

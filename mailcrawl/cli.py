@@ -101,6 +101,12 @@ def _parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search")
     search.add_argument("query")
     search.add_argument("--account", required=True)
+    search.add_argument("--sender")
+    search.add_argument("--label")
+    search.add_argument("--mime")
+    search.add_argument("--image-only", action="store_true")
+    search.add_argument("--since", type=int)
+    search.add_argument("--until", type=int)
 
     rules = sub.add_parser("rules")
     rules.add_argument("--account", required=True)
@@ -210,7 +216,16 @@ def _search(args: argparse.Namespace) -> int:
         raise UsageError("account is not initialized")
     conn = connect(db_path)
     try:
-        hits = search_messages(conn, args.query)
+        hits = search_messages(
+            conn,
+            args.query,
+            sender=args.sender,
+            label=args.label,
+            mime=args.mime,
+            image_only=1 if args.image_only else None,
+            since=args.since,
+            until=args.until,
+        )
     finally:
         conn.close()
     _emit(args, {"hits": hits, "ok": True, "query": args.query})

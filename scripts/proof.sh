@@ -228,7 +228,7 @@ try:
     if body != "This body is fake fixture text.":
         raise SystemExit("cleaned body is not the kept sentence")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 4:
+    if version != 5:
         raise SystemExit(f"user_version {version}")
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table in ("decisions", "sender_decisions", "thread_mutes"):
@@ -536,6 +536,179 @@ PY
   [[ "${bad_code}" -eq 3 ]] || fail "missing ${key} exited ${bad_code}"
   printf '%s' "${bad_out}" | grep -q unsupported_schema || fail "missing ${key} lacked unsupported_schema"
 done
+
+log "check: phase 2 keyword path"
+PHASE2="${REPO_ROOT}/testdata/fixtures/phase2/keyword.mbox"
+PHASE2_DATA="${PROOF_HOME}/phase2-data"
+(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --home "${PHASE2_DATA}" --json init --account vcl --email ada@example.com
+  python3 -m mailcrawl --home "${PHASE2_DATA}" --json import mbox "${PHASE2}" --account vcl
+) | tee "${PROOF_DIR}/phase2-import.log"
+python3 - "${PHASE2_DATA}/vcl.db" <<'PY' | tee "${PROOF_DIR}/phase2-keyword.log"
+import sqlite3, sys
+path = sys.argv[1]
+conn = sqlite3.connect(path)
+conn.row_factory = sqlite3.Row
+try:
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version != 5:
+        raise SystemExit(f"user_version {version}")
+    flags = {
+        row["subject"]: row["image_only"]
+        for row in conn.execute(
+            """
+            SELECT messages.subject, threads.image_only
+            FROM messages JOIN threads ON threads.thread_pk = messages.thread_pk
+            """
+        )
+    }
+    if flags.get("Reunião da fatura") != 1 or flags.get("Só imagem") != 1:
+        raise SystemExit(f"image_only {flags}")
+    if flags.get("Texto longo") != 0:
+        raise SystemExit(f"long thread flagged {flags}")
+    if len(flags) != 3:
+        raise SystemExit(f"image_only {flags}")
+    text = conn.execute(
+        "SELECT extracted_text FROM attachments WHERE mime_type = 'application/pdf'"
+    ).fetchone()[0]
+    if "fatura FT99881" not in (text or ""):
+        raise SystemExit(f"pdftotext {text!r}")
+    print("image_only", flags)
+    print("pdftotext", text.strip())
+finally:
+    conn.close()
+PY
+for query in reuniao reunião; do
+  out="$(
+    cd "${REPO_ROOT}"
+    python3 -m mailcrawl --home "${PHASE2_DATA}" --json search "${query}" --account vcl
+  )"
+  echo "${out}" | tee "${PROOF_DIR}/phase2-fts-${query}.log"
+  printf '%s' "${out}" | grep -q '"source": "fts"' || fail "fts miss ${query}"
+done
+frag="$(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --home "${PHASE2_DATA}" --json search 99881 --account vcl
+)"
+echo "${frag}" | tee "${PROOF_DIR}/phase2-trigram.log"
+printf '%s' "${frag}" | grep -q '"source": "trigram"' || fail "trigram miss"
+PHASE2_DATA="${PHASE2_DATA}" REPO_ROOT="${REPO_ROOT}" python3 - <<'PY' | tee "${PROOF_DIR}/phase2-quoted.log"
+import json
+import os
+import subprocess
+import sys
+
+home = os.environ["PHASE2_DATA"]
+repo = os.environ["REPO_ROOT"]
+invoice = "188932a1fae40001"
+prose = "188932a1fae40002"
+
+
+def search(query: str) -> dict:
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "mailcrawl",
+            "--home",
+            home,
+            "--json",
+            "search",
+            "--account",
+            "vcl",
+            "--",
+            query,
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise SystemExit(f"{query!r} exit {proc.returncode} {proc.stdout} {proc.stderr}")
+    return json.loads(proc.stdout)
+
+
+def ids(doc: dict) -> list[str]:
+    return [hit["gmail_message_id"] for hit in doc["hits"]]
+
+
+expect_empty = ['"', "-x", "AND", "*", "body_text:linha", "fat*", "NEAR(linha sintetica)"]
+for query in expect_empty:
+    found = ids(search(query))
+    if found:
+        raise SystemExit(f"{query!r} hit {found}")
+    print("literal", query, "[]")
+if ids(search("-linha")) != [prose]:
+    raise SystemExit("minus token missed the prose")
+if ids(search("linha")) != [prose]:
+    raise SystemExit("linha missed the prose")
+if ids(search("fatura")) != [invoice]:
+    raise SystemExit("fatura missed the invoice")
+phrase = search('"fatura curta"')
+if ids(phrase) != [invoice] or phrase["hits"][0]["source"] != "fts":
+    raise SystemExit(f"phrase {phrase}")
+mixed = search('reunião "fatura')
+if ids(mixed) != [invoice] or mixed["hits"][0]["source"] != "fts":
+    raise SystemExit(f"mixed {mixed}")
+short = search("da")
+if ids(short) != [invoice] or short["hits"][0]["source"] != "fts":
+    raise SystemExit(f"short {short}")
+print("quoted operators ok")
+PY
+(
+  cd "${REPO_ROOT}"
+  python3 - <<'PY'
+import sqlite3
+from mailcrawl.schema import FTS_SQL, USER_VERSION
+from mailcrawl.store import migrate
+
+conn = sqlite3.connect(":memory:")
+conn.executescript(
+    """
+    CREATE TABLE threads (
+      thread_pk INTEGER PRIMARY KEY,
+      account_id INTEGER NOT NULL,
+      gmail_thread_id TEXT NOT NULL
+    );
+    CREATE TABLE messages (
+      msg_pk INTEGER PRIMARY KEY,
+      thread_pk INTEGER,
+      subject TEXT,
+      body_text TEXT,
+      from_hdr TEXT
+    );
+    CREATE TABLE attachments (
+      att_pk INTEGER PRIMARY KEY,
+      msg_pk INTEGER,
+      mime_type TEXT,
+      size_bytes INTEGER,
+      is_inline INTEGER NOT NULL DEFAULT 0,
+      extracted_text TEXT
+    );
+    """
+    + FTS_SQL
+)
+conn.execute("PRAGMA user_version = 4")
+conn.execute("INSERT INTO threads(thread_pk, account_id, gmail_thread_id) VALUES (1, 1, 't')")
+conn.execute(
+    "INSERT INTO messages(msg_pk, thread_pk, subject, body_text, from_hdr) VALUES (1, 1, 'Reunião', 'A reunião', 'ada@example.com')"
+)
+conn.execute(
+    "INSERT INTO attachments(msg_pk, mime_type, size_bytes, is_inline, extracted_text) VALUES (1, 'application/pdf', 80, 0, 'fatura FT99881')"
+)
+migrate(conn)
+version = conn.execute("PRAGMA user_version").fetchone()[0]
+flag = conn.execute("SELECT image_only FROM threads").fetchone()[0]
+trigram = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'msg_trigram'").fetchone()[0]
+if version != USER_VERSION or flag != 1 or "trigram" not in trigram:
+    raise SystemExit(f"migration {version} {flag} {trigram}")
+print(f"user_version {version}")
+print("image_only", flag)
+print(trigram)
+PY
+) | tee "${PROOF_DIR}/phase2-migration.log"
 
 record_fixture_hashes "${FIXTURE_AFTER}"
 if ! diff -q "${FIXTURE_BEFORE}" "${FIXTURE_AFTER}" >/dev/null; then

@@ -22,7 +22,9 @@ from mailcrawl.gognative import load_labels, load_native
 from mailcrawl.mbox import PROVISIONAL, RAW_PATH, MboxSource, Refused
 from mailcrawl.paths import UsageError
 from mailcrawl.taxonomy import axis_of, generic_category, load_taxonomy
+from mailcrawl.store import index_message
 from mailcrawl.textnorm import clean_body, parse_address, subject_norm
+from mailcrawl.threads import mark_image_only
 from mailcrawl.version import mailcrawl_version, provenance_hash
 
 Item = LabelRec | MessageRec | Refused
@@ -448,18 +450,13 @@ def _write_children(
     attachment_text = "\n".join(
         item.extracted_text for item in message.attachments if item.extracted_text
     )
-    conn.execute(
-        """
-        INSERT INTO msg_fts(rowid, subject, body_text, from_hdr, attachment_text)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            msg_pk,
-            message.subject or "",
-            clean_body(message.body_text) or "",
-            message.from_hdr or "",
-            attachment_text,
-        ),
+    index_message(
+        conn,
+        msg_pk,
+        message.subject,
+        clean_body(message.body_text),
+        message.from_hdr,
+        attachment_text,
     )
 
 
@@ -622,6 +619,7 @@ def _recompute_threads(conn: sqlite3.Connection, account_id: int) -> None:
                 thread_pk,
             ),
         )
+    mark_image_only(conn, account_id)
 
 
 def _recompute_senders(conn: sqlite3.Connection, account_id: int) -> None:

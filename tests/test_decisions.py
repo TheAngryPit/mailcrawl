@@ -4,6 +4,7 @@ import sqlite3
 import unittest
 
 from mailcrawl.decisions import DecisionDraft, decide_once
+from mailcrawl.schema import USER_VERSION
 from mailcrawl.store import migrate
 
 
@@ -106,6 +107,6 @@ class DecideOnceTest(unittest.TestCase):
             self.assertEqual(row["source_detail"], "5")
             self.assertEqual(int(row["created_at"]), 10)
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(version, 4)
+            self.assertEqual(version, USER_VERSION)
         finally:
             conn.close()
