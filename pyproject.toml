@@ -12,7 +12,7 @@ dependencies = []
 [project.optional-dependencies]
 vectors = [
   "sqlite-vec",
-  "sentence-transformers>=6.1",
+  "sentence-transformers[image]>=6.1",
 ]
 mlx = [
   "mlx>=0.32.3",

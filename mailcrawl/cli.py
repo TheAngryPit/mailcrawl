@@ -14,6 +14,7 @@ from mailcrawl.bench import run_bench
 from mailcrawl.configfile import (
     account_email,
     account_identity,
+    embed_limits,
     embedder_name,
     inference_config,
     write_account,
@@ -264,7 +265,7 @@ def _search(args: argparse.Namespace) -> int:
     flags = inference_config(config_path(args.config))
     embedder = None
     if "search-embedding" in enabled_points(flags):
-        embedder = open_embedder(_embedder(args))
+        embedder = _open_embedder(args)
     jev = None
     if "search-reranker" in enabled_points(flags):
         jev = open_client(args.jev_client)
@@ -413,7 +414,14 @@ def _bench(args: argparse.Namespace) -> int:
     names = [part.strip() for part in str(args.embedders).split(",") if part.strip()]
     if args.sample is None or args.sample < 1:
         raise UsageError("sample needs a positive count")
-    report = run_bench(home / f"{alias}.db", names, args.sample)
+    batch_size, max_tokens = embed_limits(config_path(args.config))
+    report = run_bench(
+        home / f"{alias}.db",
+        names,
+        args.sample,
+        batch_size=batch_size,
+        max_tokens=max_tokens,
+    )
     report["account"] = alias
     _emit(args, report, text=str(report["markdown"]))
     return 0
@@ -425,9 +433,17 @@ def _embedder(args: argparse.Namespace) -> str:
     return embedder_name(config_path(args.config))
 
 
+def _open_embedder(args: argparse.Namespace):
+    embedder = open_embedder(_embedder(args))
+    batch_size, max_tokens = embed_limits(config_path(args.config))
+    embedder.batch_size = batch_size
+    embedder.max_tokens = max_tokens
+    return embedder
+
+
 def _embed(args: argparse.Namespace) -> int:
     data_dir(args.home)
-    embedder = open_embedder(_embedder(args))
+    embedder = _open_embedder(args)
     flags = inference_config(config_path(args.config))
     alias = canonical_alias(args.account)
     conn = _account_db(args)
@@ -444,7 +460,7 @@ def _knn(args: argparse.Namespace) -> int:
     flags = inference_config(config_path(args.config))
     embedder = None
     if "embeddings" in enabled_points(flags):
-        embedder = open_embedder(_embedder(args))
+        embedder = _open_embedder(args)
     now = int(time.time()) if args.now is None else args.now
     conn = _account_db(args)
     try:
@@ -577,6 +593,9 @@ def _emit(args: argparse.Namespace, doc: dict[str, object], text: str | None = N
     if text:
         print(text)
         return
+    detail = doc.get("detail")
+    if isinstance(detail, str) and detail:
+        print(detail, file=sys.stderr)
     error = doc.get("error")
     if isinstance(error, str):
         print(error)

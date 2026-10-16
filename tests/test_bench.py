@@ -2,8 +2,10 @@
 
 import base64
 import json
+import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import types
@@ -16,7 +18,13 @@ from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.store import connect
-from mailcrawl.vectors import MLX_LOCAL_VERIFY, MLX_PROCESSOR_ERROR, MlxEmbedder, open_embedder
+from mailcrawl.vectors import (
+    MLX_LOCAL_VERIFY,
+    MLX_PROCESSOR_ERROR,
+    FakeEmbedder,
+    MlxEmbedder,
+    open_embedder,
+)
 
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAMBAQAY3Y20AAAAAElFTkSuQmCC"
@@ -283,3 +291,42 @@ def _cli(argv: list[str]) -> tuple[int, dict[str, object]]:
     if not text:
         return code, {}
     return code, json.loads(text)
+
+
+class BenchChildTest(unittest.TestCase):
+    def test_child_json_file_uses_the_batch_bound(self) -> None:
+        text = " ".join(f"w{i:02d}" for i in range(40))
+        embedder = FakeEmbedder()
+        embedder.batch_size = 2
+        embedder.max_tokens = 8
+        expected = invoke(
+            "embeddings",
+            lambda: embedder.embed([text] * 5),
+            {"embeddings": True},
+        )
+        self.assertEqual([len(chunk) for chunk in embedder.batches], [2, 2, 1])
+        self.assertLessEqual(len(embedder.batches[0][0]), 32)
+        descriptor, out_path = tempfile.mkstemp(suffix=".json")
+        os.close(descriptor)
+        payload = {
+            "batch_size": 2,
+            "image_only": [],
+            "images": [],
+            "max_tokens": 8,
+            "name": "fake",
+            "texts": [[1, text]] * 5,
+        }
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "mailcrawl.bench", out_path],
+                input=json.dumps(payload),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout, "")
+            raw = json.loads(Path(out_path).read_text(encoding="utf-8"))
+        finally:
+            Path(out_path).unlink(missing_ok=True)
+        self.assertEqual(raw["text_vectors"], expected)

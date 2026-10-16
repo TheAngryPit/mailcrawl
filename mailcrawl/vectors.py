@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from mailcrawl.configfile import DEFAULT_BATCH_SIZE, DEFAULT_MAX_TOKENS
 from mailcrawl.decisions import DecisionDraft, current_decision, decide_once
 from mailcrawl.inference import enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
@@ -38,11 +39,68 @@ MLX_PROCESSOR_ERROR = (
 )
 GEMMA_CONFIG = {"audio_config": None}
 IMAGE_PROCESSING = {"image": {"max_soft_tokens": 280}}
+CHARS_PER_TOKEN = 4
 _TABLE = {
     "classification": "vec_classification",
     "search": "vec_search",
 }
 VEC_IMAGE = "vec_image"
+
+
+def truncate_text(text: str, max_tokens: int) -> str:
+    words = text.split()
+    cap = max_tokens * CHARS_PER_TOKEN
+    if len(words) <= max_tokens and len(text) <= cap:
+        return text
+    kept = 0
+    index = 0
+    length = len(text)
+    while index < length and kept < max_tokens:
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            break
+        while index < length and not text[index].isspace():
+            index += 1
+        kept += 1
+    clipped = text[:index]
+    if len(clipped) > cap:
+        return clipped[:cap]
+    return clipped
+
+
+def _max_tokens(embedder: object) -> int:
+    value = getattr(embedder, "max_tokens", DEFAULT_MAX_TOKENS)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else DEFAULT_MAX_TOKENS
+
+
+def _batch_size(embedder: object) -> int:
+    value = getattr(embedder, "batch_size", DEFAULT_BATCH_SIZE)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else DEFAULT_BATCH_SIZE
+
+
+def bounded_text_rows(embedder: object, texts: list[str], encode_chunk) -> list[list[float]]:
+    cap = _max_tokens(embedder)
+    size = _batch_size(embedder)
+    clipped = [truncate_text(text, cap) for text in texts]
+    rows: list[list[float]] = []
+    batches: list[list[str]] = []
+    for start in range(0, len(clipped), size):
+        chunk = clipped[start : start + size]
+        batches.append(chunk)
+        rows.extend(encode_chunk(chunk))
+    embedder.batches = batches
+    return rows
+
+
+def bounded_image_rows(embedder: object, images: list[bytes], encode_one) -> list[list[float]]:
+    rows: list[list[float]] = []
+    seen: list[bytes] = []
+    for blob in images:
+        seen.append(blob)
+        rows.extend(encode_one(blob))
+    embedder.image_batches = seen
+    return rows
 
 
 class FakeEmbedder:
@@ -51,11 +109,19 @@ class FakeEmbedder:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         enter_model()
-        return [_hash_vector(text, self.dimension) for text in texts]
+        return bounded_text_rows(
+            self,
+            texts,
+            lambda chunk: [_hash_vector(text, self.dimension) for text in chunk],
+        )
 
     def embed_images(self, images: list[bytes]) -> list[list[float]]:
         enter_model()
-        return [_hash_vector(blob.hex(), self.dimension) for blob in images]
+        return bounded_image_rows(
+            self,
+            images,
+            lambda blob: [_hash_vector(blob.hex(), self.dimension)],
+        )
 
 
 class ScriptedEmbedder:
@@ -64,11 +130,19 @@ class ScriptedEmbedder:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         enter_model()
-        return [_scripted_vector(text, self.dimension) for text in texts]
+        return bounded_text_rows(
+            self,
+            texts,
+            lambda chunk: [_scripted_vector(text, self.dimension) for text in chunk],
+        )
 
     def embed_images(self, images: list[bytes]) -> list[list[float]]:
         enter_model()
-        return [_scripted_vector("image", self.dimension) for _blob in images]
+        return bounded_image_rows(
+            self,
+            images,
+            lambda _blob: [_scripted_vector("image", self.dimension)],
+        )
 
 
 class GemmaEmbedder:
@@ -77,34 +151,44 @@ class GemmaEmbedder:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         enter_model()
+        if not texts:
+            self.batches = []
+            return []
         model = self._gemma()
-        raw = model.encode(
-            list(texts),
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
-        return _rows(self.model_id, raw)
+        model.max_seq_length = _max_tokens(self)
+
+        def encode_chunk(chunk: list[str]) -> list[list[float]]:
+            raw = model.encode(
+                list(chunk),
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            )
+            return _rows(self.model_id, raw)
+
+        return bounded_text_rows(self, texts, encode_chunk)
 
     def embed_images(self, images: list[bytes]) -> list[list[float]]:
         enter_model()
         if not images:
+            self.image_batches = []
             return []
         model = self._gemma()
-        with tempfile.TemporaryDirectory() as tmp:
-            batch = []
-            for index, blob in enumerate(images):
-                path = Path(tmp) / f"{index}{_image_suffix(blob)}"
+
+        def encode_one(blob: bytes) -> list[list[float]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"0{_image_suffix(blob)}"
                 path.write_bytes(blob)
-                batch.append({"image": str(path)})
-            raw = model.encode(
-                batch,
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-                processing_kwargs=IMAGE_PROCESSING,
-            )
-        return _rows(self.model_id, raw)
+                raw = model.encode(
+                    [{"image": str(path)}],
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                    processing_kwargs=IMAGE_PROCESSING,
+                )
+            return _rows(self.model_id, raw)
+
+        return bounded_image_rows(self, images, encode_one)
 
     def _gemma(self):
         enter_model()
@@ -115,7 +199,7 @@ class GemmaEmbedder:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
             raise UsageError(
-                "sentence-transformers>=6.1 is not installed. "
+                "sentence-transformers[image]>=6.1 is not installed. "
                 f"local-verify: {LOCAL_VERIFY}"
             ) from exc
         try:
@@ -143,27 +227,42 @@ class MlxEmbedder:
     def embed(self, texts: list[str]) -> list[list[float]]:
         enter_model()
         if not texts:
+            self.batches = []
             return []
         model, tokenizer, mx = self._text_runtime()
-        inputs = tokenizer(list(texts), padding=True, return_tensors="np")
-        embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
-        mx.eval(embeddings)
-        return _rows(self.model_id, embeddings.tolist())
+        cap = _max_tokens(self)
+
+        def encode_chunk(chunk: list[str]) -> list[list[float]]:
+            inputs = tokenizer(
+                list(chunk),
+                padding=True,
+                truncation=True,
+                max_length=cap,
+                return_tensors="np",
+            )
+            embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
+            mx.eval(embeddings)
+            return _rows(self.model_id, embeddings.tolist())
+
+        return bounded_text_rows(self, texts, encode_chunk)
 
     def embed_images(self, images: list[bytes]) -> list[list[float]]:
         enter_model()
         if not images:
+            self.image_batches = []
             return []
         model, processor, mx = self._vision_runtime()
         from PIL import Image
 
-        pictures = [Image.open(io.BytesIO(blob)) for blob in images]
-        for picture in pictures:
+        def encode_one(blob: bytes) -> list[list[float]]:
+            picture = Image.open(io.BytesIO(blob))
             picture.load()
-        inputs = processor(images=pictures, return_tensors="np")
-        embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
-        mx.eval(embeddings)
-        return _rows(self.model_id, embeddings.tolist())
+            inputs = processor(images=[picture], return_tensors="np")
+            embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
+            mx.eval(embeddings)
+            return _rows(self.model_id, embeddings.tolist())
+
+        return bounded_image_rows(self, images, encode_one)
 
     def prepare(self, *, images: bool) -> None:
         enter_model()
