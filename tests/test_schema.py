@@ -1,6 +1,8 @@
 """Schema v2 creates ingest, FTS, and the empty decision tables."""
 
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -108,7 +110,25 @@ class SchemaV1Test(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_user_version_5_gains_vec_tables(self) -> None:
+    def test_open_does_not_import_sqlite_vec(self) -> None:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys\n"
+                "from mailcrawl.store import connect\n"
+                "connect(':memory:')\n"
+                "raise SystemExit('sqlite_vec' in sys.modules)\n",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+    def test_user_version_5_does_not_create_vec_tables(self) -> None:
         conn = sqlite3.connect(":memory:")
         try:
             conn.executescript(SCHEMA_SQL)
@@ -119,14 +139,9 @@ class SchemaV1Test(unittest.TestCase):
                 row[0]
                 for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
-            self.assertIn("vec_classification", names)
-            self.assertIn("vec_search", names)
+            self.assertNotIn("vec_classification", names)
+            self.assertNotIn("vec_search", names)
             self.assertNotIn("embeddings", names)
-            sql = conn.execute(
-                "SELECT sql FROM sqlite_master WHERE name = 'vec_classification'"
-            ).fetchone()[0]
-            self.assertIn("float[768]", sql)
-            self.assertIn("cosine", sql)
         finally:
             conn.close()
 

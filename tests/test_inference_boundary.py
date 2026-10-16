@@ -53,6 +53,14 @@ class InferenceBoundaryTest(unittest.TestCase):
     def test_model_client_import_is_caught(self) -> None:
         problems = scan_source("import openai\n", "planted_import.py")
         self.assertEqual(problems, ["planted_import.py:1: model client import openai"])
+        hidden = scan_source(
+            "def load():\n    from sentence_transformers import SentenceTransformer\n",
+            "planted_lazy.py",
+        )
+        self.assertEqual(
+            hidden,
+            ["planted_lazy.py:2: model client import sentence_transformers"],
+        )
 
     def test_declared_points_are_off_by_default(self) -> None:
         self.assertEqual(enabled_points(None), frozenset())

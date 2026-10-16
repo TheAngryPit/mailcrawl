@@ -1,14 +1,12 @@
-"""Two sqlite-vec tables and a deterministic embedder. The real model stays out."""
+"""Optional vec0 tables. Weights load only inside a gated embed call."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import math
-import os
-import pwd
 import sqlite3
-import sys
+from typing import Protocol
 
 from mailcrawl.decisions import DecisionDraft, current_decision, decide_once
 from mailcrawl.inference import enabled_points, enter_model, invoke
@@ -46,40 +44,95 @@ class ScriptedEmbedder:
         return [_scripted_vector(text, self.dimension) for text in texts]
 
 
-def open_embedder(name: str) -> FakeEmbedder | ScriptedEmbedder:
+class GemmaEmbedder:
+    model_id = "google/embeddinggemma-2"
+    dimension = NATIVE_DIM
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        enter_model()
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise UsageError(
+                "sentence-transformers>=6.1 is not installed. "
+                f"local-verify: {LOCAL_VERIFY}"
+            ) from exc
+        try:
+            import torch
+        except ImportError as exc:
+            raise UsageError(
+                "torch is not installed. "
+                f"local-verify: {LOCAL_VERIFY}"
+            ) from exc
+        model = _load_gemma(SentenceTransformer, torch)
+        if getattr(model, "default_prompt_name", None) is not None:
+            model.default_prompt_name = None
+        raw = model.encode(
+            list(texts),
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        vectors: list[list[float]] = []
+        for row in raw:
+            values = [float(item) for item in list(row)]
+            if len(values) != NATIVE_DIM:
+                raise UsageError(f"{self.model_id} returned {len(values)} dimensions")
+            vectors.append(truncate(values, NATIVE_DIM))
+        return vectors
+
+
+class Embedder(Protocol):
+    model_id: str
+    dimension: int
+
+    def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+def open_embedder(name: str) -> Embedder:
     if name == "fake":
         return FakeEmbedder()
     if name == "scripted":
         return ScriptedEmbedder()
     if name == "gemma":
-        raise UsageError(f"local-verify: {LOCAL_VERIFY}")
+        return GemmaEmbedder()
     raise UsageError(f"unknown embedder {name}")
 
 
-def ensure_vec(conn: sqlite3.Connection) -> None:
+def require_vec(conn: sqlite3.Connection) -> None:
+    try:
+        import sqlite_vec
+    except ImportError as exc:
+        raise UsageError(
+            "sqlite-vec is not installed. The vectors extra provides sqlite-vec "
+            "and sentence-transformers>=6.1."
+        ) from exc
     conn.enable_load_extension(True)
     try:
-        _sqlite_vec().load(conn)
+        sqlite_vec.load(conn)
     finally:
         conn.enable_load_extension(False)
+    create_vec_tables(conn)
 
 
-def _sqlite_vec():
-    try:
-        import sqlite_vec
-    except ModuleNotFoundError:
-        version = f"python{sys.version_info.major}.{sys.version_info.minor}"
-        site = os.path.join(
-            pwd.getpwuid(os.getuid()).pw_dir,
-            ".local",
-            "lib",
-            version,
-            "site-packages",
-        )
-        if site not in sys.path:
-            sys.path.append(site)
-        import sqlite_vec
-    return sqlite_vec
+def _load_gemma(sentence_transformer, torch):
+    dtypes = []
+    mps = getattr(getattr(torch, "backends", None), "mps", None)
+    if bool(torch.cuda.is_available()) or (mps is not None and bool(mps.is_available())):
+        dtypes.append(torch.bfloat16)
+    dtypes.append(torch.float32)
+    last: Exception | None = None
+    for dtype in dtypes:
+        try:
+            return sentence_transformer(
+                "google/embeddinggemma-2",
+                model_kwargs={"torch_dtype": dtype},
+            )
+        except Exception as exc:
+            last = exc
+    raise UsageError(
+        f"could not load google/embeddinggemma-2 in bfloat16 or float32: {last}"
+    )
 
 
 def create_vec_tables(conn: sqlite3.Connection) -> None:
@@ -126,10 +179,13 @@ def truncate(vector: list[float], dim: int) -> list[float]:
     return [value / norm for value in head]
 
 
-def embed_threads(conn: sqlite3.Connection, embedder: FakeEmbedder | ScriptedEmbedder, config: dict[str, bool] | None) -> int:
+def embed_threads(conn: sqlite3.Connection, embedder: Embedder, config: dict[str, bool] | None) -> int:
+    if "embeddings" not in enabled_points(config):
+        return 0
     grouped = _threads(conn)
     if not grouped:
         return 0
+    require_vec(conn)
     texts: list[str] = []
     for _thread_pk, subject, body in grouped:
         texts.append(classification_text(body))
@@ -207,12 +263,13 @@ def ordered_hits(
 def knn_decide(
     conn: sqlite3.Connection,
     thread_pk: int,
-    embedder: FakeEmbedder | ScriptedEmbedder,
+    embedder: Embedder,
     config: dict[str, bool] | None,
     now: int,
 ) -> sqlite3.Row | None:
     if "embeddings" not in enabled_points(config):
         return None
+    require_vec(conn)
     _ensure_classification(conn, thread_pk, embedder, config)
     blob = _stored_embedding(conn, "classification", thread_pk)
     if blob is None:
@@ -332,7 +389,7 @@ def _stored_embedding(conn: sqlite3.Connection, kind: str, thread_pk: int) -> by
 def _ensure_classification(
     conn: sqlite3.Connection,
     thread_pk: int,
-    embedder: FakeEmbedder | ScriptedEmbedder,
+    embedder: Embedder,
     config: dict[str, bool] | None,
 ) -> None:
     if _stored_embedding(conn, "classification", thread_pk) is not None:

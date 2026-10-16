@@ -19,8 +19,6 @@ TABLES = (
     "thread_mutes",
     "msg_fts",
     "msg_trigram",
-    "vec_classification",
-    "vec_search",
 )
 
 HEADER_ALLOW = (

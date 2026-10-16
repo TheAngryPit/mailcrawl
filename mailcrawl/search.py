@@ -7,13 +7,7 @@ import sqlite3
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.inference import enabled_points, invoke
 from mailcrawl.paths import UsageError
-from mailcrawl.vectors import (
-    FakeEmbedder,
-    ScriptedEmbedder,
-    nearest_threads,
-    ordered_hits,
-    search_query,
-)
+from mailcrawl.vectors import Embedder, nearest_threads, ordered_hits, require_vec, search_query
 
 _FTS_WEIGHTS = (10.0, 1.0, 10.0, 1.0)
 
@@ -28,7 +22,7 @@ def search_messages(
     image_only: int | None = None,
     since: int | None = None,
     until: int | None = None,
-    embedder: FakeEmbedder | ScriptedEmbedder | None = None,
+    embedder: Embedder | None = None,
     config: dict[str, bool] | None = None,
     fusion: str = "keyword",
     keyword_weight: float = 1.0,
@@ -178,12 +172,18 @@ def _match(
 
 def _vec_ids(
     conn: sqlite3.Connection,
-    embedder: FakeEmbedder | ScriptedEmbedder,
+    embedder: Embedder,
     config: dict[str, bool] | None,
     text: str,
     candidates: set[int] | None,
     k: int,
 ) -> list[int]:
+    ready = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name = 'vec_search'"
+    ).fetchone()
+    if ready is None:
+        return []
+    require_vec(conn)
     vectors = invoke(
         "search-embedding",
         lambda: embedder.embed([search_query(text)]),

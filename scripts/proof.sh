@@ -5,6 +5,16 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROOF_DIR="${REPO_ROOT}/proof"
 ORIG_HOME="${HOME}"
+# HOME isolation moves the user site. An optional extra already on this interpreter stays visible.
+VEC_SITE=""
+if VEC_SITE="$(python3 -c 'import sqlite_vec, pathlib; print(pathlib.Path(sqlite_vec.__file__).resolve().parent.parent)' 2>/dev/null)"; then
+  case ":${PYTHONPATH:-}:" in
+    *":${VEC_SITE}:"*) ;;
+    *) export PYTHONPATH="${VEC_SITE}${PYTHONPATH:+:${PYTHONPATH}}" ;;
+  esac
+else
+  VEC_SITE=""
+fi
 PROOF_HOME="$(mktemp -d)"
 export HOME="${PROOF_HOME}"
 export http_proxy="http://127.0.0.1:9"
@@ -34,6 +44,9 @@ trap cleanup EXIT
 
 [[ "${HOME}" != "${ORIG_HOME}" ]] || fail "HOME was not isolated"
 [[ "${HOME}" == "${PROOF_HOME}" ]] || fail "HOME is not the temp dir"
+if [[ -n "${VEC_SITE}" ]]; then
+  python3 -c "import sqlite_vec" || fail "sqlite-vec vanished after HOME isolation"
+fi
 
 log "check: required synthetic fixtures"
 for f in \
@@ -705,17 +718,18 @@ trigram = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'msg_trigram'
 names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 if version != USER_VERSION or flag != 1 or "trigram" not in trigram:
     raise SystemExit(f"migration {version} {flag} {trigram}")
-if "vec_classification" not in names or "vec_search" not in names or "embeddings" in names:
+if "vec_classification" in names or "vec_search" in names or "embeddings" in names:
     raise SystemExit(f"vec tables {sorted(names)}")
 print(f"user_version {version}")
 print("image_only", flag)
 print(trigram)
-print("vec", "vec_classification", "vec_search")
+print("vec absent")
 PY
 ) | tee "${PROOF_DIR}/phase2-migration.log"
 
 log "check: phase 3 vectors stay off until config turns them on"
-mkdir -p /opt/cursor/artifacts/phase3-proof
+ARTIFACT_DIR="${ARTIFACT_DIR:-$PROOF_DIR}"
+mkdir -p "${ARTIFACT_DIR}"
 PHASE3_DATA="${PROOF_HOME}/phase3-data"
 PHASE3_CFG="${PROOF_HOME}/phase3-config.toml"
 PHASE3_MBOX="${PROOF_HOME}/phase3.mbox"
@@ -831,7 +845,7 @@ if code != 0 or embedded.get("embedded") != 0:
     raise SystemExit(f"off embed {code} {embedded}")
 conn = connect(db_path)
 try:
-    count = conn.execute("SELECT count(*) FROM vec_classification").fetchone()[0]
+    names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     target = conn.execute(
         """
         SELECT threads.gmail_thread_id
@@ -841,13 +855,17 @@ try:
     ).fetchone()[0]
 finally:
     conn.close()
-if count != 0:
-    raise SystemExit(f"off vectors {count}")
+if "vec_classification" in names or "vec_search" in names:
+    raise SystemExit(f"off vectors {sorted(names)}")
 code, hits = run(["search", "--account", "personal", "--", "alpha"])
 if code != 0 or [hit["source"] for hit in hits["hits"]] != ["fts"]:
     raise SystemExit(f"off search {hits}")
 if hits["hits"][0]["subject"] != "Alpha keyword":
     raise SystemExit(f"off subject {hits}")
+code, gemma = run(["embed", "--account", "personal", "--embedder", "gemma"])
+if code != 0 or gemma.get("embedded") != 0:
+    raise SystemExit(f"gemma off {code} {gemma}")
+print("gemma off embedded 0")
 code, knn = run(["knn", "--account", "personal", "--thread", target, "--embedder", "fake"])
 if code != 0 or knn.get("origin") is not None:
     raise SystemExit(f"off knn {knn}")
@@ -966,11 +984,11 @@ version = fresh.execute("PRAGMA user_version").fetchone()[0]
 names = {row[0] for row in fresh.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 if version != USER_VERSION or version != 6:
     raise SystemExit(f"v5 migration {version}")
-if "vec_classification" not in names or "vec_search" not in names or "embeddings" in names:
+if "vec_classification" in names or "vec_search" in names or "embeddings" in names:
     raise SystemExit(f"v5 tables {sorted(names)}")
-print("migration", version)
+print("migration", version, "vec absent")
 PY
-cp "${PROOF_DIR}/phase3.log" /opt/cursor/artifacts/phase3-proof/phase3.log
+cp "${PROOF_DIR}/phase3.log" "${ARTIFACT_DIR}/phase3.log"
 
 record_fixture_hashes "${FIXTURE_AFTER}"
 if ! diff -q "${FIXTURE_BEFORE}" "${FIXTURE_AFTER}" >/dev/null; then

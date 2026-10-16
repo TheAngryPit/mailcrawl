@@ -12,7 +12,6 @@ from mailcrawl.paths import UsageError, canonical_alias
 from mailcrawl.schema import FTS_SQL, SCHEMA_SQL, TRIGRAM_SQL, USER_VERSION, V2_TABLES_SQL
 from mailcrawl.textnorm import clean_body
 from mailcrawl.threads import mark_image_only
-from mailcrawl.vectors import create_vec_tables, ensure_vec
 
 DUMP_TABLES = (
     "accounts",
@@ -32,13 +31,11 @@ class UnsupportedSchema(Exception):
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    ensure_vec(conn)
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if version == USER_VERSION:
         return
     if version == 0:
         conn.executescript(SCHEMA_SQL)
-        create_vec_tables(conn)
         conn.execute(f"PRAGMA user_version = {USER_VERSION}")
         conn.commit()
         return
@@ -245,7 +242,6 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_v5(conn: sqlite3.Connection) -> None:
-    create_vec_tables(conn)
     conn.execute(f"PRAGMA user_version = {USER_VERSION}")
     conn.commit()
 

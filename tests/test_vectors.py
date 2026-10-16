@@ -1,7 +1,10 @@
 """Phase 3 vectors stay off unless config turns the point on."""
 
+import importlib.util
 import json
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -11,19 +14,27 @@ from pathlib import Path
 from mailcrawl.cli import main
 from mailcrawl.configfile import inference_config, write_account
 from mailcrawl.decisions import DecisionDraft, decide_once
+from mailcrawl.inference import BoundaryError, invoke
+from mailcrawl.paths import UsageError
 from mailcrawl.store import connect, index_message
 from mailcrawl.vectors import (
     LOCAL_VERIFY,
     CLASSIFICATION_PREFIX,
     NATIVE_DIM,
     FakeEmbedder,
+    GemmaEmbedder,
     ScriptedEmbedder,
     embed_threads,
     knn_decide,
     open_embedder,
+    require_vec,
     truncate,
 )
 from mailcrawl.search import search_messages
+
+
+def _sqlite_vec_installed() -> bool:
+    return importlib.util.find_spec("sqlite_vec") is not None
 
 
 class CountingEmbedder:
@@ -102,11 +113,14 @@ class VectorSearchTest(unittest.TestCase):
                 self.assertEqual(gated, [{"gmail_message_id": "m-alpha", "snippet": "Alpha keyword alpha keyword", "source": "fts", "subject": "Alpha keyword"}])
                 self.assertEqual(embed_threads(conn, embedder, None), 0)
                 self.assertEqual(embedder.calls, 0)
-                self.assertEqual(conn.execute("SELECT count(*) FROM vec_search").fetchone()[0], 0)
+                names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
+                self.assertNotIn("vec_search", names)
+                self.assertNotIn("vec_classification", names)
                 self.assertIsNone(knn_decide(conn, 1, embedder, None, 10))
             finally:
                 conn.close()
 
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
     def test_scripted_fusion_flips_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "personal.db")
@@ -124,6 +138,11 @@ class VectorSearchTest(unittest.TestCase):
                 ).fetchone()
                 self.assertEqual(prefix, CLASSIFICATION_PREFIX)
                 self.assertEqual(dim, NATIVE_DIM)
+                sql = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name = 'vec_classification'"
+                ).fetchone()[0]
+                self.assertIn("float[768]", sql)
+                self.assertIn("cosine", sql)
                 keyword = search_messages(
                     conn,
                     "alpha",
@@ -154,6 +173,7 @@ class VectorSearchTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
     def test_fake_knn_copies_the_near_decision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "personal.db")
@@ -208,9 +228,8 @@ class VectorSearchTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
     def test_truncation_matches_in_256_dimensions(self) -> None:
-        from mailcrawl.inference import invoke
-
         flags = {"embeddings": True}
         embedder = FakeEmbedder()
         full = invoke("embeddings", lambda: embedder.embed(["synthetic thread"]), flags)
@@ -222,6 +241,7 @@ class VectorSearchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "personal.db")
             try:
+                require_vec(conn)
                 conn.execute(
                     """
                     CREATE VIRTUAL TABLE vec_trunc USING vec0(
@@ -255,15 +275,49 @@ class VectorSearchTest(unittest.TestCase):
 
 
 class VectorCliTest(unittest.TestCase):
-    def test_gemma_is_local_verify_and_db_v2_is_refused(self) -> None:
-        with self.assertRaises(Exception) as caught:
-            open_embedder("gemma")
-        self.assertEqual(str(caught.exception), f"local-verify: {LOCAL_VERIFY}")
+    def test_gemma_is_opt_in_and_db_v2_is_refused(self) -> None:
+        embedder = open_embedder("gemma")
+        self.assertIsInstance(embedder, GemmaEmbedder)
+        self.assertEqual(embedder.model_id, "google/embeddinggemma-2")
+        self.assertEqual(embedder.dimension, 768)
         self.assertNotIn("db-v2", LOCAL_VERIFY)
         spec = Path(__file__).resolve().parents[1].joinpath("docs/SPEC.md").read_text(encoding="utf-8")
         self.assertIn(LOCAL_VERIFY, spec)
+        self.assertIn("vectors", spec)
+        with self.assertRaises(BoundaryError):
+            embedder.embed(["synthetic"])
+        self.assertNotIn("sentence_transformers", sys.modules)
+        if importlib.util.find_spec("sentence_transformers") is None:
+            with self.assertRaises(UsageError) as missing:
+                invoke(
+                    "embeddings",
+                    lambda: embedder.embed(["synthetic"]),
+                    {"embeddings": True},
+                )
+            self.assertIn("sentence-transformers>=6.1", str(missing.exception))
+            self.assertIn(LOCAL_VERIFY, str(missing.exception))
+            self.assertNotIn("sentence_transformers", sys.modules)
+            self.assertNotIn("torch", sys.modules)
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
+            config = home / "config.toml"
+            buf = StringIO()
+            with redirect_stdout(buf):
+                init = main(
+                    [
+                        "--json",
+                        "--home",
+                        str(home),
+                        "--config",
+                        str(config),
+                        "init",
+                        "--account",
+                        "personal",
+                        "--email",
+                        "ada@example.com",
+                    ]
+                )
+            self.assertEqual(init, 0, buf.getvalue())
             buf = StringIO()
             with redirect_stdout(buf):
                 code = main(
@@ -271,6 +325,8 @@ class VectorCliTest(unittest.TestCase):
                         "--json",
                         "--home",
                         str(home),
+                        "--config",
+                        str(config),
                         "embed",
                         "--account",
                         "personal",
@@ -278,9 +334,9 @@ class VectorCliTest(unittest.TestCase):
                         "gemma",
                     ]
                 )
-            self.assertEqual(code, 2)
-            self.assertIn(LOCAL_VERIFY, buf.getvalue())
-            self.assertNotIn("sentence_transformers", buf.getvalue())
+            self.assertEqual(code, 0, buf.getvalue())
+            self.assertIn('"embedded": 0', buf.getvalue())
+            self.assertNotIn("sentence_transformers", sys.modules)
             refused = home / "db-v2"
             buf = StringIO()
             with redirect_stdout(buf):
