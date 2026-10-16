@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mailcrawl.configfile import DEFAULT_BATCH_SIZE, DEFAULT_MAX_TOKENS
+from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.inference import invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.threads import embeddable_image
@@ -28,6 +29,38 @@ from mailcrawl.vectors import (
 )
 
 _ON = {"embeddings": True}
+LABEL_TRUTH_VERIFY = (
+    "python -m mailcrawl --json --db ~/MailVault/db-v4-sandbox "
+    "bench --account thehive --embedders gemma,mlx --sample 64 "
+    "--truth labels --taxonomy ~/MailVault/taxonomy.thehive.json"
+)
+_TRUTHS = frozenset({"decisions", "labels"})
+_VOTE_K = 10
+_LAYERS = (1, 2)
+
+
+@dataclass(frozen=True)
+class LabelPath:
+    segments: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.segments or any(segment == "" for segment in self.segments):
+            raise ValueError("a label path needs segments")
+
+    @staticmethod
+    def parse(name: str) -> LabelPath | None:
+        segments = tuple(segment.strip() for segment in name.split("/") if segment.strip())
+        if not segments:
+            return None
+        return LabelPath(segments)
+
+    @property
+    def layer1(self) -> str:
+        return self.segments[0]
+
+    @property
+    def full(self) -> str:
+        return "/".join(self.segments)
 
 
 @dataclass(frozen=True)
@@ -38,6 +71,8 @@ class ThreadRow:
     image_only: bool
     has_images: bool
     human_label: str | None
+    categories: frozenset[str] = frozenset()
+    paths: frozenset[LabelPath] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -46,6 +81,9 @@ class Drawn:
     images: tuple[tuple[int, int, bytes], ...]
     image_only: frozenset[int]
     human: dict[int, str]
+    categories: dict[int, frozenset[str]]
+    truth: str
+    paths: dict[int, frozenset[LabelPath]]
 
 
 @dataclass(frozen=True)
@@ -70,17 +108,23 @@ def run_bench(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    truth: str = "decisions",
+    label_categories: dict[str, frozenset[str]] | None = None,
 ) -> dict[str, object]:
     if sample < 1:
         raise UsageError("sample needs a positive count")
     if not names:
         raise UsageError("bench needs an embedder")
+    if truth not in _TRUTHS:
+        raise UsageError("truth is decisions or labels")
+    if truth == "labels" and label_categories is None:
+        raise UsageError("labels truth needs a taxonomy")
     if any("db-v2" in part.lower() for part in source.parts):
         raise UsageError("refusing a path that includes db-v2")
     if not source.is_file():
         raise UsageError("account is not initialized")
     before = _digest(source)
-    drawn = _draw(source, sample)
+    drawn = _draw(source, sample, truth, label_categories or {})
     if _digest(source) != before:
         raise UsageError("bench wrote the source database")
     measured: list[Measured] = []
@@ -95,7 +139,9 @@ def run_bench(
     return _document(sample, drawn, measured, vector_db)
 
 
-def select_sample(rows: list[ThreadRow], sample: int) -> list[ThreadRow]:
+def select_sample(rows: list[ThreadRow], sample: int, *, truth: str = "decisions") -> list[ThreadRow]:
+    if truth == "labels":
+        return _select_paths(rows, sample)
     ordered = sorted(rows, key=lambda row: row.thread_pk)
     image_rows = [row for row in ordered if row.image_only or row.has_images]
     image_rows.sort(key=lambda row: (not row.image_only, row.thread_pk))
@@ -129,7 +175,57 @@ def select_sample(rows: list[ThreadRow], sample: int) -> list[ThreadRow]:
     return picked
 
 
-def _draw(source: Path, sample: int) -> Drawn:
+def _select_paths(rows: list[ThreadRow], sample: int) -> list[ThreadRow]:
+    ordered = [row for row in sorted(rows, key=lambda row: row.thread_pk) if row.paths]
+    image_rows = [row for row in ordered if row.image_only or row.has_images]
+    image_rows.sort(key=lambda row: (not row.image_only, row.thread_pk))
+    quota = min(len(image_rows), max(1, sample // 4)) if image_rows else 0
+    picked: list[ThreadRow] = []
+    seen: set[int] = set()
+    for row in image_rows[:quota]:
+        picked.append(row)
+        seen.add(row.thread_pk)
+    pool = [row for row in ordered if row.thread_pk not in seen]
+    while len(picked) < sample and pool:
+        layer1_counts = _node_counts(pool, 1)
+        rare_layer1 = min(layer1_counts, key=lambda node: (layer1_counts[node], node))
+        group = [row for row in pool if rare_layer1 in _nodes(row.paths, 1)]
+        layer2_counts: dict[str, int] = {}
+        for row in group:
+            for path in row.paths:
+                if path.layer1 != rare_layer1:
+                    continue
+                layer2_counts[path.full] = layer2_counts.get(path.full, 0) + 1
+        rare_layer2 = min(layer2_counts, key=lambda node: (layer2_counts[node], node))
+        choice = next(row for row in group if any(path.full == rare_layer2 for path in row.paths))
+        picked.append(choice)
+        seen.add(choice.thread_pk)
+        pool = [row for row in pool if row.thread_pk != choice.thread_pk]
+    return picked
+
+
+def _nodes(paths: frozenset[LabelPath], layer: int) -> frozenset[str]:
+    if layer == 1:
+        return frozenset(path.layer1 for path in paths)
+    if layer == 2:
+        return frozenset(path.full for path in paths)
+    raise UsageError("label layers are 1 and 2")
+
+
+def _node_counts(rows: list[ThreadRow], layer: int) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        for node in _nodes(row.paths, layer):
+            counts[node] = counts.get(node, 0) + 1
+    return counts
+
+
+def _draw(
+    source: Path,
+    sample: int,
+    truth: str,
+    label_categories: dict[str, frozenset[str]],
+) -> Drawn:
     conn = _open_ro(source)
     try:
         image_only_ids = {
@@ -146,18 +242,24 @@ def _draw(source: Path, sample: int) -> Drawn:
                 """
             )
         }
-        rows = [
-            ThreadRow(
-                thread_pk,
-                subject,
-                body,
-                thread_pk in image_only_ids,
-                thread_pk in with_images,
-                human.get(thread_pk),
+        labelled = _label_sets(conn, label_categories) if truth == "labels" else {}
+        blank = (frozenset(), frozenset())
+        rows = []
+        for thread_pk, subject, body in _threads(conn):
+            paths, categories = labelled.get(thread_pk, blank)
+            rows.append(
+                ThreadRow(
+                    thread_pk,
+                    subject,
+                    body,
+                    thread_pk in image_only_ids,
+                    thread_pk in with_images,
+                    human.get(thread_pk),
+                    categories,
+                    paths,
+                )
             )
-            for thread_pk, subject, body in _threads(conn)
-        ]
-        chosen = select_sample(rows, sample)
+        chosen = select_sample(rows, sample, truth=truth)
         ids = {row.thread_pk for row in chosen}
         images = tuple(
             (item.thread_pk, item.att_pk, item.blob)
@@ -170,9 +272,52 @@ def _draw(source: Path, sample: int) -> Drawn:
             for row in chosen
             if row.human_label is not None
         }
+        chosen_categories = {
+            row.thread_pk: row.categories for row in chosen if row.categories
+        }
+        chosen_paths = {row.thread_pk: row.paths for row in chosen if row.paths}
     finally:
         conn.close()
-    return Drawn(texts, images, image_only, chosen_human)
+    return Drawn(
+        texts,
+        images,
+        image_only,
+        chosen_human,
+        chosen_categories,
+        truth,
+        chosen_paths,
+    )
+
+
+def _label_sets(
+    conn: sqlite3.Connection,
+    mapping: dict[str, frozenset[str]],
+) -> dict[int, tuple[frozenset[LabelPath], frozenset[str]]]:
+    rows = conn.execute(
+        f"""
+        SELECT messages.thread_pk, labels.name
+        FROM message_labels
+        JOIN messages ON messages.msg_pk = message_labels.msg_pk
+        JOIN labels
+          ON labels.account_id = message_labels.account_id
+         AND labels.gmail_label_id = message_labels.gmail_label_id
+        WHERE {GMAIL_LABEL_SQL}
+        """
+    ).fetchall()
+    found_paths: dict[int, set[LabelPath]] = {}
+    found_categories: dict[int, set[str]] = {}
+    for thread_pk, name in rows:
+        categories = mapping.get(str(name), frozenset())
+        path = LabelPath.parse(str(name))
+        if not categories or path is None:
+            continue
+        key = int(thread_pk)
+        found_paths.setdefault(key, set()).add(path)
+        found_categories.setdefault(key, set()).update(categories)
+    return {
+        thread_pk: (frozenset(found_paths[thread_pk]), frozenset(found_categories[thread_pk]))
+        for thread_pk in found_paths
+    }
 
 
 def _threads_with_images(conn: sqlite3.Connection) -> set[int]:
@@ -348,7 +493,18 @@ def _document(
                 }
             )
     decisions = []
+    labels = []
     for row in measured:
+        if drawn.truth == "labels":
+            score = score_label_layers(
+                row.thread_ids,
+                row.thread_vectors,
+                drawn.paths,
+                drawn.categories,
+            )
+            score["embedder"] = row.name
+            labels.append(score)
+            continue
         compared, matched, accuracy = _accuracy(row, drawn.human)
         decisions.append(
             {
@@ -358,40 +514,99 @@ def _document(
                 "matched": matched,
             }
         )
-    markdown = _markdown(embedders, pairs, decisions)
-    return {
-        "decisions": decisions,
+    markdown = _markdown(embedders, pairs, decisions, labels)
+    counts: dict[str, int] = {}
+    for categories in drawn.categories.values():
+        for category in categories:
+            counts[category] = counts.get(category, 0) + 1
+    report: dict[str, object] = {
         "embedders": embedders,
         "markdown": markdown,
         "ok": True,
         "pairs": pairs,
-        "n_human": len(drawn.human),
         "n_image_only": len(drawn.image_only),
         "n_with_images": len({thread_pk for thread_pk, _att, _blob in drawn.images}),
         "sample": sample,
         "sampled_images": len(drawn.images),
         "sampled_texts": len(drawn.texts),
         "source_read_only": True,
+        "truth": drawn.truth,
         "vector_db": str(vector_db),
     }
+    if drawn.truth == "labels":
+        report["labels"] = labels
+        report["n_labelled"] = len(drawn.paths)
+        report["per_category"] = dict(sorted(counts.items()))
+        report["per_layer"] = [
+            {"counts": _count_nodes(drawn.paths, layer), "layer": layer}
+            for layer in _LAYERS
+        ]
+    else:
+        report["decisions"] = decisions
+        report["n_human"] = len(drawn.human)
+    return report
 
 
-def _markdown(embedders: list[dict[str, object]], pairs: list[dict[str, object]], decisions: list[dict[str, object]]) -> str:
-    lines = [
-        "| embedder | load_s | texts/min | images/min | peak_rss_mb | human_accuracy |",
-        "| --- | --- | --- | --- | --- | --- |",
-    ]
-    for row, decision in zip(embedders, decisions):
-        lines.append(
-            "| {name} | {load_s:.3f} | {texts_per_min:.3f} | {images_per_min:.3f} | {peak_rss_mb:.3f} | {accuracy} |".format(
-                name=row["name"],
-                load_s=float(row["load_s"]),
-                texts_per_min=float(row["texts_per_min"]),
-                images_per_min=float(row["images_per_min"]),
-                peak_rss_mb=float(row["peak_rss_mb"]),
-                accuracy=_accuracy_cell(decision),
+def _markdown(
+    embedders: list[dict[str, object]],
+    pairs: list[dict[str, object]],
+    decisions: list[dict[str, object]],
+    labels: list[dict[str, object]],
+) -> str:
+    if labels:
+        lines = [
+            "| embedder | load_s | texts/min | images/min | peak_rss_mb |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for row in embedders:
+            lines.append(
+                "| {name} | {load_s:.3f} | {texts_per_min:.3f} | {images_per_min:.3f} | {peak_rss_mb:.3f} |".format(
+                    name=row["name"],
+                    load_s=float(row["load_s"]),
+                    texts_per_min=float(row["texts_per_min"]),
+                    images_per_min=float(row["images_per_min"]),
+                    peak_rss_mb=float(row["peak_rss_mb"]),
+                )
             )
+        lines.extend(
+            [
+                "",
+                "| embedder | layer | overlap@1 | jaccard@1 | vote_f1@10 |",
+                "| --- | --- | --- | --- | --- |",
+            ]
         )
+        for score in labels:
+            views: list[tuple[str, dict[str, object]]] = [
+                (str(layer["layer"]), layer)
+                for layer in score["layers"]
+            ]
+            views.append(("categories", score["categories"]))
+            for layer_name, view in views:
+                lines.append(
+                    "| {name} | {layer} | {overlap} | {jaccard} | {vote} |".format(
+                        name=score["embedder"],
+                        layer=layer_name,
+                        overlap=_cell(view["overlap_at_1"]),
+                        jaccard=_cell(view["jaccard_at_1"]),
+                        vote=_cell(view["vote_f1_at_10"]),
+                    )
+                )
+    else:
+        lines = [
+            "| embedder | load_s | texts/min | images/min | peak_rss_mb | human_accuracy |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
+        for row, decision in zip(embedders, decisions):
+            lines.append(
+                "| {name} | {load_s:.3f} | {texts_per_min:.3f} | {images_per_min:.3f} | {peak_rss_mb:.3f} | {accuracy} |".format(
+                    name=row["name"],
+                    load_s=float(row["load_s"]),
+                    texts_per_min=float(row["texts_per_min"]),
+                    images_per_min=float(row["images_per_min"]),
+                    peak_rss_mb=float(row["peak_rss_mb"]),
+                    accuracy=_accuracy_cell(decision),
+                )
+            )
     lines.extend(
         [
             "",
@@ -410,6 +625,114 @@ def _markdown(embedders: list[dict[str, object]], pairs: list[dict[str, object]]
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def score_label_layers(
+    thread_ids: tuple[int, ...] | list[int],
+    vectors: tuple[tuple[float, ...], ...] | list[tuple[float, ...]],
+    paths: dict[int, frozenset[LabelPath]],
+    categories: dict[int, frozenset[str]],
+) -> dict[str, object]:
+    layers = []
+    for layer in _LAYERS:
+        nodes = {thread_pk: _nodes(found, layer) for thread_pk, found in paths.items()}
+        scored = label_scores(thread_ids, vectors, nodes)
+        scored["layer"] = layer
+        layers.append(scored)
+    return {
+        "categories": label_scores(thread_ids, vectors, categories),
+        "layers": layers,
+    }
+
+
+def _count_nodes(paths: dict[int, frozenset[LabelPath]], layer: int) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for found in paths.values():
+        for node in _nodes(found, layer):
+            counts[node] = counts.get(node, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def label_scores(
+    thread_ids: tuple[int, ...] | list[int],
+    vectors: tuple[tuple[float, ...], ...] | list[tuple[float, ...]],
+    categories: dict[int, frozenset[str]],
+) -> dict[str, object]:
+    labelled = [index for index, thread_pk in enumerate(thread_ids) if thread_pk in categories]
+    overlaps = 0
+    jaccards: list[float] = []
+    tp = 0
+    fp = 0
+    fn = 0
+    recall_hits: dict[str, int] = {}
+    recall_total: dict[str, int] = {}
+    compared = 0
+    for index in labelled:
+        neighbours = _labelled_neighbours(thread_ids, vectors, categories, index)
+        if not neighbours:
+            continue
+        compared += 1
+        neighbour = neighbours[0]
+        own = categories[thread_ids[index]]
+        other = categories[neighbour]
+        if own & other:
+            overlaps += 1
+        union = own | other
+        jaccards.append(len(own & other) / len(union) if union else 0.0)
+        voted = _vote(neighbours[:_VOTE_K], categories)
+        tp += len(voted & own)
+        fp += len(voted - own)
+        fn += len(own - voted)
+        for category in own:
+            recall_total[category] = recall_total.get(category, 0) + 1
+            if category in voted:
+                recall_hits[category] = recall_hits.get(category, 0) + 1
+    overlap = None if compared == 0 else overlaps / compared
+    jaccard = None if not jaccards else sum(jaccards) / len(jaccards)
+    if compared == 0:
+        vote = None
+    elif tp == 0:
+        vote = 0.0
+    else:
+        vote = (2 * tp) / (2 * tp + fp + fn)
+    recall = {
+        category: recall_hits.get(category, 0) / recall_total[category]
+        for category in sorted(recall_total)
+    }
+    return {
+        "compared": compared,
+        "jaccard_at_1": jaccard,
+        "overlap_at_1": overlap,
+        "recall": recall,
+        "vote_f1_at_10": vote,
+    }
+
+
+def _labelled_neighbours(
+    thread_ids: tuple[int, ...] | list[int],
+    vectors: tuple[tuple[float, ...], ...] | list[tuple[float, ...]],
+    categories: dict[int, frozenset[str]],
+    index: int,
+) -> list[int]:
+    thread_pk = thread_ids[index]
+    ranked: list[tuple[float, int]] = []
+    for other_index, other in enumerate(thread_ids):
+        if other == thread_pk or other not in categories:
+            continue
+        ranked.append((_cosine(vectors[index], vectors[other_index]), other))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return [other for _score, other in ranked]
+
+
+def _vote(neighbours: list[int], categories: dict[int, frozenset[str]]) -> frozenset[str]:
+    if not neighbours:
+        return frozenset()
+    votes: dict[str, int] = {}
+    for thread_pk in neighbours:
+        for category in categories[thread_pk]:
+            votes[category] = votes.get(category, 0) + 1
+    width = len(neighbours)
+    return frozenset(category for category, count in votes.items() if count * 2 > width)
 
 
 def _accuracy(row: Measured, human: dict[int, str]) -> tuple[int, int, float | None]:
@@ -569,6 +892,9 @@ def _child() -> None:
             images=images,
             image_only=frozenset(int(thread_pk) for thread_pk in payload["image_only"]),
             human={},
+            categories={},
+            truth="decisions",
+            paths={},
         )
         embedder = open_embedder(str(payload["name"]))
         embedder.batch_size = int(payload["batch_size"])
