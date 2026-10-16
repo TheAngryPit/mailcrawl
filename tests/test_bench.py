@@ -15,10 +15,12 @@ from pathlib import Path
 import mailcrawl.bench as bench_module
 from mailcrawl.bench import (
     LABEL_TRUTH_VERIFY,
+    LabelPath,
     ThreadRow,
     label_scores,
     ru_maxrss_mb,
     run_bench,
+    score_label_layers,
     select_sample,
 )
 from mailcrawl.cli import main
@@ -373,23 +375,31 @@ class BenchChildTest(unittest.TestCase):
         self.assertEqual(raw["text_vectors"], expected)
 
 
-def _category_row(thread_pk: int, categories: set[str], *, image_only: bool = False) -> ThreadRow:
-    return ThreadRow(thread_pk, "s", "b", image_only, image_only, None, frozenset(categories))
+def _path_row(thread_pk: int, names: set[str], *, image_only: bool = False) -> ThreadRow:
+    paths = []
+    for name in names:
+        path = LabelPath.parse(name)
+        if path is not None:
+            paths.append(path)
+    return ThreadRow(thread_pk, "s", "b", image_only, image_only, None, frozenset(), frozenset(paths))
 
 
 class LabelTruthTest(unittest.TestCase):
-    def test_sample_takes_the_rarest_category_and_skips_unmapped(self) -> None:
+    def test_sample_spreads_layer1_then_layer2_and_skips_unmapped(self) -> None:
         rows = [
-            _category_row(1, {"common"}),
-            _category_row(2, {"common"}),
-            _category_row(3, {"common"}),
-            _category_row(4, {"rare"}),
-            _category_row(5, {"rare"}),
-            _category_row(8, set()),
-            _category_row(9, {"common"}, image_only=True),
+            _path_row(1, {"Source/GitHub"}),
+            _path_row(2, {"Source/GitHub"}),
+            _path_row(3, {"Source/GitHub"}),
+            _path_row(4, {"Source/Newsletter"}),
+            _path_row(5, {"Personal/Purchases & Subscriptions"}),
+            _path_row(8, set()),
+            _path_row(9, {"Content type/Job Alert"}, image_only=True),
         ]
         chosen = [row.thread_pk for row in select_sample(rows, 4, truth="labels")]
-        self.assertEqual(chosen, [9, 4, 5, 1])
+        self.assertEqual(chosen, [9, 5, 4, 1])
+        plain = [row for row in rows if row.thread_pk != 9]
+        chosen = [row.thread_pk for row in select_sample(plain, 3, truth="labels")]
+        self.assertEqual(chosen, [5, 4, 1])
         self.assertNotIn(8, chosen)
 
     def test_scores_cover_exact_partial_and_no_overlap(self) -> None:
@@ -426,6 +436,58 @@ class LabelTruthTest(unittest.TestCase):
         self.assertEqual(none["vote_f1_at_10"], 0.0)
         self.assertEqual(none["recall"], {"alpha": 0.0, "gamma": 0.0})
 
+    def test_layer_scores_count_a_shared_parent_only_at_layer_1(self) -> None:
+        github = LabelPath.parse("Source/GitHub")
+        newsletter = LabelPath.parse("Source/Newsletter")
+        purchases = LabelPath.parse("Personal/Purchases & Subscriptions")
+        self.assertIsNotNone(github)
+        self.assertIsNotNone(newsletter)
+        self.assertIsNotNone(purchases)
+        assert github is not None
+        assert newsletter is not None
+        assert purchases is not None
+        self.assertEqual(github.segments, ("Source", "GitHub"))
+        self.assertEqual(purchases.segments, ("Personal", "Purchases & Subscriptions"))
+        partial = score_label_layers(
+            [1, 2],
+            [(1.0, 0.0), (1.0, 0.0)],
+            {1: frozenset({github}), 2: frozenset({newsletter})},
+            {1: frozenset({"alpha"}), 2: frozenset({"alpha"})},
+        )
+        self.assertEqual(partial["layers"][0]["overlap_at_1"], 1.0)
+        self.assertEqual(partial["layers"][0]["jaccard_at_1"], 1.0)
+        self.assertEqual(partial["layers"][0]["vote_f1_at_10"], 1.0)
+        self.assertEqual(partial["layers"][0]["recall"], {"Source": 1.0})
+        self.assertEqual(partial["layers"][1]["overlap_at_1"], 0.0)
+        self.assertEqual(partial["layers"][1]["jaccard_at_1"], 0.0)
+        self.assertEqual(partial["layers"][1]["vote_f1_at_10"], 0.0)
+        self.assertEqual(
+            partial["layers"][1]["recall"],
+            {"Source/GitHub": 0.0, "Source/Newsletter": 0.0},
+        )
+        self.assertEqual(partial["categories"]["overlap_at_1"], 1.0)
+        self.assertEqual(partial["categories"]["jaccard_at_1"], 1.0)
+        self.assertEqual(partial["categories"]["vote_f1_at_10"], 1.0)
+        exact = score_label_layers(
+            [1, 2],
+            [(1.0, 0.0), (1.0, 0.0)],
+            {1: frozenset({github}), 2: frozenset({github})},
+            {1: frozenset({"alpha", "beta"}), 2: frozenset({"alpha", "beta"})},
+        )
+        self.assertEqual(exact["layers"][1]["overlap_at_1"], 1.0)
+        self.assertEqual(exact["layers"][1]["jaccard_at_1"], 1.0)
+        self.assertEqual(exact["layers"][1]["vote_f1_at_10"], 1.0)
+        self.assertEqual(exact["categories"]["recall"], {"alpha": 1.0, "beta": 1.0})
+        missed = score_label_layers(
+            [1, 2],
+            [(1.0, 0.0), (1.0, 0.0)],
+            {1: frozenset({github}), 2: frozenset({purchases})},
+            {1: frozenset({"alpha"}), 2: frozenset({"gamma"})},
+        )
+        self.assertEqual(missed["layers"][0]["overlap_at_1"], 0.0)
+        self.assertEqual(missed["layers"][1]["jaccard_at_1"], 0.0)
+        self.assertEqual(missed["categories"]["vote_f1_at_10"], 0.0)
+
     def test_label_bench_keeps_every_category_and_skips_unmapped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -456,13 +518,69 @@ class LabelTruthTest(unittest.TestCase):
             self.assertEqual(report["n_labelled"], 4)
             self.assertEqual(report["sampled_texts"], 4)
             self.assertEqual(report["per_category"], {"alpha": 2, "beta": 3, "gamma": 1})
+            self.assertEqual(
+                report["per_layer"],
+                [
+                    {"counts": {"Bill": 2, "News": 1, "Receipt": 1}, "layer": 1},
+                    {"counts": {"Bill": 2, "News": 1, "Receipt": 1}, "layer": 2},
+                ],
+            )
             self.assertNotIn("n_human", report)
-            self.assertIn("label_overlap@1", report["markdown"])
+            self.assertIn("overlap@1", report["markdown"])
             self.assertIn("jaccard@1", report["markdown"])
             self.assertIn("vote_f1@10", report["markdown"])
+            self.assertIn("| fake | categories |", report["markdown"])
+            self.assertNotIn("label_overlap@1", report["markdown"])
             self.assertEqual(report["labels"][0]["embedder"], "fake")
             spec = Path("docs/SPEC.md").read_text(encoding="utf-8")
             self.assertIn(LABEL_TRUTH_VERIFY, spec)
+            shutil.rmtree(Path(str(report["vector_db"])).parent)
+
+    def test_path_bench_keeps_two_layers_and_skips_unmapped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            taxonomy = home / "taxonomy.json"
+            taxonomy.write_text(
+                json.dumps(
+                    {
+                        "default": {
+                            "alpha": ["Source/GitHub", "Source/Newsletter"],
+                            "beta": ["Source/GitHub", "Content type/Job Alert"],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            mapping = {
+                name: frozenset(categories)
+                for name, categories in load_taxonomy(taxonomy).names_for("personal").items()
+            }
+            self.assertEqual(mapping["Source/GitHub"], frozenset({"alpha", "beta"}))
+            db = home / "personal.db"
+            _seed_paths(db)
+            before = db.read_bytes()
+            report = run_bench(db, ["fake"], 10, truth="labels", label_categories=mapping)
+            self.assertEqual(db.read_bytes(), before)
+            self.assertEqual(report["n_labelled"], 3)
+            self.assertEqual(report["sampled_texts"], 3)
+            self.assertEqual(report["per_category"], {"alpha": 2, "beta": 2})
+            self.assertEqual(
+                report["per_layer"],
+                [
+                    {"counts": {"Content type": 1, "Source": 2}, "layer": 1},
+                    {
+                        "counts": {
+                            "Content type/Job Alert": 1,
+                            "Source/GitHub": 1,
+                            "Source/Newsletter": 1,
+                        },
+                        "layer": 2,
+                    },
+                ],
+            )
+            self.assertEqual(report["labels"][0]["layers"][0]["layer"], 1)
+            self.assertEqual(report["labels"][0]["layers"][1]["layer"], 2)
+            self.assertIn("categories", report["labels"][0])
             shutil.rmtree(Path(str(report["vector_db"])).parent)
 
     def test_cli_label_truth_and_a_missing_taxonomy(self) -> None:
@@ -490,19 +608,57 @@ class LabelTruthTest(unittest.TestCase):
             self.assertEqual(doc["detail"], "labels truth needs a taxonomy")
 
 
+def _seed_paths(db: Path) -> None:
+    _seed_named_labels(
+        db,
+        (
+            ("Label_github", "Source/GitHub"),
+            ("Label_news", "Source/Newsletter"),
+            ("Label_job", "Content type/Job Alert"),
+            ("Label_other", "Other"),
+            ("Label_purchases", "Personal/Purchases & Subscriptions"),
+        ),
+        (
+            (1, "Source/GitHub"),
+            (2, "Source/Newsletter"),
+            (3, "Content type/Job Alert"),
+            (4, "Other"),
+            (5, "Personal/Purchases & Subscriptions"),
+        ),
+    )
+
+
 def _seed_labels(db: Path) -> None:
+    _seed_named_labels(
+        db,
+        (
+            ("Label_bill", "Bill"),
+            ("Label_receipt", "Receipt"),
+            ("Label_news", "News"),
+            ("Label_other", "Other"),
+        ),
+        (
+            (1, "Bill"),
+            (2, "Bill"),
+            (3, "News"),
+            (4, "Receipt"),
+            (5, "Other"),
+        ),
+    )
+
+
+def _seed_named_labels(
+    db: Path,
+    labels: tuple[tuple[str, str], ...],
+    threads: tuple[tuple[int, str], ...],
+) -> None:
     conn = connect(db)
     try:
         conn.execute(
             "INSERT INTO accounts(alias, email_hash, created_at) VALUES ('personal', 'abc', 1)"
         )
         account_id = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
-        labels = (
-            ("Label_bill", "Bill"),
-            ("Label_receipt", "Receipt"),
-            ("Label_news", "News"),
-            ("Label_other", "Other"),
-        )
+        by_name = {name: label_id for label_id, name in labels}
         for label_id, name in labels:
             conn.execute(
                 """
@@ -511,13 +667,6 @@ def _seed_labels(db: Path) -> None:
                 """,
                 (account_id, label_id, name),
             )
-        threads = (
-            (1, "Bill"),
-            (2, "Bill"),
-            (3, "News"),
-            (4, "Receipt"),
-            (5, "Other"),
-        )
         for offset, (thread_pk, name) in enumerate(threads, start=1):
             conn.execute(
                 """
@@ -546,12 +695,7 @@ def _seed_labels(db: Path) -> None:
                 ),
             )
             msg_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
-            label_id = {
-                "Bill": "Label_bill",
-                "News": "Label_news",
-                "Receipt": "Label_receipt",
-                "Other": "Label_other",
-            }[name]
+            label_id = by_name[name]
             conn.execute(
                 """
                 INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)

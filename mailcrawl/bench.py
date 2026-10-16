@@ -36,6 +36,31 @@ LABEL_TRUTH_VERIFY = (
 )
 _TRUTHS = frozenset({"decisions", "labels"})
 _VOTE_K = 10
+_LAYERS = (1, 2)
+
+
+@dataclass(frozen=True)
+class LabelPath:
+    segments: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not self.segments or any(segment == "" for segment in self.segments):
+            raise ValueError("a label path needs segments")
+
+    @staticmethod
+    def parse(name: str) -> LabelPath | None:
+        segments = tuple(segment.strip() for segment in name.split("/") if segment.strip())
+        if not segments:
+            return None
+        return LabelPath(segments)
+
+    @property
+    def layer1(self) -> str:
+        return self.segments[0]
+
+    @property
+    def full(self) -> str:
+        return "/".join(self.segments)
 
 
 @dataclass(frozen=True)
@@ -47,6 +72,7 @@ class ThreadRow:
     has_images: bool
     human_label: str | None
     categories: frozenset[str] = frozenset()
+    paths: frozenset[LabelPath] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -57,6 +83,7 @@ class Drawn:
     human: dict[int, str]
     categories: dict[int, frozenset[str]]
     truth: str
+    paths: dict[int, frozenset[LabelPath]]
 
 
 @dataclass(frozen=True)
@@ -114,7 +141,7 @@ def run_bench(
 
 def select_sample(rows: list[ThreadRow], sample: int, *, truth: str = "decisions") -> list[ThreadRow]:
     if truth == "labels":
-        return _select_categories(rows, sample)
+        return _select_paths(rows, sample)
     ordered = sorted(rows, key=lambda row: row.thread_pk)
     image_rows = [row for row in ordered if row.image_only or row.has_images]
     image_rows.sort(key=lambda row: (not row.image_only, row.thread_pk))
@@ -148,8 +175,8 @@ def select_sample(rows: list[ThreadRow], sample: int, *, truth: str = "decisions
     return picked
 
 
-def _select_categories(rows: list[ThreadRow], sample: int) -> list[ThreadRow]:
-    ordered = [row for row in sorted(rows, key=lambda row: row.thread_pk) if row.categories]
+def _select_paths(rows: list[ThreadRow], sample: int) -> list[ThreadRow]:
+    ordered = [row for row in sorted(rows, key=lambda row: row.thread_pk) if row.paths]
     image_rows = [row for row in ordered if row.image_only or row.has_images]
     image_rows.sort(key=lambda row: (not row.image_only, row.thread_pk))
     quota = min(len(image_rows), max(1, sample // 4)) if image_rows else 0
@@ -160,16 +187,37 @@ def _select_categories(rows: list[ThreadRow], sample: int) -> list[ThreadRow]:
         seen.add(row.thread_pk)
     pool = [row for row in ordered if row.thread_pk not in seen]
     while len(picked) < sample and pool:
-        counts: dict[str, int] = {}
-        for row in pool:
-            for category in row.categories:
-                counts[category] = counts.get(category, 0) + 1
-        rare = min(counts, key=lambda category: (counts[category], category))
-        choice = next(row for row in pool if rare in row.categories)
+        layer1_counts = _node_counts(pool, 1)
+        rare_layer1 = min(layer1_counts, key=lambda node: (layer1_counts[node], node))
+        group = [row for row in pool if rare_layer1 in _nodes(row.paths, 1)]
+        layer2_counts: dict[str, int] = {}
+        for row in group:
+            for path in row.paths:
+                if path.layer1 != rare_layer1:
+                    continue
+                layer2_counts[path.full] = layer2_counts.get(path.full, 0) + 1
+        rare_layer2 = min(layer2_counts, key=lambda node: (layer2_counts[node], node))
+        choice = next(row for row in group if any(path.full == rare_layer2 for path in row.paths))
         picked.append(choice)
         seen.add(choice.thread_pk)
         pool = [row for row in pool if row.thread_pk != choice.thread_pk]
     return picked
+
+
+def _nodes(paths: frozenset[LabelPath], layer: int) -> frozenset[str]:
+    if layer == 1:
+        return frozenset(path.layer1 for path in paths)
+    if layer == 2:
+        return frozenset(path.full for path in paths)
+    raise UsageError("label layers are 1 and 2")
+
+
+def _node_counts(rows: list[ThreadRow], layer: int) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        for node in _nodes(row.paths, layer):
+            counts[node] = counts.get(node, 0) + 1
+    return counts
 
 
 def _draw(
@@ -194,19 +242,23 @@ def _draw(
                 """
             )
         }
-        sets = _label_sets(conn, label_categories) if truth == "labels" else {}
-        rows = [
-            ThreadRow(
-                thread_pk,
-                subject,
-                body,
-                thread_pk in image_only_ids,
-                thread_pk in with_images,
-                human.get(thread_pk),
-                sets.get(thread_pk, frozenset()),
+        labelled = _label_sets(conn, label_categories) if truth == "labels" else {}
+        blank = (frozenset(), frozenset())
+        rows = []
+        for thread_pk, subject, body in _threads(conn):
+            paths, categories = labelled.get(thread_pk, blank)
+            rows.append(
+                ThreadRow(
+                    thread_pk,
+                    subject,
+                    body,
+                    thread_pk in image_only_ids,
+                    thread_pk in with_images,
+                    human.get(thread_pk),
+                    categories,
+                    paths,
+                )
             )
-            for thread_pk, subject, body in _threads(conn)
-        ]
         chosen = select_sample(rows, sample, truth=truth)
         ids = {row.thread_pk for row in chosen}
         images = tuple(
@@ -223,15 +275,24 @@ def _draw(
         chosen_categories = {
             row.thread_pk: row.categories for row in chosen if row.categories
         }
+        chosen_paths = {row.thread_pk: row.paths for row in chosen if row.paths}
     finally:
         conn.close()
-    return Drawn(texts, images, image_only, chosen_human, chosen_categories, truth)
+    return Drawn(
+        texts,
+        images,
+        image_only,
+        chosen_human,
+        chosen_categories,
+        truth,
+        chosen_paths,
+    )
 
 
 def _label_sets(
     conn: sqlite3.Connection,
     mapping: dict[str, frozenset[str]],
-) -> dict[int, frozenset[str]]:
+) -> dict[int, tuple[frozenset[LabelPath], frozenset[str]]]:
     rows = conn.execute(
         f"""
         SELECT messages.thread_pk, labels.name
@@ -243,13 +304,20 @@ def _label_sets(
         WHERE {GMAIL_LABEL_SQL}
         """
     ).fetchall()
-    found: dict[int, set[str]] = {}
+    found_paths: dict[int, set[LabelPath]] = {}
+    found_categories: dict[int, set[str]] = {}
     for thread_pk, name in rows:
         categories = mapping.get(str(name), frozenset())
-        if not categories:
+        path = LabelPath.parse(str(name))
+        if not categories or path is None:
             continue
-        found.setdefault(int(thread_pk), set()).update(categories)
-    return {thread_pk: frozenset(categories) for thread_pk, categories in found.items()}
+        key = int(thread_pk)
+        found_paths.setdefault(key, set()).add(path)
+        found_categories.setdefault(key, set()).update(categories)
+    return {
+        thread_pk: (frozenset(found_paths[thread_pk]), frozenset(found_categories[thread_pk]))
+        for thread_pk in found_paths
+    }
 
 
 def _threads_with_images(conn: sqlite3.Connection) -> set[int]:
@@ -428,7 +496,12 @@ def _document(
     labels = []
     for row in measured:
         if drawn.truth == "labels":
-            score = label_scores(row.thread_ids, row.thread_vectors, drawn.categories)
+            score = score_label_layers(
+                row.thread_ids,
+                row.thread_vectors,
+                drawn.paths,
+                drawn.categories,
+            )
             score["embedder"] = row.name
             labels.append(score)
             continue
@@ -462,8 +535,12 @@ def _document(
     }
     if drawn.truth == "labels":
         report["labels"] = labels
-        report["n_labelled"] = len(drawn.categories)
+        report["n_labelled"] = len(drawn.paths)
         report["per_category"] = dict(sorted(counts.items()))
+        report["per_layer"] = [
+            {"counts": _count_nodes(drawn.paths, layer), "layer": layer}
+            for layer in _LAYERS
+        ]
     else:
         report["decisions"] = decisions
         report["n_human"] = len(drawn.human)
@@ -478,22 +555,42 @@ def _markdown(
 ) -> str:
     if labels:
         lines = [
-            "| embedder | load_s | texts/min | images/min | peak_rss_mb | label_overlap@1 | jaccard@1 | vote_f1@10 |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| embedder | load_s | texts/min | images/min | peak_rss_mb |",
+            "| --- | --- | --- | --- | --- |",
         ]
-        for row, score in zip(embedders, labels):
+        for row in embedders:
             lines.append(
-                "| {name} | {load_s:.3f} | {texts_per_min:.3f} | {images_per_min:.3f} | {peak_rss_mb:.3f} | {overlap} | {jaccard} | {vote} |".format(
+                "| {name} | {load_s:.3f} | {texts_per_min:.3f} | {images_per_min:.3f} | {peak_rss_mb:.3f} |".format(
                     name=row["name"],
                     load_s=float(row["load_s"]),
                     texts_per_min=float(row["texts_per_min"]),
                     images_per_min=float(row["images_per_min"]),
                     peak_rss_mb=float(row["peak_rss_mb"]),
-                    overlap=_cell(score["overlap_at_1"]),
-                    jaccard=_cell(score["jaccard_at_1"]),
-                    vote=_cell(score["vote_f1_at_10"]),
                 )
             )
+        lines.extend(
+            [
+                "",
+                "| embedder | layer | overlap@1 | jaccard@1 | vote_f1@10 |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for score in labels:
+            views: list[tuple[str, dict[str, object]]] = [
+                (str(layer["layer"]), layer)
+                for layer in score["layers"]
+            ]
+            views.append(("categories", score["categories"]))
+            for layer_name, view in views:
+                lines.append(
+                    "| {name} | {layer} | {overlap} | {jaccard} | {vote} |".format(
+                        name=score["embedder"],
+                        layer=layer_name,
+                        overlap=_cell(view["overlap_at_1"]),
+                        jaccard=_cell(view["jaccard_at_1"]),
+                        vote=_cell(view["vote_f1_at_10"]),
+                    )
+                )
     else:
         lines = [
             "| embedder | load_s | texts/min | images/min | peak_rss_mb | human_accuracy |",
@@ -528,6 +625,32 @@ def _markdown(
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def score_label_layers(
+    thread_ids: tuple[int, ...] | list[int],
+    vectors: tuple[tuple[float, ...], ...] | list[tuple[float, ...]],
+    paths: dict[int, frozenset[LabelPath]],
+    categories: dict[int, frozenset[str]],
+) -> dict[str, object]:
+    layers = []
+    for layer in _LAYERS:
+        nodes = {thread_pk: _nodes(found, layer) for thread_pk, found in paths.items()}
+        scored = label_scores(thread_ids, vectors, nodes)
+        scored["layer"] = layer
+        layers.append(scored)
+    return {
+        "categories": label_scores(thread_ids, vectors, categories),
+        "layers": layers,
+    }
+
+
+def _count_nodes(paths: dict[int, frozenset[LabelPath]], layer: int) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for found in paths.values():
+        for node in _nodes(found, layer):
+            counts[node] = counts.get(node, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def label_scores(
@@ -771,6 +894,7 @@ def _child() -> None:
             human={},
             categories={},
             truth="decisions",
+            paths={},
         )
         embedder = open_embedder(str(payload["name"]))
         embedder.batch_size = int(payload["batch_size"])
