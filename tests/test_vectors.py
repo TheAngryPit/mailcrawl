@@ -668,6 +668,7 @@ class BoundTest(unittest.TestCase):
         self.assertEqual(embedder.batches, [["hello  world"]])
         self.assertEqual(len(short), 1)
 
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
     def test_embed_and_search_pass_bounded_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "personal.db")
