@@ -382,7 +382,7 @@ embeddings = true
 
 `testdata/config/owners.synthetic.toml` is the example, and it sets `embeddings` to true. CI still uses the fake embedder for text and for images. A path whose name includes `db-v2` is refused. sqlite-vec is the same optional extra. With the extra missing and the points off, opening a database does not import it.
 
-The official path is sentence-transformers. Community GGUF, MLX, and ONNX conversions exist. The Ollama library lists only EmbeddingGemma 1. There is no official quantized v2 checkpoint. A quantized runtime is a separate candidate in B1 and B2.
+The official path is sentence-transformers. An optional Apple Silicon path loads `mlx-community/embeddinggemma-2-8bit` through `mlx_vlm`, in the same 768-d space, with the classification prefix on text and no prefix on images. The image path requires `transformers.EmbeddingGemma2Processor`. If that class is missing, the path stops and does not fall back to text-only. The card is https://huggingface.co/mlx-community/embeddinggemma-2-8bit. local-verify, on a Mac with the `mlx` extra: `python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox bench --account thehive --embedders gemma,mlx --sample 32`. That command reads `db-v3-sandbox` and writes vectors only in a temporary copy. It is not run in CI. Community GGUF and ONNX conversions also exist. The Ollama library lists only EmbeddingGemma 1. There is no official quantized v2 checkpoint.
 
 Acceptance is decision rule G.6. The text of that rule is outside this spec.
 

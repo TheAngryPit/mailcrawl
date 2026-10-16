@@ -1,4 +1,4 @@
-"""JSON CLI for init, import, search, rules, stats, dry-run, backfill, embed, knn, and jev."""
+"""JSON CLI for init, import, search, rules, stats, dry-run, backfill, embed, knn, jev, and bench."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from mailcrawl.advise import StubAdvisor
+from mailcrawl.bench import run_bench
 from mailcrawl.configfile import (
     account_email,
     account_identity,
@@ -66,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
             return _knn(args)
         if args.command == "jev":
             return _jev(args)
+        if args.command == "bench":
+            return _bench(args)
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
@@ -166,6 +169,11 @@ def _parser() -> argparse.ArgumentParser:
     jev.add_argument("--thread")
     jev.add_argument("--client", default="fake")
     jev.add_argument("--now", type=int)
+
+    bench = sub.add_parser("bench")
+    bench.add_argument("--account", required=True)
+    bench.add_argument("--embedders", required=True)
+    bench.add_argument("--sample", type=int, required=True)
     return parser
 
 
@@ -397,6 +405,18 @@ def _export_args(args: argparse.Namespace) -> tuple[Path | None, int | None, int
     if not dest.parent.is_dir():
         raise UsageError("export directory is missing")
     return dest, sample, 0 if seed is None else seed
+
+
+def _bench(args: argparse.Namespace) -> int:
+    home = data_dir(args.home)
+    alias = canonical_alias(args.account)
+    names = [part.strip() for part in str(args.embedders).split(",") if part.strip()]
+    if args.sample is None or args.sample < 1:
+        raise UsageError("sample needs a positive count")
+    report = run_bench(home / f"{alias}.db", names, args.sample)
+    report["account"] = alias
+    _emit(args, report, text=str(report["markdown"]))
+    return 0
 
 
 def _embedder(args: argparse.Namespace) -> str:

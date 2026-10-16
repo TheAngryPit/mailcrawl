@@ -61,6 +61,8 @@ class InferenceBoundaryTest(unittest.TestCase):
             hidden,
             ["planted_lazy.py:2: model client import sentence_transformers"],
         )
+        mlx = scan_source("import mlx_vlm\n", "planted_mlx.py")
+        self.assertEqual(mlx, ["planted_mlx.py:1: model client import mlx_vlm"])
 
     def test_declared_points_are_off_by_default(self) -> None:
         self.assertEqual(enabled_points(None), frozenset())

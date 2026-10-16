@@ -14,6 +14,10 @@ vectors = [
   "sqlite-vec",
   "sentence-transformers>=6.1",
 ]
+mlx = [
+  "mlx>=0.32.3",
+  "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@3d87e88402f307efbf68e568971aa887ee7d9ed0",
+]
 
 [tool.setuptools.packages.find]
 include = ["mailcrawl*"]

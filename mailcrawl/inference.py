@@ -25,6 +25,8 @@ MODEL_CLIENTS = frozenset(
         "transformers",
         "sentence_transformers",
         "torch",
+        "mlx",
+        "mlx_vlm",
         "ollama",
         "setfit",
         "httpx",
