@@ -1129,6 +1129,37 @@ if len(ranked["hits"]) != len(plain["hits"]):
 if ranked["hits"][0]["subject"] != "Late note" or ranked["hits"][0]["source"] != "jev":
     raise SystemExit(f"rerank {ranked}")
 print("rerank", [(hit["subject"], hit["source"]) for hit in ranked["hits"]])
+batch = run(["jev", "--account", "personal", "--client", "fake", "--now", "12"])
+if (
+    batch.get("eligible") != 1
+    or batch.get("decided") != 1
+    or batch.get("review") != 0
+    or batch.get("account") != "personal"
+    or batch.get("ok") is not True
+):
+    raise SystemExit(f"batch {batch}")
+conn = sqlite3.connect(db_path)
+try:
+    late = conn.execute(
+        """
+        SELECT decisions.next_state, decisions.source_detail
+        FROM decisions JOIN threads ON threads.thread_pk = decisions.thread_pk
+        JOIN messages ON messages.thread_pk = threads.thread_pk
+        WHERE messages.subject = 'Late note' AND decisions.superseded_by IS NULL
+        """
+    ).fetchone()
+    reply_still = conn.execute(
+        "SELECT decision_id FROM decisions WHERE decision_id = ?",
+        (first["decision_id"],),
+    ).fetchone()
+finally:
+    conn.close()
+if late != ("reference", "jev-1.13.0") or reply_still is None:
+    raise SystemExit(f"batch stored {late} {reply_still}")
+again = run(["jev", "--account", "personal", "--client", "fake", "--now", "13"])
+if again.get("eligible") != 0 or again.get("decided") != 0 or again.get("review") != 0:
+    raise SystemExit(f"batch again {again}")
+print("batch", batch["eligible"], batch["decided"], again["eligible"])
 PY
 cp "${PROOF_DIR}/phase4.log" "${ARTIFACT_DIR}/phase4.log"
 
@@ -1175,6 +1206,7 @@ doc = {
         "phase4_fake_decision",
         "phase4_grey_review",
         "phase4_rerank",
+        "phase4_batch",
         "fixture_sha256_unchanged",
     ],
 }

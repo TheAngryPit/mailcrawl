@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Protocol
 
 from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
-from mailcrawl.taxonomy import GMAIL_TABS
 
 MODEL_ID = "jev-1.13.0"
 BATTERY_VERSION = "battery-v1"
@@ -20,12 +20,20 @@ NOUL_NO = 0.40
 NOUL_YES = 0.60
 CONFIDENCE_FLOOR = 0.60
 RERANK_LIMIT = 20
+_RETRY_CAP = 60
 LOCAL_VERIFY = (
     "python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox "
     "jev --account thehive --client http"
 )
 _ENDPOINT = "https://api.typesafe.ai/v1/systemone"
-_CATEGORY = (*GMAIL_TABS, "other")
+_CATEGORY_CRITERIA = {
+    "CATEGORY_PERSONAL": "Mail from a person to the recipient.",
+    "CATEGORY_SOCIAL": "A social network notification.",
+    "CATEGORY_PROMOTIONS": "Marketing or a promotion.",
+    "CATEGORY_UPDATES": "A receipt, a bill, or an automated update.",
+    "CATEGORY_FORUMS": "A list or a forum.",
+    "other": "None of the category keys fit.",
+}
 _COMPOSE = (
     ("is-bulk", "noise", "feed"),
     ("asks-deadline", "action", "imbox"),
@@ -35,6 +43,10 @@ _COMPOSE = (
 
 
 class TokenLimit(Exception):
+    pass
+
+
+class RateLimited(Exception):
     pass
 
 
@@ -97,7 +109,7 @@ BATTERY = (
         "category",
         "choice",
         "Which category key fits this message?",
-        {key: key for key in _CATEGORY},
+        _CATEGORY_CRITERIA,
     ),
     Question(
         "urgency",
@@ -155,6 +167,65 @@ def jev_decide(
         now,
         lambda: _produce(conn, thread_pk, client, config),
     )
+
+
+@dataclass(frozen=True)
+class GreyPass:
+    eligible: int
+    decided: int
+    review: int
+
+
+def score_grey_band(
+    conn: sqlite3.Connection,
+    client: JevClient,
+    config: dict[str, bool] | None,
+    now: int,
+) -> GreyPass:
+    rows = conn.execute(
+        """
+        SELECT thread_pk FROM threads
+        WHERE image_only = 0
+          AND NOT EXISTS (
+            SELECT 1 FROM decisions
+            WHERE decisions.thread_pk = threads.thread_pk
+              AND decisions.superseded_by IS NULL
+          )
+        ORDER BY thread_pk
+        """
+    ).fetchall()
+    decided = 0
+    review = 0
+    for row in rows:
+        decision = jev_decide(conn, int(row[0]), client, config, now)
+        if decision is None or decision["next_state"] == "needs_review":
+            review += 1
+        else:
+            decided += 1
+    return GreyPass(len(rows), decided, review)
+
+
+def _api_key() -> str:
+    for name in ("TYPESAFE_API_KEY", "JEV_API_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    raise UsageError(
+        "TYPESAFE_API_KEY or JEV_API_KEY is not set. "
+        f"local-verify: {LOCAL_VERIFY}"
+    )
+
+
+def _retry_after(header: str | None) -> float:
+    if header is None:
+        return 0
+    try:
+        seconds = int(header.strip())
+    except ValueError:
+        return 0
+    if seconds < 0:
+        return 0
+    return float(min(seconds, _RETRY_CAP))
 
 
 def rerank(
@@ -225,12 +296,7 @@ class HttpJev:
         questions: tuple[Question, ...],
     ) -> tuple[dict[str, Answer], str]:
         enter_model()
-        key = os.environ.get("JEV_API_KEY", "").strip()
-        if not key:
-            raise UsageError(
-                "JEV_API_KEY is not set. "
-                f"local-verify: {LOCAL_VERIFY}"
-            )
+        key = _api_key()
         import urllib.error
         import urllib.request
 
@@ -244,16 +310,24 @@ class HttpJev:
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw = resp.read().decode()
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode(errors="replace")
-            if "max_tokens_exceeded" in body:
-                raise TokenLimit() from exc
-            raise UsageError("jev request failed") from exc
-        except urllib.error.URLError as exc:
-            raise UsageError("jev request failed") from exc
+        raw = ""
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    raw = resp.read().decode()
+                break
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode(errors="replace")
+                if "max_tokens_exceeded" in body:
+                    raise TokenLimit() from exc
+                if exc.code == 429 and attempt == 1:
+                    time.sleep(_retry_after(exc.headers.get("Retry-After")))
+                    continue
+                if exc.code == 429:
+                    raise RateLimited() from exc
+                raise UsageError("jev request failed") from exc
+            except urllib.error.URLError as exc:
+                raise UsageError("jev request failed") from exc
         try:
             document = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -302,7 +376,7 @@ def _produce(
                 lambda: client.ask(_thread_state(conn, thread_pk), BATTERY),
                 config,
             )
-        except TokenLimit:
+        except (TokenLimit, RateLimited):
             return _review(client.model_id, client.left_machine)
         if answered is None:
             return _review(client.model_id, False)

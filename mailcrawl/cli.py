@@ -15,7 +15,7 @@ from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
 from mailcrawl.inference import enabled_points
-from mailcrawl.jev import jev_decide, open_client
+from mailcrawl.jev import jev_decide, open_client, score_grey_band
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
 from mailcrawl.report import dry_run, stats
 from mailcrawl.rules import apply_rules, load_rules
@@ -157,7 +157,7 @@ def _parser() -> argparse.ArgumentParser:
 
     jev = sub.add_parser("jev")
     jev.add_argument("--account", required=True)
-    jev.add_argument("--thread", required=True)
+    jev.add_argument("--thread")
     jev.add_argument("--client", default="fake")
     jev.add_argument("--now", type=int)
     return parser
@@ -445,25 +445,43 @@ def _jev(args: argparse.Namespace) -> int:
     flags = inference_config(config_path(args.config))
     now = int(time.time()) if args.now is None else args.now
     conn = _account_db(args)
+    decision = None
+    passed = None
     try:
-        row = conn.execute(
-            "SELECT thread_pk FROM threads WHERE gmail_thread_id = ?",
-            (args.thread,),
-        ).fetchone()
-        if row is None:
-            raise UsageError("unknown thread")
-        decision = jev_decide(conn, int(row["thread_pk"]), open_client(args.client), flags, now)
+        client = open_client(args.client)
+        if args.thread:
+            row = conn.execute(
+                "SELECT thread_pk FROM threads WHERE gmail_thread_id = ?",
+                (args.thread,),
+            ).fetchone()
+            if row is None:
+                raise UsageError("unknown thread")
+            decision = jev_decide(conn, int(row["thread_pk"]), client, flags, now)
+        else:
+            passed = score_grey_band(conn, client, flags, now)
     finally:
         conn.close()
+    if args.thread:
+        _emit(
+            args,
+            {
+                "decision_id": None if decision is None else decision["decision_id"],
+                "next_state": "needs_review" if decision is None else decision["next_state"],
+                "ok": True,
+                "origin": None if decision is None else decision["origin"],
+                "source_detail": None if decision is None else decision["source_detail"],
+                "thread": args.thread,
+            },
+        )
+        return 0
     _emit(
         args,
         {
-            "decision_id": None if decision is None else decision["decision_id"],
-            "next_state": "needs_review" if decision is None else decision["next_state"],
+            "account": canonical_alias(args.account),
+            "decided": passed.decided,
+            "eligible": passed.eligible,
             "ok": True,
-            "origin": None if decision is None else decision["origin"],
-            "source_detail": None if decision is None else decision["source_detail"],
-            "thread": args.thread,
+            "review": passed.review,
         },
     )
     return 0

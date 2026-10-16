@@ -378,7 +378,7 @@ class JevBatteryTest(unittest.TestCase):
                         ORDER BY decision_id
                         """
                     ).fetchall()
-                    self.assertEqual([row[0] for row in again], ids_before)
+                    self.assertEqual(sorted(row[0] for row in again), sorted(ids_before))
                     answers = conn.execute("SELECT count(*) FROM jev_answers").fetchone()[0]
                     self.assertEqual(answers, 24)
                 finally:
