@@ -6,11 +6,15 @@ import hashlib
 import json
 import math
 import sqlite3
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from mailcrawl.decisions import DecisionDraft, current_decision, decide_once
 from mailcrawl.inference import enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
+from mailcrawl.threads import embeddable_image
 
 NATIVE_DIM = 768
 CLASSIFICATION_PREFIX = "task: classification | query: "
@@ -20,10 +24,13 @@ LOCAL_VERIFY = (
     "python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox "
     "embed --account thehive --embedder gemma"
 )
+GEMMA_CONFIG = {"audio_config": None}
+IMAGE_PROCESSING = {"image": {"max_soft_tokens": 280}}
 _TABLE = {
     "classification": "vec_classification",
     "search": "vec_search",
 }
+VEC_IMAGE = "vec_image"
 
 
 class FakeEmbedder:
@@ -34,6 +41,10 @@ class FakeEmbedder:
         enter_model()
         return [_hash_vector(text, self.dimension) for text in texts]
 
+    def embed_images(self, images: list[bytes]) -> list[list[float]]:
+        enter_model()
+        return [_hash_vector(blob.hex(), self.dimension) for blob in images]
+
 
 class ScriptedEmbedder:
     model_id = "scripted-embedder"
@@ -43,6 +54,10 @@ class ScriptedEmbedder:
         enter_model()
         return [_scripted_vector(text, self.dimension) for text in texts]
 
+    def embed_images(self, images: list[bytes]) -> list[list[float]]:
+        enter_model()
+        return [_scripted_vector("image", self.dimension) for _blob in images]
+
 
 class GemmaEmbedder:
     model_id = "google/embeddinggemma-2"
@@ -50,6 +65,40 @@ class GemmaEmbedder:
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         enter_model()
+        model = self._gemma()
+        raw = model.encode(
+            list(texts),
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        return _rows(self.model_id, raw)
+
+    def embed_images(self, images: list[bytes]) -> list[list[float]]:
+        enter_model()
+        if not images:
+            return []
+        model = self._gemma()
+        with tempfile.TemporaryDirectory() as tmp:
+            batch = []
+            for index, blob in enumerate(images):
+                path = Path(tmp) / f"{index}{_image_suffix(blob)}"
+                path.write_bytes(blob)
+                batch.append({"image": str(path)})
+            raw = model.encode(
+                batch,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+                processing_kwargs=IMAGE_PROCESSING,
+            )
+        return _rows(self.model_id, raw)
+
+    def _gemma(self):
+        enter_model()
+        loaded = getattr(self, "_loaded", None)
+        if loaded is not None:
+            return loaded
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
@@ -67,19 +116,8 @@ class GemmaEmbedder:
         model = _load_gemma(SentenceTransformer, torch)
         if getattr(model, "default_prompt_name", None) is not None:
             model.default_prompt_name = None
-        raw = model.encode(
-            list(texts),
-            normalize_embeddings=True,
-            convert_to_numpy=True,
-            show_progress_bar=False,
-        )
-        vectors: list[list[float]] = []
-        for row in raw:
-            values = [float(item) for item in list(row)]
-            if len(values) != NATIVE_DIM:
-                raise UsageError(f"{self.model_id} returned {len(values)} dimensions")
-            vectors.append(truncate(values, NATIVE_DIM))
-        return vectors
+        self._loaded = model
+        return model
 
 
 class Embedder(Protocol):
@@ -87,6 +125,8 @@ class Embedder(Protocol):
     dimension: int
 
     def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+    def embed_images(self, images: list[bytes]) -> list[list[float]]: ...
 
 
 def open_embedder(name: str) -> Embedder:
@@ -126,6 +166,7 @@ def _load_gemma(sentence_transformer, torch):
         try:
             return sentence_transformer(
                 "google/embeddinggemma-2",
+                config_kwargs=GEMMA_CONFIG,
                 model_kwargs={"torch_dtype": dtype},
             )
         except Exception as exc:
@@ -136,23 +177,34 @@ def _load_gemma(sentence_transformer, torch):
 
 
 def create_vec_tables(conn: sqlite3.Connection) -> None:
-    for name in _TABLE.values():
-        found = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE name = ?",
-            (name,),
-        ).fetchone()
-        if found:
-            continue
-        conn.execute(
-            f"""
+    statements = {
+        name: f"""
             CREATE VIRTUAL TABLE {name} USING vec0(
               embedding float[{NATIVE_DIM}] distance_metric=cosine,
               +thread_pk integer,
               +prefix text,
               +dim integer
             )
-            """
+        """
+        for name in _TABLE.values()
+    }
+    statements[VEC_IMAGE] = f"""
+        CREATE VIRTUAL TABLE {VEC_IMAGE} USING vec0(
+          embedding float[{NATIVE_DIM}] distance_metric=cosine,
+          +thread_pk integer,
+          +att_pk integer,
+          +prefix text,
+          +dim integer
         )
+    """
+    for name, sql in statements.items():
+        found = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = ?",
+            (name,),
+        ).fetchone()
+        if found:
+            continue
+        conn.execute(sql)
 
 
 def classification_text(body: str) -> str:
@@ -186,31 +238,7 @@ def embed_threads(conn: sqlite3.Connection, embedder: Embedder, config: dict[str
     if not grouped:
         return 0
     require_vec(conn)
-    texts: list[str] = []
-    for _thread_pk, subject, body in grouped:
-        texts.append(classification_text(body))
-        texts.append(search_document(subject, body))
-    vectors = invoke("embeddings", lambda: embedder.embed(texts), config)
-    if vectors is None:
-        return 0
-    if len(vectors) != len(texts):
-        raise ValueError("embedder returned the wrong number of vectors")
-    for index, (thread_pk, _subject, _body) in enumerate(grouped):
-        _upsert(
-            conn,
-            "classification",
-            thread_pk,
-            vectors[2 * index],
-            CLASSIFICATION_PREFIX,
-        )
-        _upsert(
-            conn,
-            "search",
-            thread_pk,
-            vectors[2 * index + 1],
-            SEARCH_TITLE_PREFIX,
-        )
-    conn.commit()
+    _embed_group(conn, embedder, config, grouped)
     return len(grouped)
 
 
@@ -397,11 +425,134 @@ def _ensure_classification(
     rows = [row for row in _threads(conn) if row[0] == thread_pk]
     if not rows:
         return
-    _thread_pk, subject, body = rows[0]
-    texts = [classification_text(body), search_document(subject, body)]
-    vectors = invoke("embeddings", lambda: embedder.embed(texts), config)
-    if vectors is None:
+    _embed_group(conn, embedder, config, rows)
+
+
+@dataclass(frozen=True)
+class _KeptImage:
+    thread_pk: int
+    att_pk: int
+    blob: bytes
+
+
+def _embed_group(
+    conn: sqlite3.Connection,
+    embedder: Embedder,
+    config: dict[str, bool] | None,
+    grouped: list[tuple[int, str, str]],
+) -> None:
+    thread_ids = {row[0] for row in grouped}
+    images = _kept_images(conn, thread_ids)
+    texts: list[str] = []
+    for _thread_pk, subject, body in grouped:
+        texts.append(classification_text(body))
+        texts.append(search_document(subject, body))
+    blobs = [item.blob for item in images]
+
+    result = invoke(
+        "embeddings",
+        lambda: (
+            embedder.embed(texts),
+            embedder.embed_images(blobs) if blobs else [],
+        ),
+        config,
+    )
+    if result is None:
         return
-    _upsert(conn, "classification", thread_pk, vectors[0], CLASSIFICATION_PREFIX)
-    _upsert(conn, "search", thread_pk, vectors[1], SEARCH_TITLE_PREFIX)
+    text_vectors, image_vectors = result
+    if len(text_vectors) != len(texts) or len(image_vectors) != len(blobs):
+        raise ValueError("embedder returned the wrong number of vectors")
+    for index, (thread_pk, _subject, _body) in enumerate(grouped):
+        _upsert(conn, "classification", thread_pk, text_vectors[2 * index], CLASSIFICATION_PREFIX)
+        _upsert(conn, "search", thread_pk, text_vectors[2 * index + 1], SEARCH_TITLE_PREFIX)
+    by_thread: dict[int, list[list[float]]] = {}
+    for item, vector in zip(images, image_vectors):
+        _upsert_image(conn, item.thread_pk, item.att_pk, vector)
+        by_thread.setdefault(item.thread_pk, []).append(vector)
+    image_only = {
+        int(row[0])
+        for row in conn.execute("SELECT thread_pk FROM threads WHERE image_only = 1")
+    }
+    for thread_pk, vectors in by_thread.items():
+        if thread_pk not in image_only:
+            continue
+        mean = _mean(vectors)
+        _upsert(conn, "classification", thread_pk, mean, "")
+        _upsert(conn, "search", thread_pk, mean, "")
     conn.commit()
+
+
+def _kept_images(conn: sqlite3.Connection, thread_ids: set[int]) -> list[_KeptImage]:
+    if not thread_ids:
+        return []
+    rows = conn.execute(
+        """
+        SELECT threads.thread_pk, attachments.att_pk, attachments.mime_type,
+               attachments.is_inline, attachments.size_bytes, attachments.stored_path
+        FROM attachments
+        JOIN messages ON messages.msg_pk = attachments.msg_pk
+        JOIN threads ON threads.thread_pk = messages.thread_pk
+        ORDER BY threads.thread_pk, attachments.att_pk
+        """
+    ).fetchall()
+    found: list[_KeptImage] = []
+    for thread_pk, att_pk, mime, inline, size, stored in rows:
+        if int(thread_pk) not in thread_ids or not stored:
+            continue
+        if not embeddable_image(mime, int(inline or 0), None if size is None else int(size)):
+            continue
+        path = Path(str(stored))
+        if not path.is_file():
+            continue
+        found.append(_KeptImage(int(thread_pk), int(att_pk), path.read_bytes()))
+    return found
+
+
+def _upsert_image(
+    conn: sqlite3.Connection,
+    thread_pk: int,
+    att_pk: int,
+    vector: list[float],
+) -> None:
+    if len(vector) != NATIVE_DIM:
+        raise ValueError(len(vector))
+    conn.execute(f"DELETE FROM {VEC_IMAGE} WHERE att_pk = ?", (att_pk,))
+    conn.execute(
+        f"""
+        INSERT INTO {VEC_IMAGE}(embedding, thread_pk, att_pk, prefix, dim)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (json.dumps(vector), thread_pk, att_pk, "", NATIVE_DIM),
+    )
+
+
+def _mean(vectors: list[list[float]]) -> list[float]:
+    width = len(vectors[0])
+    total = [0.0] * width
+    for vector in vectors:
+        for index, value in enumerate(vector):
+            total[index] += value
+    count = float(len(vectors))
+    return truncate([value / count for value in total], width)
+
+
+def _rows(model_id: str, raw: object) -> list[list[float]]:
+    vectors: list[list[float]] = []
+    for row in raw:
+        values = [float(item) for item in list(row)]
+        if len(values) != NATIVE_DIM:
+            raise UsageError(f"{model_id} returned {len(values)} dimensions")
+        vectors.append(truncate(values, NATIVE_DIM))
+    return vectors
+
+
+def _image_suffix(blob: bytes) -> str:
+    if blob.startswith(b"\x89PNG"):
+        return ".png"
+    if blob.startswith(b"\xff\xd8"):
+        return ".jpg"
+    if blob.startswith(b"GIF8"):
+        return ".gif"
+    if blob.startswith(b"RIFF") and b"WEBP" in blob[:16]:
+        return ".webp"
+    return ".img"

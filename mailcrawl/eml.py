@@ -12,6 +12,7 @@ from mailcrawl.contract import AttachmentRec, MessageRec
 from mailcrawl.extract import parse_attachment, pdf_backend
 from mailcrawl.schema import HEADER_ALLOW
 from mailcrawl.textnorm import html_to_text
+from mailcrawl.threads import embeddable_image
 
 _HEADER_ALLOW = frozenset(HEADER_ALLOW)
 
@@ -214,6 +215,7 @@ def _attachment(part: Message) -> AttachmentRec:
         parsed.ocr_conf,
         parsed.page_count,
         parsed.parser_version,
+        payload_bytes if embeddable_image(mime_type, inline, size) else None,
     )
 
 

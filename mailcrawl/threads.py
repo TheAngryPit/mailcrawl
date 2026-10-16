@@ -6,6 +6,16 @@ import sqlite3
 
 TEXT_LIMIT = 200
 INLINE_IMAGE_FLOOR = 20 * 1024
+RASTER_IMAGES = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/gif",
+        "image/webp",
+        "image/tiff",
+    }
+)
 
 _MARK_SQL = """
 UPDATE threads SET image_only = CASE WHEN (
@@ -32,6 +42,15 @@ UPDATE threads SET image_only = CASE WHEN (
   )
 ) THEN 1 ELSE 0 END
 """
+
+
+def embeddable_image(mime_type: str | None, is_inline: int, size_bytes: int | None) -> bool:
+    mime = (mime_type or "").split(";", 1)[0].strip().lower()
+    if mime not in RASTER_IMAGES:
+        return False
+    if int(is_inline) == 1 and int(size_bytes or 0) < INLINE_IMAGE_FLOOR:
+        return False
+    return True
 
 
 def mark_image_only(conn: sqlite3.Connection, account_id: int | None = None) -> None:

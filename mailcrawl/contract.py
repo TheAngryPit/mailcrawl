@@ -111,6 +111,7 @@ class AttachmentRec:
     ocr_conf: float | None = None
     page_count: int | None = None
     parser_version: str | None = None
+    image_bytes: bytes | None = None
 
 
 @dataclass(frozen=True)

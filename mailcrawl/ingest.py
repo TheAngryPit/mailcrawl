@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 import time
 from collections.abc import Callable, Iterable
@@ -24,7 +25,7 @@ from mailcrawl.paths import UsageError
 from mailcrawl.taxonomy import axis_of, generic_category, load_taxonomy
 from mailcrawl.store import index_message
 from mailcrawl.textnorm import clean_body, parse_address, subject_norm
-from mailcrawl.threads import mark_image_only
+from mailcrawl.threads import embeddable_image, mark_image_only
 from mailcrawl.version import mailcrawl_version, provenance_hash
 
 Item = LabelRec | MessageRec | Refused
@@ -485,18 +486,38 @@ def _replace_labels(
         )
 
 
+def _keep_image(conn: sqlite3.Connection, attachment: AttachmentRec) -> str | None:
+    blob = attachment.image_bytes
+    if not blob or not embeddable_image(attachment.mime_type, attachment.is_inline, attachment.size_bytes):
+        return None
+    listed = conn.execute("PRAGMA database_list").fetchone()
+    db_file = "" if listed is None else str(listed[2] or "")
+    if not db_file:
+        return None
+    directory = Path(db_file).parent / "images"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(directory, 0o700)
+    digest = attachment.file_sha256 or hashlib.sha256(blob).hexdigest()
+    path = directory / digest
+    if not path.is_file():
+        path.write_bytes(blob)
+        os.chmod(path, 0o600)
+    return str(path)
+
+
 def _insert_attachment(
     conn: sqlite3.Connection,
     msg_pk: int,
     attachment: AttachmentRec,
 ) -> None:
+    stored_path = _keep_image(conn, attachment)
     conn.execute(
         """
         INSERT INTO attachments(
           msg_pk, filename, mime_type, size_bytes, gmail_attachment_id,
-          content_id, is_inline, file_sha256, extract_status, extract_method,
+          content_id, is_inline, file_sha256, stored_path, extract_status, extract_method,
           extracted_text, ocr_status, ocr_conf, page_count, parser_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             msg_pk,
@@ -507,6 +528,7 @@ def _insert_attachment(
             attachment.content_id,
             attachment.is_inline,
             attachment.file_sha256,
+            stored_path,
             attachment.extract_status,
             attachment.extract_method,
             attachment.extracted_text,
