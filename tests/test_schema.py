@@ -94,10 +94,10 @@ class SchemaV1Test(unittest.TestCase):
     def test_later_user_version_fails_closed(self) -> None:
         conn = sqlite3.connect(":memory:")
         try:
-            conn.execute("PRAGMA user_version = 4")
+            conn.execute("PRAGMA user_version = 5")
             with self.assertRaises(UnsupportedSchema):
                 migrate(conn)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 5)
             names = {
                 row[0]
                 for row in conn.execute(
@@ -217,8 +217,9 @@ class SchemaV1Test(unittest.TestCase):
                 again.execute(
                     """
                     INSERT INTO decisions(
-                      thread_pk, next_state, source, rules_version, evidence, created_at
-                    ) VALUES (1, 'screener', 'rule', 'rules-v3', '[]', 1)
+                      thread_pk, next_state, source, origin, source_detail,
+                      rules_version, evidence, created_at
+                    ) VALUES (1, 'screener', 'rule', 'rule', 'screener', 'rules-v3', '[]', 1)
                     """
                 )
                 state = again.execute("SELECT next_state FROM decisions").fetchone()[0]
@@ -274,15 +275,17 @@ class SchemaV1Test(unittest.TestCase):
                     conn.execute(
                         """
                         INSERT INTO decisions(
-                          thread_pk, next_state, source, rules_version, evidence, created_at
-                        ) VALUES (1, 'waiting', 'rule', 'rules-v0', '[]', 1)
+                          thread_pk, next_state, source, origin, source_detail,
+                          rules_version, evidence, created_at
+                        ) VALUES (1, 'waiting', 'rule', 'rule', '0', 'rules-v0', '[]', 1)
                         """
                     )
                 conn.execute(
                     """
                     INSERT INTO decisions(
-                      thread_pk, next_state, source, rules_version, evidence, created_at
-                    ) VALUES (1, 'needs_review', 'rule', 'rules-v0', '[]', 1)
+                      thread_pk, next_state, source, origin, source_detail,
+                      rules_version, evidence, created_at
+                    ) VALUES (1, 'needs_review', 'rule', 'rule', '0', 'rules-v0', '[]', 1)
                     """
                 )
             finally:
