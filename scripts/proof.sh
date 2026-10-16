@@ -607,7 +607,19 @@ prose = "188932a1fae40002"
 
 def search(query: str) -> dict:
     proc = subprocess.run(
-        [sys.executable, "-m", "mailcrawl", "--home", home, "--json", "search", query, "--account", "vcl"],
+        [
+            sys.executable,
+            "-m",
+            "mailcrawl",
+            "--home",
+            home,
+            "--json",
+            "search",
+            "--account",
+            "vcl",
+            "--",
+            query,
+        ],
         cwd=repo,
         capture_output=True,
         text=True,
