@@ -9,7 +9,7 @@ from email import policy
 from email.message import EmailMessage, Message
 
 from mailcrawl.contract import AttachmentRec, MessageRec
-from mailcrawl.extract import parse_attachment
+from mailcrawl.extract import parse_attachment, pdf_backend
 from mailcrawl.schema import HEADER_ALLOW
 from mailcrawl.textnorm import html_to_text
 
@@ -197,6 +197,7 @@ def _attachment(part: Message) -> AttachmentRec:
         mime_type,
         payload_bytes,
         decoded_text=_decoded_text(part, payload_bytes),
+        backend=pdf_backend(),
     )
     return AttachmentRec(
         filename,

@@ -9,8 +9,9 @@ import time
 from pathlib import Path
 
 from mailcrawl.paths import UsageError, canonical_alias
-from mailcrawl.schema import FTS_SQL, SCHEMA_SQL, USER_VERSION, V2_TABLES_SQL
+from mailcrawl.schema import FTS_SQL, SCHEMA_SQL, TRIGRAM_SQL, USER_VERSION, V2_TABLES_SQL
 from mailcrawl.textnorm import clean_body
+from mailcrawl.threads import mark_image_only
 
 DUMP_TABLES = (
     "accounts",
@@ -40,12 +41,15 @@ def migrate(conn: sqlite3.Connection) -> None:
         return
     if version == 1:
         _migrate_v1(conn)
-        return
+        version = 4
     if version == 2:
         _migrate_v2(conn)
         version = 3
     if version == 3:
         _migrate_v3(conn)
+        version = 4
+    if version == 4:
+        _migrate_v4(conn)
         return
     raise UnsupportedSchema(f"user_version {version}")
 
@@ -65,7 +69,7 @@ def _migrate_v1(conn: sqlite3.Connection) -> None:
             )
     _rebuild_fts(conn)
     _execute_statements(conn, V2_TABLES_SQL)
-    conn.execute(f"PRAGMA user_version = {USER_VERSION}")
+    conn.execute("PRAGMA user_version = 4")
     conn.commit()
 
 
@@ -130,7 +134,7 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
 def _migrate_v3(conn: sqlite3.Connection) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(decisions)")}
     if "origin" in columns and "source_detail" in columns:
-        conn.execute(f"PRAGMA user_version = {USER_VERSION}")
+        conn.execute("PRAGMA user_version = 4")
         conn.commit()
         return
     if conn.in_transaction:
@@ -195,7 +199,7 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
         ON decisions(thread_pk) WHERE superseded_by IS NULL
         """
     )
-    conn.execute(f"PRAGMA user_version = {USER_VERSION}")
+    conn.execute("PRAGMA user_version = 4")
     conn.commit()
     conn.execute("PRAGMA foreign_keys = ON")
 
@@ -211,9 +215,53 @@ def _execute_statements(conn: sqlite3.Connection, script: str) -> None:
         conn.execute(pending)
 
 
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    names = {
+        row[0]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "threads" in names:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
+        if "image_only" not in columns:
+            conn.execute(
+                "ALTER TABLE threads ADD COLUMN image_only INTEGER NOT NULL DEFAULT 0"
+            )
+        mark_image_only(conn)
+    if "messages" in names and "attachments" in names:
+        _rebuild_fts(conn)
+    else:
+        if "msg_fts" not in names:
+            _execute_statements(conn, FTS_SQL)
+        if "msg_trigram" not in names:
+            _execute_statements(conn, TRIGRAM_SQL)
+    conn.execute(f"PRAGMA user_version = {USER_VERSION}")
+    conn.commit()
+
+
+def index_message(
+    conn: sqlite3.Connection,
+    msg_pk: int,
+    subject: str | None,
+    body_text: str | None,
+    from_hdr: str | None,
+    attachment_text: str | None,
+) -> None:
+    values = (msg_pk, subject or "", body_text or "", from_hdr or "", attachment_text or "")
+    for table in ("msg_fts", "msg_trigram"):
+        conn.execute(
+            f"""
+            INSERT INTO {table}(rowid, subject, body_text, from_hdr, attachment_text)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            values,
+        )
+
+
 def _rebuild_fts(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE IF EXISTS msg_fts")
+    conn.execute("DROP TABLE IF EXISTS msg_trigram")
     _execute_statements(conn, FTS_SQL)
+    _execute_statements(conn, TRIGRAM_SQL)
     messages = conn.execute(
         "SELECT msg_pk, subject, body_text, from_hdr FROM messages"
     ).fetchall()
@@ -226,13 +274,7 @@ def _rebuild_fts(conn: sqlite3.Connection) -> None:
             (msg_pk,),
         ).fetchall()
         attachment_text = "\n".join(str(part[0]) for part in parts)
-        conn.execute(
-            """
-            INSERT INTO msg_fts(rowid, subject, body_text, from_hdr, attachment_text)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (msg_pk, subject or "", body_text or "", from_hdr or "", attachment_text),
-        )
+        index_message(conn, msg_pk, subject, body_text, from_hdr, attachment_text)
 
 
 def connect(path: Path | str) -> sqlite3.Connection:

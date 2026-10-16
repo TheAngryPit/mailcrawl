@@ -1,6 +1,6 @@
 """SQLite tables for one account archive."""
 
-USER_VERSION = 4
+USER_VERSION = 5
 
 TABLES = (
     "accounts",
@@ -18,6 +18,7 @@ TABLES = (
     "sender_decisions",
     "thread_mutes",
     "msg_fts",
+    "msg_trigram",
 )
 
 HEADER_ALLOW = (
@@ -83,6 +84,7 @@ CREATE TABLE IF NOT EXISTS threads (
   last_msg_from_me INTEGER,
   has_human_participant INTEGER,
   subject_norm TEXT,
+  image_only INTEGER NOT NULL DEFAULT 0,
   UNIQUE (account_id, gmail_thread_id)
 );
 
@@ -266,8 +268,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS msg_fts USING fts5(
   from_hdr,
   attachment_text,
   content='',
-  tokenize='unicode61 remove_diacritics 2'
+  tokenize='unicode61 remove_diacritics 2',
+  prefix='2 3'
 );
 """
 
-SCHEMA_SQL = _SCHEMA_PREFIX + V2_TABLES_SQL + FTS_SQL
+TRIGRAM_SQL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS msg_trigram USING fts5(
+  subject,
+  body_text,
+  from_hdr,
+  attachment_text,
+  content='',
+  tokenize='trigram'
+);
+"""
+
+SCHEMA_SQL = _SCHEMA_PREFIX + V2_TABLES_SQL + FTS_SQL + TRIGRAM_SQL

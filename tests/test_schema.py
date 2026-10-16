@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mailcrawl.schema import TABLES, USER_VERSION
+from mailcrawl.schema import FTS_SQL, TABLES, USER_VERSION
 from mailcrawl.store import UnsupportedSchema, connect, migrate
 
 BANNED = (
@@ -94,10 +94,10 @@ class SchemaV1Test(unittest.TestCase):
     def test_later_user_version_fails_closed(self) -> None:
         conn = sqlite3.connect(":memory:")
         try:
-            conn.execute("PRAGMA user_version = 5")
+            conn.execute("PRAGMA user_version = 6")
             with self.assertRaises(UnsupportedSchema):
                 migrate(conn)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 6)
             names = {
                 row[0]
                 for row in conn.execute(
@@ -290,3 +290,87 @@ class SchemaV1Test(unittest.TestCase):
                 )
             finally:
                 conn.close()
+
+    def test_v4_gains_image_only_and_trigram(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.executescript(
+                """
+                CREATE TABLE threads (
+                  thread_pk INTEGER PRIMARY KEY,
+                  account_id INTEGER NOT NULL,
+                  gmail_thread_id TEXT NOT NULL
+                );
+                CREATE TABLE messages (
+                  msg_pk INTEGER PRIMARY KEY,
+                  thread_pk INTEGER,
+                  gmail_message_id TEXT,
+                  subject TEXT,
+                  body_text TEXT,
+                  from_hdr TEXT
+                );
+                CREATE TABLE attachments (
+                  att_pk INTEGER PRIMARY KEY,
+                  msg_pk INTEGER,
+                  mime_type TEXT,
+                  size_bytes INTEGER,
+                  is_inline INTEGER NOT NULL DEFAULT 0,
+                  extracted_text TEXT
+                );
+                """
+                + FTS_SQL
+            )
+            conn.execute("PRAGMA user_version = 4")
+            conn.execute(
+                "INSERT INTO threads(thread_pk, account_id, gmail_thread_id) VALUES (1, 1, 't')"
+            )
+            conn.execute(
+                """
+                INSERT INTO messages(
+                  msg_pk, thread_pk, gmail_message_id, subject, body_text, from_hdr
+                ) VALUES (1, 1, 'm1', 'Reunião', 'A reunião', 'ada@example.com')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO attachments(msg_pk, mime_type, size_bytes, is_inline, extracted_text)
+                VALUES (1, 'application/pdf', 120, 0, 'fatura FT99881')
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO msg_fts(rowid, subject, body_text, from_hdr, attachment_text)
+                VALUES (1, 'Reunião', 'A reunião', 'ada@example.com', 'fatura FT99881')
+                """
+            )
+            migrate(conn)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], USER_VERSION)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
+            self.assertIn("image_only", columns)
+            self.assertEqual(conn.execute("SELECT image_only FROM threads").fetchone()[0], 1)
+            folded = conn.execute(
+                "SELECT rowid FROM msg_fts WHERE msg_fts MATCH 'reuniao'"
+            ).fetchone()
+            self.assertEqual(folded[0], 1)
+            accented = conn.execute(
+                "SELECT rowid FROM msg_fts WHERE msg_fts MATCH 'reunião'"
+            ).fetchone()
+            self.assertEqual(accented[0], 1)
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT rowid FROM msg_fts WHERE msg_fts MATCH '99881'"
+                ).fetchone()
+            )
+            trigram = conn.execute(
+                "SELECT rowid FROM msg_trigram WHERE msg_trigram MATCH '99881'"
+            ).fetchone()
+            self.assertEqual(trigram[0], 1)
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'msg_trigram'"
+            ).fetchone()[0]
+            self.assertIn("trigram", sql)
+            self.assertNotIn("remove_diacritics", sql)
+        finally:
+            conn.close()
