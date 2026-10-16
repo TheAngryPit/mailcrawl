@@ -12,6 +12,7 @@ from mailcrawl.inference import (
     scan_package,
     scan_source,
 )
+from mailcrawl.vectors import LOCAL_VERIFY, FakeEmbedder
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,6 +53,14 @@ class InferenceBoundaryTest(unittest.TestCase):
     def test_model_client_import_is_caught(self) -> None:
         problems = scan_source("import openai\n", "planted_import.py")
         self.assertEqual(problems, ["planted_import.py:1: model client import openai"])
+        hidden = scan_source(
+            "def load():\n    from sentence_transformers import SentenceTransformer\n",
+            "planted_lazy.py",
+        )
+        self.assertEqual(
+            hidden,
+            ["planted_lazy.py:2: model client import sentence_transformers"],
+        )
 
     def test_declared_points_are_off_by_default(self) -> None:
         self.assertEqual(enabled_points(None), frozenset())
@@ -72,6 +81,32 @@ class InferenceBoundaryTest(unittest.TestCase):
         )
         self.assertEqual(result, "synthetic")
         self.assertEqual(probe.calls, 1)
+
+    def test_vectors_module_stays_inside_the_fence(self) -> None:
+        path = ROOT / "mailcrawl" / "vectors.py"
+        self.assertEqual(scan_source(path.read_text(encoding="utf-8"), str(path)), [])
+        embedder = FakeEmbedder()
+        with self.assertRaises(BoundaryError):
+            embedder.embed(["synthetic"])
+        stored = invoke(
+            "embeddings",
+            lambda: embedder.embed(["synthetic"]),
+            {"embeddings": True},
+        )
+        again = invoke(
+            "embeddings",
+            lambda: embedder.embed(["synthetic"]),
+            {"embeddings": True},
+        )
+        other = invoke(
+            "embeddings",
+            lambda: embedder.embed(["other synthetic"]),
+            {"embeddings": True},
+        )
+        self.assertEqual(stored, again)
+        self.assertNotEqual(stored, other)
+        self.assertEqual(len(stored[0]), 768)
+        self.assertNotIn("db-v2", LOCAL_VERIFY)
 
     def test_unknown_point_fails(self) -> None:
         probe = Probe()

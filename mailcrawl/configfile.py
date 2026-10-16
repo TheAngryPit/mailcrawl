@@ -6,6 +6,7 @@ import os
 import tomllib
 from pathlib import Path
 
+from mailcrawl.inference import BoundaryError, enabled_points
 from mailcrawl.paths import UsageError, canonical_alias
 
 
@@ -59,6 +60,25 @@ def taxonomy_path(path: Path) -> Path | None:
     return Path(value)
 
 
+def inference_config(path: Path) -> dict[str, bool]:
+    document = load_config(path)
+    raw = document.get("inference")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise UsageError("inference config is not a table")
+    flags: dict[str, bool] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, bool):
+            raise UsageError("inference flags are booleans")
+        flags[key] = value
+    try:
+        enabled_points(flags)
+    except BoundaryError as exc:
+        raise UsageError(str(exc)) from exc
+    return flags
+
+
 def write_account(path: Path, alias: str, email: str) -> None:
     canonical = canonical_alias(alias)
     if '"' in email or "\n" in email:
@@ -76,6 +96,18 @@ def write_account(path: Path, alias: str, email: str) -> None:
     if isinstance(taxonomy, str) and taxonomy and '"' not in taxonomy:
         lines.append(f'taxonomy = "{taxonomy}"')
         lines.append("")
+    inference = document.get("inference")
+    if isinstance(inference, dict):
+        saved = [
+            (key, value)
+            for key, value in inference.items()
+            if isinstance(key, str) and isinstance(value, bool)
+        ]
+        if saved:
+            lines.append("[inference]")
+            for key, value in sorted(saved):
+                lines.append(f"{key} = {'true' if value else 'false'}")
+            lines.append("")
     for name in sorted(accounts):
         account = accounts[name]
         if not isinstance(account, dict):

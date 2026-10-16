@@ -1,4 +1,4 @@
-"""JSON CLI for init, import, search, rules, stats, dry-run, and backfill."""
+"""JSON CLI for init, import, search, rules, stats, dry-run, backfill, embed, and knn."""
 
 from __future__ import annotations
 
@@ -10,15 +10,17 @@ import time
 from pathlib import Path
 
 from mailcrawl.advise import StubAdvisor
-from mailcrawl.configfile import account_email, account_identity, write_account
+from mailcrawl.configfile import account_email, account_identity, inference_config, write_account
 from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
+from mailcrawl.inference import enabled_points
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
 from mailcrawl.report import dry_run, stats
 from mailcrawl.rules import apply_rules, load_rules
 from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
+from mailcrawl.vectors import embed_threads, knn_decide, open_embedder
 from mailcrawl.taxonomy import (
     active_categories,
     backfill_categories,
@@ -51,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
             return _dry_run(args)
         if args.command == "backfill":
             return _backfill(args)
+        if args.command == "embed":
+            return _embed(args)
+        if args.command == "knn":
+            return _knn(args)
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
@@ -76,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--json", action="store_true")
-    common.add_argument("--home")
+    common.add_argument("--home", "--db", dest="home")
     common.add_argument("--config")
     parser = argparse.ArgumentParser(prog="mailcrawl", parents=[common])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -107,6 +113,11 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("--image-only", action="store_true")
     search.add_argument("--since", type=int)
     search.add_argument("--until", type=int)
+    search.add_argument("--semantic", action="store_true")
+    search.add_argument("--vec-weight", type=float, default=1.0)
+    search.add_argument("--keyword-weight", type=float, default=1.0)
+    search.add_argument("--k", type=int, default=10)
+    search.add_argument("--embedder", default="fake")
 
     rules = sub.add_parser("rules")
     rules.add_argument("--account", required=True)
@@ -129,6 +140,16 @@ def _parser() -> argparse.ArgumentParser:
 
     fill = sub.add_parser("backfill")
     fill.add_argument("--account", required=True)
+
+    embed = sub.add_parser("embed")
+    embed.add_argument("--account", required=True)
+    embed.add_argument("--embedder", default="fake")
+
+    knn = sub.add_parser("knn")
+    knn.add_argument("--account", required=True)
+    knn.add_argument("--thread", required=True)
+    knn.add_argument("--embedder", default="fake")
+    knn.add_argument("--now", type=int)
     return parser
 
 
@@ -214,6 +235,12 @@ def _search(args: argparse.Namespace) -> int:
     db_path = data_dir(args.home) / f"{alias}.db"
     if not db_path.is_file():
         raise UsageError("account is not initialized")
+    if args.k < 1:
+        raise UsageError("k needs a positive count")
+    flags = inference_config(config_path(args.config))
+    embedder = None
+    if "search-embedding" in enabled_points(flags):
+        embedder = open_embedder(args.embedder)
     conn = connect(db_path)
     try:
         hits = search_messages(
@@ -225,6 +252,12 @@ def _search(args: argparse.Namespace) -> int:
             image_only=1 if args.image_only else None,
             since=args.since,
             until=args.until,
+            embedder=embedder,
+            config=flags,
+            fusion="rrf" if args.semantic else "keyword",
+            keyword_weight=args.keyword_weight,
+            vec_weight=args.vec_weight,
+            k=args.k,
         )
     finally:
         conn.close()
@@ -344,6 +377,53 @@ def _export_args(args: argparse.Namespace) -> tuple[Path | None, int | None, int
     if not dest.parent.is_dir():
         raise UsageError("export directory is missing")
     return dest, sample, 0 if seed is None else seed
+
+
+def _embed(args: argparse.Namespace) -> int:
+    data_dir(args.home)
+    embedder = open_embedder(args.embedder)
+    flags = inference_config(config_path(args.config))
+    alias = canonical_alias(args.account)
+    conn = _account_db(args)
+    try:
+        written = embed_threads(conn, embedder, flags)
+    finally:
+        conn.close()
+    _emit(args, {"account": alias, "embedded": written, "ok": True})
+    return 0
+
+
+def _knn(args: argparse.Namespace) -> int:
+    data_dir(args.home)
+    flags = inference_config(config_path(args.config))
+    embedder = None
+    if "embeddings" in enabled_points(flags):
+        embedder = open_embedder(args.embedder)
+    now = int(time.time()) if args.now is None else args.now
+    conn = _account_db(args)
+    try:
+        row = conn.execute(
+            "SELECT thread_pk FROM threads WHERE gmail_thread_id = ?",
+            (args.thread,),
+        ).fetchone()
+        if row is None:
+            raise UsageError("unknown thread")
+        decision = None
+        if embedder is not None:
+            decision = knn_decide(conn, int(row["thread_pk"]), embedder, flags, now)
+    finally:
+        conn.close()
+    _emit(
+        args,
+        {
+            "next_state": None if decision is None else decision["next_state"],
+            "ok": True,
+            "origin": None if decision is None else decision["origin"],
+            "source_detail": None if decision is None else decision["source_detail"],
+            "thread": args.thread,
+        },
+    )
+    return 0
 
 
 def _backfill(args: argparse.Namespace) -> int:

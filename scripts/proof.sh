@@ -5,6 +5,16 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROOF_DIR="${REPO_ROOT}/proof"
 ORIG_HOME="${HOME}"
+# HOME isolation moves the user site. An optional extra already on this interpreter stays visible.
+VEC_SITE=""
+if VEC_SITE="$(python3 -c 'import sqlite_vec, pathlib; print(pathlib.Path(sqlite_vec.__file__).resolve().parent.parent)' 2>/dev/null)"; then
+  case ":${PYTHONPATH:-}:" in
+    *":${VEC_SITE}:"*) ;;
+    *) export PYTHONPATH="${VEC_SITE}${PYTHONPATH:+:${PYTHONPATH}}" ;;
+  esac
+else
+  VEC_SITE=""
+fi
 PROOF_HOME="$(mktemp -d)"
 export HOME="${PROOF_HOME}"
 export http_proxy="http://127.0.0.1:9"
@@ -34,6 +44,9 @@ trap cleanup EXIT
 
 [[ "${HOME}" != "${ORIG_HOME}" ]] || fail "HOME was not isolated"
 [[ "${HOME}" == "${PROOF_HOME}" ]] || fail "HOME is not the temp dir"
+if [[ -n "${VEC_SITE}" ]]; then
+  python3 -c "import sqlite_vec" || fail "sqlite-vec vanished after HOME isolation"
+fi
 
 log "check: required synthetic fixtures"
 for f in \
@@ -228,7 +241,7 @@ try:
     if body != "This body is fake fixture text.":
         raise SystemExit("cleaned body is not the kept sentence")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 5:
+    if version != 6:
         raise SystemExit(f"user_version {version}")
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table in ("decisions", "sender_decisions", "thread_mutes"):
@@ -552,7 +565,7 @@ conn = sqlite3.connect(path)
 conn.row_factory = sqlite3.Row
 try:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 5:
+    if version != 6:
         raise SystemExit(f"user_version {version}")
     flags = {
         row["subject"]: row["image_only"]
@@ -702,13 +715,280 @@ migrate(conn)
 version = conn.execute("PRAGMA user_version").fetchone()[0]
 flag = conn.execute("SELECT image_only FROM threads").fetchone()[0]
 trigram = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'msg_trigram'").fetchone()[0]
+names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
 if version != USER_VERSION or flag != 1 or "trigram" not in trigram:
     raise SystemExit(f"migration {version} {flag} {trigram}")
+if "vec_classification" in names or "vec_search" in names or "embeddings" in names:
+    raise SystemExit(f"vec tables {sorted(names)}")
 print(f"user_version {version}")
 print("image_only", flag)
 print(trigram)
+print("vec absent")
 PY
 ) | tee "${PROOF_DIR}/phase2-migration.log"
+
+log "check: phase 3 vectors stay off until config turns them on"
+ARTIFACT_DIR="${ARTIFACT_DIR:-$PROOF_DIR}"
+mkdir -p "${ARTIFACT_DIR}"
+PHASE3_DATA="${PROOF_HOME}/phase3-data"
+PHASE3_CFG="${PROOF_HOME}/phase3-config.toml"
+PHASE3_MBOX="${PROOF_HOME}/phase3.mbox"
+cat >"${PHASE3_MBOX}" <<'MBOX'
+From 1768000000000000201@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Alpha keyword
+Date: Thu, 15 Jan 2026 12:00:00 +0000
+Message-ID: <phase3-alpha@example.com>
+X-GM-THRID: 1768000000000000201
+X-GM-MSGID: 1768000000000000201
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+alpha keyword
+
+From 1768000000000000202@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Vec only
+Date: Thu, 15 Jan 2026 12:05:00 +0000
+Message-ID: <phase3-vec@example.com>
+X-GM-THRID: 1768000000000000202
+X-GM-MSGID: 1768000000000000202
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+vec-only marker
+
+From 1768000000000000203@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Neighbour reviewed
+Date: Thu, 15 Jan 2026 12:10:00 +0000
+Message-ID: <phase3-near@example.com>
+X-GM-THRID: 1768000000000000203
+X-GM-MSGID: 1768000000000000203
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+same neighbour text
+
+From 1768000000000000204@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Neighbour target
+Date: Thu, 15 Jan 2026 12:15:00 +0000
+Message-ID: <phase3-target@example.com>
+X-GM-THRID: 1768000000000000204
+X-GM-MSGID: 1768000000000000204
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+same neighbour text
+
+From 1768000000000000205@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Far note
+Date: Thu, 15 Jan 2026 12:20:00 +0000
+Message-ID: <phase3-far@example.com>
+X-GM-THRID: 1768000000000000205
+X-GM-MSGID: 1768000000000000205
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+completely different archive note
+
+MBOX
+(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --home "${PHASE3_DATA}" --config "${PHASE3_CFG}" --json init --account personal --email ada@example.com
+  python3 -m mailcrawl --home "${PHASE3_DATA}" --config "${PHASE3_CFG}" --json import mbox "${PHASE3_MBOX}" --account personal
+) | tee "${PROOF_DIR}/phase3-import.log"
+PHASE3_DATA="${PHASE3_DATA}" PHASE3_CFG="${PHASE3_CFG}" REPO_ROOT="${REPO_ROOT}" python3 - <<'PY' | tee "${PROOF_DIR}/phase3.log"
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+
+from mailcrawl.decisions import DecisionDraft, decide_once
+from mailcrawl.schema import SCHEMA_SQL, USER_VERSION
+from mailcrawl.store import connect, migrate
+
+home = os.environ["PHASE3_DATA"]
+config = os.environ["PHASE3_CFG"]
+repo = os.environ["REPO_ROOT"]
+db_path = os.path.join(home, "personal.db")
+
+
+def run(args: list[str]) -> tuple[int, dict]:
+    proc = subprocess.run(
+        [sys.executable, "-m", "mailcrawl", "--home", home, "--config", config, "--json", *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if not proc.stdout:
+        raise SystemExit(f"{args} exit {proc.returncode} {proc.stderr}")
+    return proc.returncode, json.loads(proc.stdout)
+
+
+code, embedded = run(["embed", "--account", "personal", "--embedder", "fake"])
+if code != 0 or embedded.get("embedded") != 0:
+    raise SystemExit(f"off embed {code} {embedded}")
+conn = connect(db_path)
+try:
+    names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    target = conn.execute(
+        """
+        SELECT threads.gmail_thread_id
+        FROM threads JOIN messages ON messages.thread_pk = threads.thread_pk
+        WHERE messages.subject = 'Neighbour target'
+        """
+    ).fetchone()[0]
+finally:
+    conn.close()
+if "vec_classification" in names or "vec_search" in names:
+    raise SystemExit(f"off vectors {sorted(names)}")
+code, hits = run(["search", "--account", "personal", "--", "alpha"])
+if code != 0 or [hit["source"] for hit in hits["hits"]] != ["fts"]:
+    raise SystemExit(f"off search {hits}")
+if hits["hits"][0]["subject"] != "Alpha keyword":
+    raise SystemExit(f"off subject {hits}")
+code, gemma = run(["embed", "--account", "personal", "--embedder", "gemma"])
+if code != 0 or gemma.get("embedded") != 0:
+    raise SystemExit(f"gemma off {code} {gemma}")
+print("gemma off embedded 0")
+code, knn = run(["knn", "--account", "personal", "--thread", target, "--embedder", "fake"])
+if code != 0 or knn.get("origin") is not None:
+    raise SystemExit(f"off knn {knn}")
+print("off embedded 0")
+print("off search fts")
+print("off knn none")
+
+text = open(config, encoding="utf-8").read()
+if "[inference]" not in text:
+    text = "[inference]\nembeddings = true\nsearch-embedding = true\n\n" + text
+    open(config, "w", encoding="utf-8").write(text)
+
+code, embedded = run(["embed", "--account", "personal", "--embedder", "scripted"])
+if code != 0 or embedded.get("embedded") != 5:
+    raise SystemExit(f"scripted embed {embedded}")
+code, keyword = run(
+    ["search", "--account", "personal", "--embedder", "scripted", "--k", "1", "--", "alpha"]
+)
+order = [(hit["subject"], hit["source"]) for hit in keyword["hits"]]
+if order != [("Alpha keyword", "fts"), ("Vec only", "vec")]:
+    raise SystemExit(f"keyword-first {order}")
+code, fused = run(
+    [
+        "search",
+        "--account",
+        "personal",
+        "--embedder",
+        "scripted",
+        "--semantic",
+        "--vec-weight",
+        "100",
+        "--keyword-weight",
+        "1",
+        "--k",
+        "1",
+        "--",
+        "alpha",
+    ]
+)
+fused_order = [(hit["subject"], hit["source"]) for hit in fused["hits"]]
+if fused_order != [("Vec only", "fused"), ("Alpha keyword", "fused")]:
+    raise SystemExit(f"rrf {fused_order}")
+print("fusion keyword", order)
+print("fusion rrf", fused_order)
+
+code, embedded = run(["embed", "--account", "personal", "--embedder", "fake"])
+if code != 0 or embedded.get("embedded") != 5:
+    raise SystemExit(f"fake embed {embedded}")
+conn = connect(db_path)
+try:
+    threads = {
+        row[1]: int(row[0])
+        for row in conn.execute("SELECT thread_pk, subject FROM messages")
+    }
+    decide_once(
+        conn,
+        threads["Neighbour reviewed"],
+        10,
+        lambda: DecisionDraft(
+            next_state="reference",
+            lane="paper_trail",
+            rule_id="3",
+            rules_version="rules-v4",
+            origin="human",
+            source_detail="review",
+        ),
+    )
+    decide_once(
+        conn,
+        threads["Far note"],
+        10,
+        lambda: DecisionDraft(
+            next_state="noise",
+            lane="feed",
+            rule_id="else",
+            rules_version="rules-v4",
+            origin="human",
+            source_detail="review",
+        ),
+    )
+    target = conn.execute(
+        "SELECT gmail_thread_id FROM threads WHERE thread_pk = ?",
+        (threads["Neighbour target"],),
+    ).fetchone()[0]
+finally:
+    conn.close()
+code, knn = run(["knn", "--account", "personal", "--thread", target, "--embedder", "fake", "--now", "20"])
+if code != 0 or knn.get("origin") != "knn" or knn.get("source_detail") != "fake-embedder":
+    raise SystemExit(f"knn {knn}")
+if knn.get("next_state") != "reference":
+    raise SystemExit(f"knn state {knn}")
+conn = sqlite3.connect(db_path)
+try:
+    evidence = conn.execute(
+        """
+        SELECT origin, source_detail, next_state, evidence
+        FROM decisions
+        WHERE thread_pk = ? AND superseded_by IS NULL
+        """,
+        (threads["Neighbour target"],),
+    ).fetchone()
+finally:
+    conn.close()
+if evidence[0] != "knn" or evidence[1] != "fake-embedder" or evidence[2] != "reference":
+    raise SystemExit(f"stored knn {evidence}")
+parsed = json.loads(evidence[3])
+if parsed != [{"distance": 0.0, "neighbour_thread_pk": threads["Neighbour reviewed"]}]:
+    raise SystemExit(f"neighbour {evidence[3]}")
+print("knn", knn["origin"], knn["source_detail"], knn["next_state"])
+
+fresh = sqlite3.connect(":memory:")
+fresh.executescript(SCHEMA_SQL)
+fresh.execute("PRAGMA user_version = 5")
+migrate(fresh)
+version = fresh.execute("PRAGMA user_version").fetchone()[0]
+names = {row[0] for row in fresh.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+if version != USER_VERSION or version != 6:
+    raise SystemExit(f"v5 migration {version}")
+if "vec_classification" in names or "vec_search" in names or "embeddings" in names:
+    raise SystemExit(f"v5 tables {sorted(names)}")
+print("migration", version, "vec absent")
+PY
+cp "${PROOF_DIR}/phase3.log" "${ARTIFACT_DIR}/phase3.log"
 
 record_fixture_hashes "${FIXTURE_AFTER}"
 if ! diff -q "${FIXTURE_BEFORE}" "${FIXTURE_AFTER}" >/dev/null; then
@@ -745,6 +1025,10 @@ doc = {
         "stats_dry_run",
         "mbox_import",
         "missing_required_key_unsupported_schema",
+        "phase3_off_by_default",
+        "phase3_fake_knn",
+        "phase3_fusion",
+        "phase3_migration",
         "fixture_sha256_unchanged",
     ],
 }

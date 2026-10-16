@@ -92,7 +92,11 @@ def scan_source(text: str, filename: str) -> list[str]:
                 problems.append(f"{filename}:{node.lineno}: undeclared point")
         if isinstance(node, ast.Call) and _is_model_call(node) and not _inside_declared_invoke(node, parents):
             problems.append(f"{filename}:{node.lineno}: model call outside a declared point")
-        if isinstance(node, (ast.Import, ast.ImportFrom)) and not _inside_declared_invoke(node, parents):
+        if (
+            isinstance(node, (ast.Import, ast.ImportFrom))
+            and not _inside_declared_invoke(node, parents)
+            and not _guarded_by_enter_model(node, parents)
+        ):
             for root_name in _import_roots(node):
                 if root_name in MODEL_CLIENTS:
                     problems.append(f"{filename}:{node.lineno}: model client import {root_name}")
@@ -126,6 +130,27 @@ def _import_roots(node: ast.Import | ast.ImportFrom) -> list[str]:
     if node.module is None:
         return []
     return [node.module.split(".", 1)[0]]
+
+
+def _guarded_by_enter_model(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    current: ast.AST | None = node
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)) and _calls_enter_model(current):
+            return True
+        current = parents.get(current)
+    return False
+
+
+def _calls_enter_model(fn: ast.AST) -> bool:
+    for child in ast.walk(fn):
+        if not isinstance(child, ast.Call):
+            continue
+        func = child.func
+        if isinstance(func, ast.Name) and func.id == "enter_model":
+            return True
+        if isinstance(func, ast.Attribute) and func.attr == "enter_model":
+            return True
+    return False
 
 
 def _inside_declared_invoke(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:

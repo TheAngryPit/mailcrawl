@@ -23,10 +23,20 @@ jobs:
         shell: bash
         run: sudo apt-get update && sudo apt-get install -y poppler-utils
 
-      - name: Make check
+      - name: Make check without sqlite-vec
+        shell: bash
+        run: make check
+
+      - name: Install sqlite-vec
+        shell: bash
+        run: python3 -m pip install --user sqlite-vec || python3 -m pip install --user --break-system-packages sqlite-vec
+
+      - name: Make check with sqlite-vec
         shell: bash
         run: make check
 
       - name: Scaffold proof
         shell: bash
+        env:
+          ARTIFACT_DIR: ${{ runner.temp }}/mailcrawl-proof
         run: scripts/proof.sh

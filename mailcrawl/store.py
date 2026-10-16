@@ -50,6 +50,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         version = 4
     if version == 4:
         _migrate_v4(conn)
+        version = 5
+    if version == 5:
+        _migrate_v5(conn)
         return
     raise UnsupportedSchema(f"user_version {version}")
 
@@ -234,6 +237,11 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
             _execute_statements(conn, FTS_SQL)
         if "msg_trigram" not in names:
             _execute_statements(conn, TRIGRAM_SQL)
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA user_version = {USER_VERSION}")
     conn.commit()
 

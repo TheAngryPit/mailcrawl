@@ -1,11 +1,13 @@
 """Schema v2 creates ingest, FTS, and the empty decision tables."""
 
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from mailcrawl.schema import FTS_SQL, TABLES, USER_VERSION
+from mailcrawl.schema import FTS_SQL, SCHEMA_SQL, TABLES, USER_VERSION
 from mailcrawl.store import UnsupportedSchema, connect, migrate
 
 BANNED = (
@@ -94,10 +96,10 @@ class SchemaV1Test(unittest.TestCase):
     def test_later_user_version_fails_closed(self) -> None:
         conn = sqlite3.connect(":memory:")
         try:
-            conn.execute("PRAGMA user_version = 6")
+            conn.execute("PRAGMA user_version = 7")
             with self.assertRaises(UnsupportedSchema):
                 migrate(conn)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 7)
             names = {
                 row[0]
                 for row in conn.execute(
@@ -105,6 +107,41 @@ class SchemaV1Test(unittest.TestCase):
                 )
             }
             self.assertNotIn("messages", names)
+        finally:
+            conn.close()
+
+    def test_open_does_not_import_sqlite_vec(self) -> None:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys\n"
+                "from mailcrawl.store import connect\n"
+                "connect(':memory:')\n"
+                "raise SystemExit('sqlite_vec' in sys.modules)\n",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+    def test_user_version_5_does_not_create_vec_tables(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute("PRAGMA user_version = 5")
+            migrate(conn)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], USER_VERSION)
+            names = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            self.assertNotIn("vec_classification", names)
+            self.assertNotIn("vec_search", names)
+            self.assertNotIn("embeddings", names)
         finally:
             conn.close()
 
