@@ -18,6 +18,21 @@ DECLARED_POINTS = (
     "low-confidence-llm",
 )
 MODEL_ATTRS = frozenset({"predict", "embed", "generate", "complete", "systemone"})
+MODEL_CLIENTS = frozenset(
+    {
+        "openai",
+        "anthropic",
+        "transformers",
+        "sentence_transformers",
+        "torch",
+        "ollama",
+        "setfit",
+        "httpx",
+        "requests",
+        "aiohttp",
+        "huggingface_hub",
+    }
+)
 
 T = TypeVar("T")
 _point: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -31,7 +46,6 @@ class BoundaryError(Exception):
 
 
 def enabled_points(config: dict[str, bool] | None = None) -> frozenset[str]:
-    """Config gates. Missing config and unknown keys stay off. Default is off."""
     if not config:
         return frozenset()
     enabled: set[str] = set()
@@ -66,23 +80,28 @@ def invoke(
 
 def scan_source(text: str, filename: str) -> list[str]:
     tree = ast.parse(text, filename=filename)
+    parents: dict[ast.AST, ast.AST] = {}
     for parent in ast.walk(tree):
         for child in ast.iter_child_nodes(parent):
-            child.parent = parent  # type: ignore[attr-defined]
+            parents[child] = parent
     problems: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and _is_invoke(node):
             point = node.args[0] if node.args else None
             if not isinstance(point, ast.Constant) or point.value not in DECLARED_POINTS:
                 problems.append(f"{filename}:{node.lineno}: undeclared point")
-        if isinstance(node, ast.Call) and _is_model_call(node) and not _inside_declared_invoke(node):
+        if isinstance(node, ast.Call) and _is_model_call(node) and not _inside_declared_invoke(node, parents):
             problems.append(f"{filename}:{node.lineno}: model call outside a declared point")
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and not _inside_declared_invoke(node, parents):
+            for root_name in _import_roots(node):
+                if root_name in MODEL_CLIENTS:
+                    problems.append(f"{filename}:{node.lineno}: model client import {root_name}")
     return problems
 
 
 def scan_package(root: Path) -> list[str]:
     found: list[str] = []
-    for path in sorted(root.glob("*.py")):
+    for path in sorted(root.rglob("*.py")):
         found.extend(scan_source(path.read_text(encoding="utf-8"), str(path)))
     return found
 
@@ -101,10 +120,18 @@ def _is_model_call(node: ast.Call) -> bool:
     return isinstance(func, ast.Attribute) and func.attr in MODEL_ATTRS
 
 
-def _inside_declared_invoke(node: ast.AST) -> bool:
+def _import_roots(node: ast.Import | ast.ImportFrom) -> list[str]:
+    if isinstance(node, ast.Import):
+        return [alias.name.split(".", 1)[0] for alias in node.names]
+    if node.module is None:
+        return []
+    return [node.module.split(".", 1)[0]]
+
+
+def _inside_declared_invoke(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
     current: ast.AST | None = node
     while current is not None:
-        parent = getattr(current, "parent", None)
+        parent = parents.get(current)
         if isinstance(parent, ast.Call) and _is_invoke(parent) and len(parent.args) >= 2:
             point = parent.args[0]
             if (

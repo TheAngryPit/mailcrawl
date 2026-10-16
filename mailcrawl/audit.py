@@ -10,15 +10,18 @@ LIMIT = 0.02
 
 
 class AuditGateError(Exception):
-    def __init__(self, rate: float) -> None:
+    def __init__(self, rate: float | None) -> None:
         self.rate = rate
-        super().__init__(f"accepted-case error {rate:.4f} exceeds {LIMIT:.2f}")
+        if rate is None:
+            super().__init__("accepted set is empty")
+            return
+        super().__init__(f"accepted-case error {rate:.4f} is not under {LIMIT:.2f}")
 
 
 def accepted_case_error(cases: list[dict[str, object]]) -> float:
     accepted = [case for case in cases if case.get("accepted") is True]
     if not accepted:
-        return 0.0
+        raise AuditGateError(None)
     wrong = 0
     for case in accepted:
         if case.get("rule") != case.get("correct_rule"):
@@ -38,7 +41,7 @@ def load_cases(path: Path) -> list[dict[str, object]]:
 
 def check(path: Path) -> float:
     rate = accepted_case_error(load_cases(path))
-    if rate > LIMIT:
+    if rate >= LIMIT:
         raise AuditGateError(rate)
     return rate
 

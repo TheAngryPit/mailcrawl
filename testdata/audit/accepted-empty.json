@@ -1,0 +1,35 @@
+{
+  "synthetic": true,
+  "cases": [
+    {
+      "id": "g001",
+      "accepted": false,
+      "rule": "else",
+      "correct_rule": "3"
+    },
+    {
+      "id": "g002",
+      "accepted": false,
+      "rule": "else",
+      "correct_rule": "3"
+    },
+    {
+      "id": "g003",
+      "accepted": false,
+      "rule": "else",
+      "correct_rule": "3"
+    },
+    {
+      "id": "g004",
+      "accepted": false,
+      "rule": "else",
+      "correct_rule": "3"
+    },
+    {
+      "id": "g005",
+      "accepted": false,
+      "rule": "else",
+      "correct_rule": "3"
+    }
+  ]
+}

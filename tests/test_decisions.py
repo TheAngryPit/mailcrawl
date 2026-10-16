@@ -49,6 +49,20 @@ class DecideOnceTest(unittest.TestCase):
         count = self.conn.execute("SELECT count(*) FROM decisions").fetchone()[0]
         self.assertEqual(count, 1)
 
+    def test_missing_origin_fails(self) -> None:
+        thread = self.conn.execute(
+            "INSERT INTO threads(account_id, gmail_thread_id) VALUES (1, 'thread-2')"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.conn.execute(
+                """
+                INSERT INTO decisions(
+                  thread_pk, next_state, source, rules_version, evidence, created_at
+                ) VALUES (?, 'reply', 'rule', 'rules-v4', '[]', 1)
+                """,
+                (int(thread.lastrowid),),
+            )
+
     def test_v3_source_maps_onto_origin(self) -> None:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row

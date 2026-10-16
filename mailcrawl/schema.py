@@ -1,4 +1,4 @@
-"""SQLite schema v2 tables. user_version 4 records decision origin."""
+"""SQLite tables for one account archive."""
 
 USER_VERSION = 4
 
@@ -227,8 +227,8 @@ CREATE TABLE IF NOT EXISTS decisions (
   muted INTEGER NOT NULL DEFAULT 0,
   confidence REAL,
   source TEXT NOT NULL CHECK (source IN ('rule','embedding-cluster','llm','human','legacy-label')),
-  origin TEXT NOT NULL DEFAULT 'rule' CHECK (origin IN ('rule','knn','model','human')),
-  source_detail TEXT NOT NULL DEFAULT '',
+  origin TEXT NOT NULL CHECK (origin IN ('rule','knn','model','human')),
+  source_detail TEXT NOT NULL,
   rule_id TEXT,
   rules_version TEXT NOT NULL,
   evidence TEXT NOT NULL,

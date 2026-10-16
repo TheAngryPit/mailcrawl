@@ -26,7 +26,7 @@ DUMP_TABLES = (
 
 
 class UnsupportedSchema(Exception):
-    """The database user_version is not 0, 1, 2, 3, or 4."""
+    pass
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -154,8 +154,8 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
           muted INTEGER NOT NULL DEFAULT 0,
           confidence REAL,
           source TEXT NOT NULL CHECK (source IN ('rule','embedding-cluster','llm','human','legacy-label')),
-          origin TEXT NOT NULL DEFAULT 'rule' CHECK (origin IN ('rule','knn','model','human')),
-          source_detail TEXT NOT NULL DEFAULT '',
+          origin TEXT NOT NULL CHECK (origin IN ('rule','knn','model','human')),
+          source_detail TEXT NOT NULL,
           rule_id TEXT,
           rules_version TEXT NOT NULL,
           evidence TEXT NOT NULL,

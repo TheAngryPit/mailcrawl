@@ -1,5 +1,5 @@
-"""Model calls stay inside declared points, and those points default to off."""
-
+import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -35,13 +35,23 @@ class InferenceBoundaryTest(unittest.TestCase):
         problems = scan_source(path.read_text(encoding="utf-8"), str(path))
         self.assertEqual(len(problems), 1)
         probe = Probe()
-        namespace: dict[str, object] = {}
-        exec(path.read_text(encoding="utf-8"), namespace)  # noqa: S102
-        classify = namespace["classify"]
-        assert callable(classify)
+        spec = importlib.util.spec_from_file_location("planted_violation", path)
+        if spec is None or spec.loader is None:
+            self.fail("planted module did not load")
+        module = importlib.util.module_from_spec(spec)
+        write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = write_bytecode
         with self.assertRaises(BoundaryError):
-            classify(probe)
+            module.classify(probe)
         self.assertEqual(probe.calls, 0)
+
+    def test_model_client_import_is_caught(self) -> None:
+        problems = scan_source("import openai\n", "planted_import.py")
+        self.assertEqual(problems, ["planted_import.py:1: model client import openai"])
 
     def test_declared_points_are_off_by_default(self) -> None:
         self.assertEqual(enabled_points(None), frozenset())

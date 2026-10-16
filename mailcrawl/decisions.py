@@ -46,7 +46,6 @@ def decide_once(
     now: int,
     produce: Callable[[], DecisionDraft],
 ) -> sqlite3.Row:
-    """Return the stored decision. Call produce only when the thread has none."""
     stored = current_decision(conn, thread_pk)
     if stored is not None:
         return stored
