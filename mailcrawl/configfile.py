@@ -60,7 +60,7 @@ def taxonomy_path(path: Path) -> Path | None:
     return Path(value)
 
 
-DEFAULT_BATCH_SIZE = 4
+DEFAULT_BATCH_SIZE = 1
 DEFAULT_MAX_TOKENS = 2048
 
 

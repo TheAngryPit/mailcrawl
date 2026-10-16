@@ -714,6 +714,20 @@ class BoundTest(unittest.TestCase):
             self.assertEqual(out.getvalue(), "usage\n")
             self.assertEqual(err.getvalue(), "account is not initialized\n")
 
+    def test_default_batch_encodes_one_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("[inference]\nembeddings = true\n", encoding="utf-8")
+            self.assertEqual(embed_limits(path), (1, 2048))
+        embedder = FakeEmbedder()
+        rows = invoke(
+            "embeddings",
+            lambda: embedder.embed(["one", "two", "three"]),
+            {"embeddings": True},
+        )
+        self.assertEqual(embedder.batches, [["one"], ["two"], ["three"]])
+        self.assertEqual(len(rows), 3)
+
     def test_bad_batch_size_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"

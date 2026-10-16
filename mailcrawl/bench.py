@@ -211,15 +211,16 @@ def _measure(name: str, drawn: Drawn, batch_size: int, max_tokens: int) -> Measu
     descriptor, out_path = tempfile.mkstemp(prefix="mailcrawl-bench-", suffix=".json")
     os.close(descriptor)
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-m", "mailcrawl.bench", out_path],
-            input=json.dumps(payload),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            capture_output=True,
-            check=False,
         )
+        stderr = proc.communicate(json.dumps(payload))[1]
         if proc.returncode != 0:
-            detail = proc.stderr.strip() or "bench embedder failed"
+            detail = (stderr or "").strip() or "bench embedder failed"
             raise UsageError(detail)
         raw = json.loads(Path(out_path).read_text(encoding="utf-8"))
     finally:

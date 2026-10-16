@@ -12,6 +12,7 @@ import types
 import unittest
 from pathlib import Path
 
+import mailcrawl.bench as bench_module
 from mailcrawl.bench import ThreadRow, ru_maxrss_mb, run_bench, select_sample
 from mailcrawl.cli import main
 from mailcrawl.decisions import DecisionDraft, decide_once
@@ -219,6 +220,34 @@ class BenchTest(unittest.TestCase):
                 run_bench(db, ["fake"], 0)
             with self.assertRaises(UsageError):
                 run_bench(db, [], 1)
+
+    def test_embedders_exit_before_the_next_loads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _archive(Path(tmp))
+            seen: list[subprocess.Popen[str]] = []
+            real = subprocess.Popen
+
+            def popen(argv, **kwargs):
+                if seen:
+                    previous = seen[-1]
+                    self.assertIsNotNone(previous.returncode)
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(previous.pid, 0)
+                proc = real(argv, **kwargs)
+                seen.append(proc)
+                return proc
+
+            bench_module.subprocess.Popen = popen
+            try:
+                report = run_bench(db, ["fake", "fake"], 1)
+            finally:
+                bench_module.subprocess.Popen = real
+            self.assertEqual([proc.returncode for proc in seen], [0, 0])
+            self.assertNotEqual(seen[0].pid, seen[1].pid)
+            self.assertEqual(
+                [row["name"] for row in report["embedders"]],
+                ["fake", "fake"],
+            )
 
 
 def _archive(home: Path) -> Path:
