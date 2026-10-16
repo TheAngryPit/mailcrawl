@@ -1,6 +1,6 @@
 """SQLite tables for one account archive."""
 
-USER_VERSION = 6
+USER_VERSION = 7
 
 TABLES = (
     "accounts",
@@ -19,6 +19,8 @@ TABLES = (
     "thread_mutes",
     "msg_fts",
     "msg_trigram",
+    "jev_answers",
+    "jev_rerank",
 )
 
 HEADER_ALLOW = (
@@ -284,4 +286,26 @@ CREATE VIRTUAL TABLE IF NOT EXISTS msg_trigram USING fts5(
 );
 """
 
-SCHEMA_SQL = _SCHEMA_PREFIX + V2_TABLES_SQL + FTS_SQL + TRIGRAM_SQL
+JEV_SQL = """
+CREATE TABLE IF NOT EXISTS jev_answers (
+  thread_pk INTEGER NOT NULL REFERENCES threads,
+  question_id TEXT NOT NULL,
+  battery_version TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('noul','choice','score')),
+  answer_json TEXT NOT NULL,
+  PRIMARY KEY (thread_pk, question_id, battery_version, model_id)
+);
+
+CREATE TABLE IF NOT EXISTS jev_rerank (
+  query_text TEXT NOT NULL,
+  thread_pk INTEGER NOT NULL,
+  question_id TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  question_version TEXT NOT NULL,
+  value REAL NOT NULL,
+  PRIMARY KEY (query_text, thread_pk, question_id, model_id, question_version)
+);
+"""
+
+SCHEMA_SQL = _SCHEMA_PREFIX + V2_TABLES_SQL + FTS_SQL + TRIGRAM_SQL + JEV_SQL

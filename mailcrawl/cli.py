@@ -1,4 +1,4 @@
-"""JSON CLI for init, import, search, rules, stats, dry-run, backfill, embed, and knn."""
+"""JSON CLI for init, import, search, rules, stats, dry-run, backfill, embed, knn, and jev."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
 from mailcrawl.inference import enabled_points
+from mailcrawl.jev import jev_decide, open_client, score_grey_band
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
 from mailcrawl.report import dry_run, stats
 from mailcrawl.rules import apply_rules, load_rules
@@ -57,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
             return _embed(args)
         if args.command == "knn":
             return _knn(args)
+        if args.command == "jev":
+            return _jev(args)
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
@@ -118,6 +121,7 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("--keyword-weight", type=float, default=1.0)
     search.add_argument("--k", type=int, default=10)
     search.add_argument("--embedder", default="fake")
+    search.add_argument("--jev-client", default="fake")
 
     rules = sub.add_parser("rules")
     rules.add_argument("--account", required=True)
@@ -150,6 +154,12 @@ def _parser() -> argparse.ArgumentParser:
     knn.add_argument("--thread", required=True)
     knn.add_argument("--embedder", default="fake")
     knn.add_argument("--now", type=int)
+
+    jev = sub.add_parser("jev")
+    jev.add_argument("--account", required=True)
+    jev.add_argument("--thread")
+    jev.add_argument("--client", default="fake")
+    jev.add_argument("--now", type=int)
     return parser
 
 
@@ -241,6 +251,9 @@ def _search(args: argparse.Namespace) -> int:
     embedder = None
     if "search-embedding" in enabled_points(flags):
         embedder = open_embedder(args.embedder)
+    jev = None
+    if "search-reranker" in enabled_points(flags):
+        jev = open_client(args.jev_client)
     conn = connect(db_path)
     try:
         hits = search_messages(
@@ -253,6 +266,7 @@ def _search(args: argparse.Namespace) -> int:
             since=args.since,
             until=args.until,
             embedder=embedder,
+            jev=jev,
             config=flags,
             fusion="rrf" if args.semantic else "keyword",
             keyword_weight=args.keyword_weight,
@@ -421,6 +435,53 @@ def _knn(args: argparse.Namespace) -> int:
             "origin": None if decision is None else decision["origin"],
             "source_detail": None if decision is None else decision["source_detail"],
             "thread": args.thread,
+        },
+    )
+    return 0
+
+
+def _jev(args: argparse.Namespace) -> int:
+    data_dir(args.home)
+    flags = inference_config(config_path(args.config))
+    now = int(time.time()) if args.now is None else args.now
+    conn = _account_db(args)
+    decision = None
+    passed = None
+    try:
+        client = open_client(args.client)
+        if args.thread:
+            row = conn.execute(
+                "SELECT thread_pk FROM threads WHERE gmail_thread_id = ?",
+                (args.thread,),
+            ).fetchone()
+            if row is None:
+                raise UsageError("unknown thread")
+            decision = jev_decide(conn, int(row["thread_pk"]), client, flags, now)
+        else:
+            passed = score_grey_band(conn, client, flags, now)
+    finally:
+        conn.close()
+    if args.thread:
+        _emit(
+            args,
+            {
+                "decision_id": None if decision is None else decision["decision_id"],
+                "next_state": "needs_review" if decision is None else decision["next_state"],
+                "ok": True,
+                "origin": None if decision is None else decision["origin"],
+                "source_detail": None if decision is None else decision["source_detail"],
+                "thread": args.thread,
+            },
+        )
+        return 0
+    _emit(
+        args,
+        {
+            "account": canonical_alias(args.account),
+            "decided": passed.decided,
+            "eligible": passed.eligible,
+            "ok": True,
+            "review": passed.review,
         },
     )
     return 0
