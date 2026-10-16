@@ -460,6 +460,84 @@ Content-Transfer-Encoding: base64
 
 
 class VectorCliTest(unittest.TestCase):
+    def test_omitted_embedder_resolves_to_gemma(self) -> None:
+        mbox_text = """From 1768000000000000501@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Text note
+Date: Thu, 15 Jan 2026 12:00:00 +0000
+Message-ID: <default-embedder@example.com>
+X-GM-THRID: 1768000000000000501
+X-GM-MSGID: 1768000000000000501
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+alpha keyword
+
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / "config.toml"
+            mbox = home / "one.mbox"
+            mbox.write_text(mbox_text, encoding="utf-8")
+            self.assertEqual(
+                main(
+                    [
+                        "--json",
+                        "--home",
+                        str(home),
+                        "--config",
+                        str(config),
+                        "init",
+                        "--account",
+                        "personal",
+                        "--email",
+                        "ada@example.com",
+                    ]
+                ),
+                0,
+            )
+            config.write_text(
+                config.read_text(encoding="utf-8") + "\n[inference]\nembeddings = true\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                main(
+                    [
+                        "--json",
+                        "--home",
+                        str(home),
+                        "--config",
+                        str(config),
+                        "import",
+                        "mbox",
+                        str(mbox),
+                        "--account",
+                        "personal",
+                    ]
+                ),
+                0,
+            )
+            buf = StringIO()
+            with redirect_stdout(buf):
+                code = main(
+                    [
+                        "--json",
+                        "--home",
+                        str(home),
+                        "--config",
+                        str(config),
+                        "embed",
+                        "--account",
+                        "personal",
+                    ]
+                )
+            self.assertEqual(code, 2, buf.getvalue())
+            self.assertIn("sentence-transformers>=6.1", buf.getvalue())
+            self.assertNotIn("sentence_transformers", sys.modules)
+            self.assertNotIn("torch", sys.modules)
+
     def test_image_encode_uses_the_gemma_guide(self) -> None:
         png = bytes.fromhex(
             "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
