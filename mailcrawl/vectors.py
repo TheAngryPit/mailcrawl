@@ -134,8 +134,6 @@ class GemmaEmbedder:
     def prepare(self, *, images: bool) -> None:
         enter_model()
         self._gemma()
-        if images:
-            self._gemma()
 
 
 class MlxEmbedder:

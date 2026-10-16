@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
-import os
+import resource
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -14,6 +16,7 @@ from pathlib import Path
 
 from mailcrawl.inference import invoke
 from mailcrawl.paths import UsageError
+from mailcrawl.threads import embeddable_image
 from mailcrawl.vectors import (
     classification_text,
     open_embedder,
@@ -23,6 +26,16 @@ from mailcrawl.vectors import (
 )
 
 _ON = {"embeddings": True}
+
+
+@dataclass(frozen=True)
+class ThreadRow:
+    thread_pk: int
+    subject: str
+    body: str
+    image_only: bool
+    has_images: bool
+    human_label: str | None
 
 
 @dataclass(frozen=True)
@@ -38,7 +51,7 @@ class Measured:
     name: str
     model_id: str
     load_s: float
-    peak_rss_bytes: int
+    peak_rss_mb: float
     texts: int
     images: int
     texts_per_min: float
@@ -64,8 +77,7 @@ def run_bench(source: Path, names: list[str], sample: int) -> dict[str, object]:
     measured: list[Measured] = []
     stored: list[tuple[str, Measured]] = []
     for name in names:
-        embedder = open_embedder(name)
-        one = _measure(name, embedder, drawn)
+        one = _measure(name, drawn)
         measured.append(one)
         stored.append((name, one))
     vector_db = _write_copy(source, stored)
@@ -74,22 +86,48 @@ def run_bench(source: Path, names: list[str], sample: int) -> dict[str, object]:
     return _document(sample, drawn, measured, vector_db)
 
 
+def select_sample(rows: list[ThreadRow], sample: int) -> list[ThreadRow]:
+    ordered = sorted(rows, key=lambda row: row.thread_pk)
+    image_rows = [row for row in ordered if row.image_only or row.has_images]
+    image_rows.sort(key=lambda row: (not row.image_only, row.thread_pk))
+    quota = min(len(image_rows), max(1, sample // 4)) if image_rows else 0
+    picked: list[ThreadRow] = []
+    seen: set[int] = set()
+    for row in image_rows[:quota]:
+        picked.append(row)
+        seen.add(row.thread_pk)
+    buckets: dict[str, list[ThreadRow]] = {}
+    for row in ordered:
+        if row.human_label is None or row.thread_pk in seen:
+            continue
+        buckets.setdefault(row.human_label, []).append(row)
+    labels = sorted(buckets)
+    while len(picked) < sample and any(buckets[label] for label in labels):
+        for label in labels:
+            bucket = buckets[label]
+            if not bucket or len(picked) >= sample:
+                continue
+            row = bucket.pop(0)
+            picked.append(row)
+            seen.add(row.thread_pk)
+    for row in ordered:
+        if len(picked) >= sample:
+            break
+        if row.thread_pk in seen:
+            continue
+        picked.append(row)
+        seen.add(row.thread_pk)
+    return picked
+
+
 def _draw(source: Path, sample: int) -> Drawn:
     conn = _open_ro(source)
     try:
-        grouped = sorted(_threads(conn), key=lambda row: row[0])[:sample]
-        ids = {row[0] for row in grouped}
-        images = tuple(
-            (item.thread_pk, item.att_pk, item.blob)
-            for item in _kept_images(conn, ids)
-        )
-        image_only = frozenset(
+        image_only_ids = {
             int(row[0])
-            for row in conn.execute(
-                "SELECT thread_pk FROM threads WHERE image_only = 1"
-            )
-            if int(row[0]) in ids
-        )
+            for row in conn.execute("SELECT thread_pk FROM threads WHERE image_only = 1")
+        }
+        with_images = _threads_with_images(conn)
         human = {
             int(row[0]): str(row[1])
             for row in conn.execute(
@@ -98,28 +136,104 @@ def _draw(source: Path, sample: int) -> Drawn:
                 WHERE origin = 'human' AND superseded_by IS NULL
                 """
             )
-            if int(row[0]) in ids
         }
-        texts = tuple((row[0], classification_text(row[2])) for row in grouped)
+        rows = [
+            ThreadRow(
+                thread_pk,
+                subject,
+                body,
+                thread_pk in image_only_ids,
+                thread_pk in with_images,
+                human.get(thread_pk),
+            )
+            for thread_pk, subject, body in _threads(conn)
+        ]
+        chosen = select_sample(rows, sample)
+        ids = {row.thread_pk for row in chosen}
+        images = tuple(
+            (item.thread_pk, item.att_pk, item.blob)
+            for item in _kept_images(conn, ids)
+        )
+        texts = tuple((row.thread_pk, classification_text(row.body)) for row in chosen)
+        image_only = frozenset(row.thread_pk for row in chosen if row.image_only)
+        chosen_human = {
+            row.thread_pk: row.human_label
+            for row in chosen
+            if row.human_label is not None
+        }
     finally:
         conn.close()
-    return Drawn(texts, images, image_only, human)
+    return Drawn(texts, images, image_only, chosen_human)
 
 
-def _measure(name: str, embedder: object, drawn: Drawn) -> Measured:
-    rss = [_rss_bytes()]
+def _threads_with_images(conn: sqlite3.Connection) -> set[int]:
+    rows = conn.execute(
+        """
+        SELECT threads.thread_pk, attachments.mime_type, attachments.is_inline,
+               attachments.size_bytes, attachments.stored_path
+        FROM attachments
+        JOIN messages ON messages.msg_pk = attachments.msg_pk
+        JOIN threads ON threads.thread_pk = messages.thread_pk
+        """
+    ).fetchall()
+    found: set[int] = set()
+    for thread_pk, mime, inline, size, stored in rows:
+        if not stored:
+            continue
+        if not embeddable_image(mime, int(inline or 0), None if size is None else int(size)):
+            continue
+        if Path(str(stored)).is_file():
+            found.add(int(thread_pk))
+    return found
+
+
+def _measure(name: str, drawn: Drawn) -> Measured:
+    payload = {
+        "image_only": sorted(drawn.image_only),
+        "images": [
+            [thread_pk, att_pk, base64.b64encode(blob).decode("ascii")]
+            for thread_pk, att_pk, blob in drawn.images
+        ],
+        "name": name,
+        "texts": [[thread_pk, text] for thread_pk, text in drawn.texts],
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "mailcrawl.bench"],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "bench embedder failed"
+        raise UsageError(detail)
+    raw = json.loads(proc.stdout)
+    text_vectors = [tuple(vector) for vector in raw["text_vectors"]]
+    image_vectors = [tuple(vector) for vector in raw["image_vectors"]]
+    return _assemble(
+        name,
+        str(raw["model_id"]),
+        float(raw["load_s"]),
+        ru_maxrss_mb(int(raw["ru_maxrss"]), sys.platform),
+        float(raw["text_s"]),
+        float(raw["image_s"]),
+        drawn,
+        text_vectors,
+        image_vectors,
+    )
+
+
+def _measure_here(name: str, embedder: object, drawn: Drawn) -> dict[str, object]:
     load_s = 0.0
     prepare = getattr(embedder, "prepare", None)
     if prepare is not None:
         started = time.perf_counter()
         invoke("embeddings", lambda: prepare(images=bool(drawn.images)), _ON)
         load_s = time.perf_counter() - started
-        rss.append(_rss_bytes())
     texts = [text for _pk, text in drawn.texts]
     started = time.perf_counter()
     text_vectors = invoke("embeddings", lambda: embedder.embed(texts), _ON)
     text_s = time.perf_counter() - started
-    rss.append(_rss_bytes())
     blobs = [blob for _thread, _att, blob in drawn.images]
     started = time.perf_counter()
     image_vectors = invoke(
@@ -128,14 +242,35 @@ def _measure(name: str, embedder: object, drawn: Drawn) -> Measured:
         _ON,
     )
     image_s = time.perf_counter() - started
-    rss.append(_rss_bytes())
     if text_vectors is None or image_vectors is None:
         raise UsageError("bench embeddings point did not run")
     if len(text_vectors) != len(texts) or len(image_vectors) != len(blobs):
         raise UsageError(f"{name} returned the wrong number of vectors")
+    return {
+        "image_s": image_s,
+        "image_vectors": image_vectors,
+        "load_s": load_s,
+        "model_id": str(embedder.model_id),
+        "ru_maxrss": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+        "text_s": text_s,
+        "text_vectors": text_vectors,
+    }
+
+
+def _assemble(
+    name: str,
+    model_id: str,
+    load_s: float,
+    peak_rss_mb: float,
+    text_s: float,
+    image_s: float,
+    drawn: Drawn,
+    text_vectors: list[tuple[float, ...]],
+    image_vectors: list[tuple[float, ...]],
+) -> Measured:
     by_thread: dict[int, list[list[float]]] = {}
     for (thread_pk, _att, _blob), vector in zip(drawn.images, image_vectors):
-        by_thread.setdefault(thread_pk, []).append(vector)
+        by_thread.setdefault(thread_pk, []).append(list(vector))
     thread_ids: list[int] = []
     thread_vectors: list[tuple[float, ...]] = []
     for index, (thread_pk, _text) in enumerate(drawn.texts):
@@ -143,17 +278,17 @@ def _measure(name: str, embedder: object, drawn: Drawn) -> Measured:
         if thread_pk in drawn.image_only and by_thread.get(thread_pk):
             thread_vectors.append(tuple(_mean(by_thread[thread_pk])))
         else:
-            thread_vectors.append(tuple(text_vectors[index]))
-    items = tuple(tuple(vector) for vector in list(text_vectors) + list(image_vectors))
+            thread_vectors.append(text_vectors[index])
+    items = tuple(text_vectors) + tuple(image_vectors)
     return Measured(
         name=name,
-        model_id=str(embedder.model_id),
+        model_id=model_id,
         load_s=load_s,
-        peak_rss_bytes=max(rss),
-        texts=len(texts),
-        images=len(blobs),
-        texts_per_min=_rate(len(texts), text_s),
-        images_per_min=_rate(len(blobs), image_s),
+        peak_rss_mb=peak_rss_mb,
+        texts=len(drawn.texts),
+        images=len(drawn.images),
+        texts_per_min=_rate(len(drawn.texts), text_s),
+        images_per_min=_rate(len(drawn.images), image_s),
         thread_ids=tuple(thread_ids),
         thread_vectors=tuple(thread_vectors),
         item_vectors=items,
@@ -173,7 +308,7 @@ def _document(
             "load_s": row.load_s,
             "model_id": row.model_id,
             "name": row.name,
-            "peak_rss_bytes": row.peak_rss_bytes,
+            "peak_rss_mb": row.peak_rss_mb,
             "texts": row.texts,
             "texts_per_min": row.texts_per_min,
         }
@@ -213,6 +348,9 @@ def _document(
         "markdown": markdown,
         "ok": True,
         "pairs": pairs,
+        "n_human": len(drawn.human),
+        "n_image_only": len(drawn.image_only),
+        "n_with_images": len({thread_pk for thread_pk, _att, _blob in drawn.images}),
         "sample": sample,
         "sampled_images": len(drawn.images),
         "sampled_texts": len(drawn.texts),
@@ -223,18 +361,18 @@ def _document(
 
 def _markdown(embedders: list[dict[str, object]], pairs: list[dict[str, object]], decisions: list[dict[str, object]]) -> str:
     lines = [
-        "| embedder | load_s | texts/min | images/min | peak_rss_bytes | human_accuracy |",
+        "| embedder | load_s | texts/min | images/min | peak_rss_mb | human_accuracy |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
     for row, decision in zip(embedders, decisions):
         lines.append(
-            "| {name} | {load_s:.3f} | {texts_per_min:.3f} | {images_per_min:.3f} | {peak_rss_bytes} | {accuracy} |".format(
+            "| {name} | {load_s:.3f} | {texts_per_min:.3f} | {images_per_min:.3f} | {peak_rss_mb:.3f} | {accuracy} |".format(
                 name=row["name"],
                 load_s=float(row["load_s"]),
                 texts_per_min=float(row["texts_per_min"]),
                 images_per_min=float(row["images_per_min"]),
-                peak_rss_bytes=row["peak_rss_bytes"],
-                accuracy=_cell(decision["accuracy"]),
+                peak_rss_mb=float(row["peak_rss_mb"]),
+                accuracy=_accuracy_cell(decision),
             )
         )
     lines.extend(
@@ -358,12 +496,10 @@ def _digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _rss_bytes() -> int:
-    raw = subprocess.check_output(
-        ["ps", "-o", "rss=", "-p", str(os.getpid())],
-        text=True,
-    )
-    return int(raw.strip().splitlines()[0]) * 1024
+def ru_maxrss_mb(ru_maxrss: int, platform: str) -> float:
+    if platform == "darwin":
+        return ru_maxrss / (1024 * 1024)
+    return ru_maxrss / 1024
 
 
 def _rate(count: int, seconds: float) -> float:
@@ -385,7 +521,39 @@ def _cosine(left: tuple[float, ...], right: tuple[float, ...]) -> float:
     return dot / ((left_norm ** 0.5) * (right_norm ** 0.5))
 
 
+def _accuracy_cell(decision: dict[str, object]) -> str:
+    count = int(decision["compared"])
+    if decision["accuracy"] is None:
+        return f"n/a (n={count})"
+    return f"{float(decision['accuracy']):.3f} (n={count})"
+
+
 def _cell(value: object) -> str:
     if value is None:
         return "n/a"
     return f"{float(value):.3f}"
+
+
+def _child() -> None:
+    try:
+        payload = json.loads(sys.stdin.read())
+        images = tuple(
+            (int(thread_pk), int(att_pk), base64.b64decode(blob))
+            for thread_pk, att_pk, blob in payload["images"]
+        )
+        drawn = Drawn(
+            texts=tuple((int(thread_pk), str(text)) for thread_pk, text in payload["texts"]),
+            images=images,
+            image_only=frozenset(int(thread_pk) for thread_pk in payload["image_only"]),
+            human={},
+        )
+        embedder = open_embedder(str(payload["name"]))
+        raw = _measure_here(str(payload["name"]), embedder, drawn)
+        json.dump(raw, sys.stdout)
+    except Exception as exc:
+        sys.stderr.write(f"{exc}\n")
+        raise SystemExit(1) from exc
+
+
+if __name__ == "__main__":
+    _child()

@@ -1457,8 +1457,13 @@ if report.get("ok") is not True or digest != before:
     raise SystemExit(f"bench source {digest} {before} {report.get('ok')}")
 if abs(pair["cosine_min"] - 1.0) > 1e-6 or abs(pair["knn_top10_overlap"] - 1.0) > 1e-6:
     raise SystemExit(f"bench pair {pair}")
-if report["decisions"][0]["accuracy"] != 1.0 or report["sampled_images"] != 1:
-    raise SystemExit(f"bench decisions {report['decisions']} images {report['sampled_images']}")
+decision = report["decisions"][0]
+if decision["accuracy"] != 1.0 or decision["compared"] != 2 or report["n_with_images"] != 1 or report["n_human"] != 2:
+    raise SystemExit(f"bench decisions {report['decisions']} counts {report['n_human']} {report['n_with_images']}")
+if report["embedders"][0]["peak_rss_mb"] <= 1 or "peak_rss_bytes" in report["embedders"][0]:
+    raise SystemExit(f"bench rss {report['embedders'][0]}")
+if "(n=2)" not in report["markdown"]:
+    raise SystemExit(report["markdown"])
 if "db-v2" in report["vector_db"]:
     raise SystemExit(report["vector_db"])
 print("bench", pair["left"], pair["right"], report["decisions"][0]["accuracy"])

@@ -10,7 +10,7 @@ import types
 import unittest
 from pathlib import Path
 
-from mailcrawl.bench import run_bench
+from mailcrawl.bench import ThreadRow, ru_maxrss_mb, run_bench, select_sample
 from mailcrawl.cli import main
 from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import invoke
@@ -90,6 +90,9 @@ class BenchTest(unittest.TestCase):
             self.assertEqual(db.read_bytes(), before)
             self.assertEqual(report["sampled_texts"], 3)
             self.assertEqual(report["sampled_images"], 1)
+            self.assertEqual(report["n_human"], 2)
+            self.assertEqual(report["n_with_images"], 1)
+            self.assertEqual(report["n_image_only"], 1)
             pair = report["pairs"][0]
             self.assertEqual(pair["left"], "fake")
             self.assertEqual(pair["right"], "fake")
@@ -106,7 +109,11 @@ class BenchTest(unittest.TestCase):
             self.assertEqual(report["embedders"][0]["load_s"], 0.0)
             self.assertGreater(report["embedders"][0]["texts_per_min"], 0)
             self.assertGreater(report["embedders"][0]["images_per_min"], 0)
-            self.assertGreater(report["embedders"][0]["peak_rss_bytes"], 0)
+            self.assertNotIn("peak_rss_bytes", report["embedders"][0])
+            self.assertGreater(report["embedders"][0]["peak_rss_mb"], 1)
+            self.assertLess(report["embedders"][0]["peak_rss_mb"], 4096)
+            self.assertGreater(report["embedders"][1]["peak_rss_mb"], 1)
+            self.assertIn("1.000 (n=2)", report["markdown"])
             self.assertIn("| embedder |", report["markdown"])
             self.assertIn("| pair |", report["markdown"])
             vector_db = Path(str(report["vector_db"]))
@@ -145,7 +152,27 @@ class BenchTest(unittest.TestCase):
             self.assertTrue(doc["source_read_only"])
             self.assertEqual(doc["decisions"][0]["accuracy"], 1.0)
             self.assertIn("texts/min", doc["markdown"])
+            self.assertIn("peak_rss_mb", doc["markdown"])
+            self.assertIn("(n=2)", doc["markdown"])
+            self.assertEqual(doc["n_human"], 2)
+            self.assertEqual(doc["n_with_images"], 1)
             shutil.rmtree(Path(doc["vector_db"]).parent)
+
+    def test_sample_spreads_human_labels_and_keeps_an_image(self) -> None:
+        rows = [
+            ThreadRow(1, "a", "a", False, False, "reference"),
+            ThreadRow(2, "b", "b", False, False, "reference"),
+            ThreadRow(3, "c", "c", False, False, "reference"),
+            ThreadRow(4, "d", "d", False, False, "noise"),
+            ThreadRow(5, "e", "e", False, False, "reply"),
+            ThreadRow(9, "scan", "scan", True, True, None),
+        ]
+        chosen = [row.thread_pk for row in select_sample(rows, 4)]
+        self.assertEqual(chosen, [9, 4, 1, 5])
+
+    def test_ru_maxrss_is_megabytes(self) -> None:
+        self.assertEqual(ru_maxrss_mb(1024, "linux"), 1.0)
+        self.assertEqual(ru_maxrss_mb(1024 * 1024, "darwin"), 1.0)
 
     def test_mlx_image_path_stops_without_the_processor(self) -> None:
         embedder = open_embedder("mlx")
