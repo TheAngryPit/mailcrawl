@@ -61,14 +61,12 @@ def taxonomy_path(path: Path) -> Path | None:
 
 
 def inference_config(path: Path) -> dict[str, bool]:
-    document = load_config(path)
-    raw = document.get("inference")
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise UsageError("inference config is not a table")
+    raw = _inference_table(path)
     flags: dict[str, bool] = {}
     for key, value in raw.items():
+        if key == "embedder":
+            _embedder_value(value)
+            continue
         if not isinstance(key, str) or not isinstance(value, bool):
             raise UsageError("inference flags are booleans")
         flags[key] = value
@@ -77,6 +75,29 @@ def inference_config(path: Path) -> dict[str, bool]:
     except BoundaryError as exc:
         raise UsageError(str(exc)) from exc
     return flags
+
+
+def embedder_name(path: Path) -> str:
+    raw = _inference_table(path)
+    if "embedder" not in raw:
+        return "gemma"
+    return _embedder_value(raw["embedder"])
+
+
+def _inference_table(path: Path) -> dict[str, object]:
+    document = load_config(path)
+    raw = document.get("inference")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise UsageError("inference config is not a table")
+    return raw
+
+
+def _embedder_value(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise UsageError("embedder is not a name")
+    return value.strip()
 
 
 def write_account(path: Path, alias: str, email: str) -> None:
@@ -103,8 +124,13 @@ def write_account(path: Path, alias: str, email: str) -> None:
             for key, value in inference.items()
             if isinstance(key, str) and isinstance(value, bool)
         ]
-        if saved:
+        named = _embedder_value(inference["embedder"]) if "embedder" in inference else None
+        if saved or named:
             lines.append("[inference]")
+            if named:
+                if '"' in named or "\n" in named:
+                    raise UsageError("embedder contains a character the config file cannot store")
+                lines.append(f'embedder = "{named}"')
             for key, value in sorted(saved):
                 lines.append(f"{key} = {'true' if value else 'false'}")
             lines.append("")

@@ -9,4 +9,5 @@ security_senders = ["alerts@example.com"]
 test_recipients = ["tester@example.com"]
 
 [inference]
+embedder = "gemma"
 embeddings = true

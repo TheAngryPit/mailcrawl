@@ -537,6 +537,31 @@ alpha keyword
             self.assertIn("sentence-transformers>=6.1", buf.getvalue())
             self.assertNotIn("sentence_transformers", sys.modules)
             self.assertNotIn("torch", sys.modules)
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    "[inference]\nembeddings = true\n",
+                    "[inference]\nembeddings = true\nembedder = \"fake\"\n",
+                ),
+                encoding="utf-8",
+            )
+            buf = StringIO()
+            with redirect_stdout(buf):
+                code = main(
+                    [
+                        "--json",
+                        "--home",
+                        str(home),
+                        "--config",
+                        str(config),
+                        "embed",
+                        "--account",
+                        "personal",
+                    ]
+                )
+            self.assertEqual(code, 0, buf.getvalue())
+            self.assertIn('"embedded": 1', buf.getvalue())
+            self.assertNotIn("sentence_transformers", sys.modules)
+            self.assertNotIn("torch", sys.modules)
 
     def test_image_encode_uses_the_gemma_guide(self) -> None:
         png = bytes.fromhex(
@@ -668,11 +693,12 @@ alpha keyword
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text(
-                "[inference]\nembeddings = true\nsearch-embedding = false\n\n",
+                "[inference]\nembedder = \"gemma\"\nembeddings = true\nsearch-embedding = false\n\n",
                 encoding="utf-8",
             )
             write_account(path, "personal", "ada@example.com")
             flags = inference_config(path)
             self.assertEqual(flags, {"embeddings": True, "search-embedding": False})
+            self.assertEqual(path.read_text(encoding="utf-8").count('embedder = "gemma"'), 1)
             write_account(path, "personal", "ada@example.com")
             self.assertEqual(inference_config(path), flags)
