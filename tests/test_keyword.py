@@ -102,6 +102,29 @@ class KeywordSearchTest(unittest.TestCase):
         self.assertEqual(fragment[0]["source"], "trigram")
         self.assertEqual(fragment[0]["gmail_message_id"], _ids(folded)[0])
 
+    def test_fts_operators_stay_literal_tokens(self) -> None:
+        invoice = "188932a1fae40001"
+        prose = "188932a1fae40002"
+        self.assertEqual(_ids(search_messages(self.conn, '"')), [])
+        self.assertEqual(_ids(search_messages(self.conn, "-x")), [])
+        self.assertEqual(_ids(search_messages(self.conn, "-linha")), [prose])
+        self.assertEqual(_ids(search_messages(self.conn, "AND")), [])
+        self.assertEqual(_ids(search_messages(self.conn, "*")), [])
+        self.assertEqual(_ids(search_messages(self.conn, "body_text:linha")), [])
+        self.assertEqual(_ids(search_messages(self.conn, "linha")), [prose])
+        self.assertEqual(_ids(search_messages(self.conn, "fat*")), [])
+        self.assertEqual(_ids(search_messages(self.conn, "fatura")), [invoice])
+        self.assertEqual(_ids(search_messages(self.conn, "NEAR(linha sintetica)")), [])
+        phrase = search_messages(self.conn, '"fatura curta"')
+        self.assertEqual(_ids(phrase), [invoice])
+        self.assertEqual(phrase[0]["source"], "fts")
+        mixed = search_messages(self.conn, 'reunião "fatura')
+        self.assertEqual(_ids(mixed), [invoice])
+        self.assertEqual(mixed[0]["source"], "fts")
+        short = search_messages(self.conn, "da")
+        self.assertEqual(_ids(short), [invoice])
+        self.assertEqual(short[0]["source"], "fts")
+
     def test_sql_filters_run_before_fts(self) -> None:
         invoice = search_messages(self.conn, "reuniao", image_only=1, mime="application/pdf")
         self.assertEqual(len(invoice), 1)
