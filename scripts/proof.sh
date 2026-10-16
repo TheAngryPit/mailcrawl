@@ -593,6 +593,58 @@ frag="$(
 )"
 echo "${frag}" | tee "${PROOF_DIR}/phase2-trigram.log"
 printf '%s' "${frag}" | grep -q '"source": "trigram"' || fail "trigram miss"
+PHASE2_DATA="${PHASE2_DATA}" REPO_ROOT="${REPO_ROOT}" python3 - <<'PY' | tee "${PROOF_DIR}/phase2-quoted.log"
+import json
+import os
+import subprocess
+import sys
+
+home = os.environ["PHASE2_DATA"]
+repo = os.environ["REPO_ROOT"]
+invoice = "188932a1fae40001"
+prose = "188932a1fae40002"
+
+
+def search(query: str) -> dict:
+    proc = subprocess.run(
+        [sys.executable, "-m", "mailcrawl", "--home", home, "--json", "search", query, "--account", "vcl"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise SystemExit(f"{query!r} exit {proc.returncode} {proc.stdout} {proc.stderr}")
+    return json.loads(proc.stdout)
+
+
+def ids(doc: dict) -> list[str]:
+    return [hit["gmail_message_id"] for hit in doc["hits"]]
+
+
+expect_empty = ['"', "-x", "AND", "*", "body_text:linha", "fat*", "NEAR(linha sintetica)"]
+for query in expect_empty:
+    found = ids(search(query))
+    if found:
+        raise SystemExit(f"{query!r} hit {found}")
+    print("literal", query, "[]")
+if ids(search("-linha")) != [prose]:
+    raise SystemExit("minus token missed the prose")
+if ids(search("linha")) != [prose]:
+    raise SystemExit("linha missed the prose")
+if ids(search("fatura")) != [invoice]:
+    raise SystemExit("fatura missed the invoice")
+phrase = search('"fatura curta"')
+if ids(phrase) != [invoice] or phrase["hits"][0]["source"] != "fts":
+    raise SystemExit(f"phrase {phrase}")
+mixed = search('reunião "fatura')
+if ids(mixed) != [invoice] or mixed["hits"][0]["source"] != "fts":
+    raise SystemExit(f"mixed {mixed}")
+short = search("da")
+if ids(short) != [invoice] or short["hits"][0]["source"] != "fts":
+    raise SystemExit(f"short {short}")
+print("quoted operators ok")
+PY
 (
   cd "${REPO_ROOT}"
   python3 - <<'PY'

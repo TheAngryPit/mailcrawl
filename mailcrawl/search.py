@@ -27,11 +27,12 @@ def search_messages(
     candidates = _candidates(conn, sender, label, mime, image_only, since, until)
     if candidates is not None and not candidates:
         return []
-    fts_ids = _match(conn, "msg_fts", text, candidates, ranked=True)
+    quoted = _quote_terms(text)
+    fts_ids = _match(conn, "msg_fts", quoted, candidates, ranked=True)
     seen = set(fts_ids)
     trigram_ids = []
     if len(text) >= 3:
-        for msg_pk in _match(conn, "msg_trigram", text, candidates, ranked=False):
+        for msg_pk in _match(conn, "msg_trigram", quoted, candidates, ranked=False):
             if msg_pk not in seen:
                 trigram_ids.append(msg_pk)
                 seen.add(msg_pk)
@@ -149,6 +150,10 @@ def _match(
     except sqlite3.OperationalError as exc:
         raise UsageError(str(exc)) from exc
     return [int(row[0]) for row in rows]
+
+
+def _quote_terms(text: str) -> str:
+    return " ".join('"' + part.replace('"', '""') + '"' for part in text.split())
 
 
 def _like(text: str) -> str:
