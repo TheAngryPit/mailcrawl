@@ -1,6 +1,6 @@
 """SQLite tables for one account archive."""
 
-USER_VERSION = 5
+USER_VERSION = 6
 
 TABLES = (
     "accounts",
@@ -19,6 +19,8 @@ TABLES = (
     "thread_mutes",
     "msg_fts",
     "msg_trigram",
+    "vec_classification",
+    "vec_search",
 )
 
 HEADER_ALLOW = (

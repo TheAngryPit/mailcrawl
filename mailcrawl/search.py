@@ -1,11 +1,19 @@
-"""Keyword search over one account database."""
+"""Keyword search over one account database, with optional vector fill-in."""
 
 from __future__ import annotations
 
 import sqlite3
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
+from mailcrawl.inference import enabled_points, invoke
 from mailcrawl.paths import UsageError
+from mailcrawl.vectors import (
+    FakeEmbedder,
+    ScriptedEmbedder,
+    nearest_threads,
+    ordered_hits,
+    search_query,
+)
 
 _FTS_WEIGHTS = (10.0, 1.0, 10.0, 1.0)
 
@@ -20,6 +28,12 @@ def search_messages(
     image_only: int | None = None,
     since: int | None = None,
     until: int | None = None,
+    embedder: FakeEmbedder | ScriptedEmbedder | None = None,
+    config: dict[str, bool] | None = None,
+    fusion: str = "keyword",
+    keyword_weight: float = 1.0,
+    vec_weight: float = 1.0,
+    k: int = 10,
 ) -> list[dict[str, str | None]]:
     text = query.strip()
     if not text:
@@ -36,8 +50,18 @@ def search_messages(
             if msg_pk not in seen:
                 trigram_ids.append(msg_pk)
                 seen.add(msg_pk)
+    ranked = [(pk, "fts") for pk in fts_ids] + [(pk, "trigram") for pk in trigram_ids]
+    if embedder is not None and "search-embedding" in enabled_points(config):
+        vec_ids = _vec_ids(conn, embedder, config, text, candidates, k)
+        ranked = ordered_hits(
+            ranked,
+            vec_ids,
+            fusion=fusion,
+            keyword_weight=keyword_weight,
+            vec_weight=vec_weight,
+        )
     hits: list[dict[str, str | None]] = []
-    for msg_pk, source in [(pk, "fts") for pk in fts_ids] + [(pk, "trigram") for pk in trigram_ids]:
+    for msg_pk, source in ranked:
         message = conn.execute(
             """
             SELECT gmail_message_id, subject, body_text
@@ -150,6 +174,52 @@ def _match(
     except sqlite3.OperationalError as exc:
         raise UsageError(str(exc)) from exc
     return [int(row[0]) for row in rows]
+
+
+def _vec_ids(
+    conn: sqlite3.Connection,
+    embedder: FakeEmbedder | ScriptedEmbedder,
+    config: dict[str, bool] | None,
+    text: str,
+    candidates: set[int] | None,
+    k: int,
+) -> list[int]:
+    vectors = invoke(
+        "search-embedding",
+        lambda: embedder.embed([search_query(text)]),
+        config,
+    )
+    if not vectors:
+        return []
+    found: list[int] = []
+    seen: set[int] = set()
+    for thread_pk, _distance in nearest_threads(conn, "search", vectors[0], k):
+        if thread_pk in seen:
+            continue
+        seen.add(thread_pk)
+        message = _latest_message(conn, thread_pk, candidates)
+        if message is not None:
+            found.append(message)
+    return found
+
+
+def _latest_message(
+    conn: sqlite3.Connection,
+    thread_pk: int,
+    candidates: set[int] | None,
+) -> int | None:
+    rows = conn.execute(
+        """
+        SELECT msg_pk FROM messages
+        WHERE thread_pk = ?
+        ORDER BY internal_date, msg_pk
+        """,
+        (thread_pk,),
+    ).fetchall()
+    ids = [int(row[0]) for row in rows if candidates is None or int(row[0]) in candidates]
+    if not ids:
+        return None
+    return ids[-1]
 
 
 def _quote_terms(text: str) -> str:

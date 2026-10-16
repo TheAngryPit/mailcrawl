@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from mailcrawl.schema import FTS_SQL, TABLES, USER_VERSION
+from mailcrawl.schema import FTS_SQL, SCHEMA_SQL, TABLES, USER_VERSION
 from mailcrawl.store import UnsupportedSchema, connect, migrate
 
 BANNED = (
@@ -94,10 +94,10 @@ class SchemaV1Test(unittest.TestCase):
     def test_later_user_version_fails_closed(self) -> None:
         conn = sqlite3.connect(":memory:")
         try:
-            conn.execute("PRAGMA user_version = 6")
+            conn.execute("PRAGMA user_version = 7")
             with self.assertRaises(UnsupportedSchema):
                 migrate(conn)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 6)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 7)
             names = {
                 row[0]
                 for row in conn.execute(
@@ -105,6 +105,28 @@ class SchemaV1Test(unittest.TestCase):
                 )
             }
             self.assertNotIn("messages", names)
+        finally:
+            conn.close()
+
+    def test_user_version_5_gains_vec_tables(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute("PRAGMA user_version = 5")
+            migrate(conn)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], USER_VERSION)
+            names = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            self.assertIn("vec_classification", names)
+            self.assertIn("vec_search", names)
+            self.assertNotIn("embeddings", names)
+            sql = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'vec_classification'"
+            ).fetchone()[0]
+            self.assertIn("float[768]", sql)
+            self.assertIn("cosine", sql)
         finally:
             conn.close()
 

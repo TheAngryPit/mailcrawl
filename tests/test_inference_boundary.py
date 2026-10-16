@@ -12,6 +12,7 @@ from mailcrawl.inference import (
     scan_package,
     scan_source,
 )
+from mailcrawl.vectors import LOCAL_VERIFY, FakeEmbedder
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -72,6 +73,32 @@ class InferenceBoundaryTest(unittest.TestCase):
         )
         self.assertEqual(result, "synthetic")
         self.assertEqual(probe.calls, 1)
+
+    def test_vectors_module_stays_inside_the_fence(self) -> None:
+        path = ROOT / "mailcrawl" / "vectors.py"
+        self.assertEqual(scan_source(path.read_text(encoding="utf-8"), str(path)), [])
+        embedder = FakeEmbedder()
+        with self.assertRaises(BoundaryError):
+            embedder.embed(["synthetic"])
+        stored = invoke(
+            "embeddings",
+            lambda: embedder.embed(["synthetic"]),
+            {"embeddings": True},
+        )
+        again = invoke(
+            "embeddings",
+            lambda: embedder.embed(["synthetic"]),
+            {"embeddings": True},
+        )
+        other = invoke(
+            "embeddings",
+            lambda: embedder.embed(["other synthetic"]),
+            {"embeddings": True},
+        )
+        self.assertEqual(stored, again)
+        self.assertNotEqual(stored, other)
+        self.assertEqual(len(stored[0]), 768)
+        self.assertNotIn("db-v2", LOCAL_VERIFY)
 
     def test_unknown_point_fails(self) -> None:
         probe = Probe()
