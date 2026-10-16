@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import resource
 import sqlite3
 import subprocess
@@ -14,6 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from mailcrawl.configfile import DEFAULT_BATCH_SIZE, DEFAULT_MAX_TOKENS
 from mailcrawl.inference import invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.threads import embeddable_image
@@ -61,7 +63,14 @@ class Measured:
     item_vectors: tuple[tuple[float, ...], ...]
 
 
-def run_bench(source: Path, names: list[str], sample: int) -> dict[str, object]:
+def run_bench(
+    source: Path,
+    names: list[str],
+    sample: int,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> dict[str, object]:
     if sample < 1:
         raise UsageError("sample needs a positive count")
     if not names:
@@ -77,7 +86,7 @@ def run_bench(source: Path, names: list[str], sample: int) -> dict[str, object]:
     measured: list[Measured] = []
     stored: list[tuple[str, Measured]] = []
     for name in names:
-        one = _measure(name, drawn)
+        one = _measure(name, drawn, batch_size, max_tokens)
         measured.append(one)
         stored.append((name, one))
     vector_db = _write_copy(source, stored)
@@ -187,27 +196,35 @@ def _threads_with_images(conn: sqlite3.Connection) -> set[int]:
     return found
 
 
-def _measure(name: str, drawn: Drawn) -> Measured:
+def _measure(name: str, drawn: Drawn, batch_size: int, max_tokens: int) -> Measured:
     payload = {
+        "batch_size": batch_size,
         "image_only": sorted(drawn.image_only),
         "images": [
             [thread_pk, att_pk, base64.b64encode(blob).decode("ascii")]
             for thread_pk, att_pk, blob in drawn.images
         ],
+        "max_tokens": max_tokens,
         "name": name,
         "texts": [[thread_pk, text] for thread_pk, text in drawn.texts],
     }
-    proc = subprocess.run(
-        [sys.executable, "-m", "mailcrawl.bench"],
-        input=json.dumps(payload),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        detail = proc.stderr.strip() or proc.stdout.strip() or "bench embedder failed"
-        raise UsageError(detail)
-    raw = json.loads(proc.stdout)
+    descriptor, out_path = tempfile.mkstemp(prefix="mailcrawl-bench-", suffix=".json")
+    os.close(descriptor)
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "mailcrawl.bench", out_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stderr = proc.communicate(json.dumps(payload))[1]
+        if proc.returncode != 0:
+            detail = (stderr or "").strip() or "bench embedder failed"
+            raise UsageError(detail)
+        raw = json.loads(Path(out_path).read_text(encoding="utf-8"))
+    finally:
+        Path(out_path).unlink(missing_ok=True)
     text_vectors = [tuple(vector) for vector in raw["text_vectors"]]
     image_vectors = [tuple(vector) for vector in raw["image_vectors"]]
     return _assemble(
@@ -535,6 +552,12 @@ def _cell(value: object) -> str:
 
 
 def _child() -> None:
+    if len(sys.argv) != 2:
+        sys.stderr.write("bench child needs an output path\n")
+        raise SystemExit(1)
+    out_path = sys.argv[1]
+    sys.stdout.flush()
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     try:
         payload = json.loads(sys.stdin.read())
         images = tuple(
@@ -548,8 +571,10 @@ def _child() -> None:
             human={},
         )
         embedder = open_embedder(str(payload["name"]))
+        embedder.batch_size = int(payload["batch_size"])
+        embedder.max_tokens = int(payload["max_tokens"])
         raw = _measure_here(str(payload["name"]), embedder, drawn)
-        json.dump(raw, sys.stdout)
+        Path(out_path).write_text(json.dumps(raw), encoding="utf-8")
     except Exception as exc:
         sys.stderr.write(f"{exc}\n")
         raise SystemExit(1) from exc

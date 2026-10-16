@@ -7,12 +7,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 
 from mailcrawl.cli import _embedder, _parser, main
-from mailcrawl.configfile import embedder_name, inference_config, write_account
+from mailcrawl.configfile import embed_limits, embedder_name, inference_config, write_account
 from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import BoundaryError, invoke
 from mailcrawl.paths import UsageError
@@ -562,7 +562,7 @@ class VectorCliTest(unittest.TestCase):
                     lambda: embedder.embed(["synthetic"]),
                     {"embeddings": True},
                 )
-            self.assertIn("sentence-transformers>=6.1", str(missing.exception))
+            self.assertIn("sentence-transformers[image]>=6.1", str(missing.exception))
             self.assertIn(LOCAL_VERIFY, str(missing.exception))
             self.assertNotIn("sentence_transformers", sys.modules)
             self.assertNotIn("torch", sys.modules)
@@ -628,12 +628,111 @@ class VectorCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text(
-                "[inference]\nembedder = \"gemma\"\nembeddings = true\nsearch-embedding = false\n\n",
+                "[inference]\nembedder = \"gemma\"\nembeddings = true\nsearch-embedding = false\n"
+                "batch_size = 4\nmax_tokens = 2048\n\n",
                 encoding="utf-8",
             )
             write_account(path, "personal", "ada@example.com")
             flags = inference_config(path)
             self.assertEqual(flags, {"embeddings": True, "search-embedding": False})
+            self.assertEqual(embed_limits(path), (4, 2048))
             self.assertEqual(path.read_text(encoding="utf-8").count('embedder = "gemma"'), 1)
+            self.assertIn("batch_size = 4", path.read_text(encoding="utf-8"))
+            self.assertIn("max_tokens = 2048", path.read_text(encoding="utf-8"))
             write_account(path, "personal", "ada@example.com")
             self.assertEqual(inference_config(path), flags)
+            self.assertEqual(embed_limits(path), (4, 2048))
+
+
+class BoundTest(unittest.TestCase):
+    def test_fake_batches_stay_inside_the_bound_and_long_text_is_cut(self) -> None:
+        embedder = FakeEmbedder()
+        embedder.batch_size = 4
+        embedder.max_tokens = 8
+        long = " ".join(f"w{i:02d}" for i in range(30))
+        rows = invoke("embeddings", lambda: embedder.embed([long] * 9), {"embeddings": True})
+        self.assertEqual([len(chunk) for chunk in embedder.batches], [4, 4, 1])
+        self.assertEqual(embedder.batches[0][0].split(), [f"w{i:02d}" for i in range(8)])
+        self.assertEqual(len(rows), 9)
+        blob = "x" * 1000
+        invoke("embeddings", lambda: embedder.embed([blob]), {"embeddings": True})
+        self.assertEqual(embedder.batches, [["x" * 32]])
+        images = invoke(
+            "embeddings",
+            lambda: embedder.embed_images([b"aa", b"bb", b"cc"]),
+            {"embeddings": True},
+        )
+        self.assertEqual(embedder.image_batches, [b"aa", b"bb", b"cc"])
+        self.assertEqual(len(images), 3)
+        short = invoke("embeddings", lambda: embedder.embed(["hello  world"]), {"embeddings": True})
+        self.assertEqual(embedder.batches, [["hello  world"]])
+        self.assertEqual(len(short), 1)
+
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
+    def test_embed_and_search_pass_bounded_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                _seed(conn)
+                body = " ".join(f"w{i:02d}" for i in range(30))
+                conn.execute("UPDATE messages SET body_text = ?", (body,))
+                conn.commit()
+                embedder = FakeEmbedder()
+                embedder.batch_size = 4
+                embedder.max_tokens = 8
+                self.assertEqual(embed_threads(conn, embedder, {"embeddings": True}), 5)
+                self.assertEqual([len(chunk) for chunk in embedder.batches], [4, 4, 2])
+                for chunk in embedder.batches:
+                    for text in chunk:
+                        self.assertLessEqual(len(text.split()), 8)
+                        self.assertLessEqual(len(text), 32)
+                query = " ".join(f"q{i:02d}" for i in range(30))
+                search_messages(
+                    conn,
+                    query,
+                    embedder=embedder,
+                    config={"search-embedding": True},
+                    fusion="rrf",
+                    k=1,
+                )
+                seen = embedder.batches[-1][0]
+                self.assertLessEqual(len(seen.split()), 8)
+                self.assertLessEqual(len(seen), 32)
+                self.assertNotIn("q29", seen)
+                self.assertTrue(seen.startswith("task: search result"))
+            finally:
+                conn.close()
+
+    def test_usage_detail_is_on_stderr(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = StringIO()
+            err = StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = main(
+                    ["--home", tmp, "search", "hello", "--account", "personal"]
+                )
+            self.assertEqual(code, 2)
+            self.assertEqual(out.getvalue(), "usage\n")
+            self.assertEqual(err.getvalue(), "account is not initialized\n")
+
+    def test_default_batch_encodes_one_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("[inference]\nembeddings = true\n", encoding="utf-8")
+            self.assertEqual(embed_limits(path), (1, 2048))
+        embedder = FakeEmbedder()
+        rows = invoke(
+            "embeddings",
+            lambda: embedder.embed(["one", "two", "three"]),
+            {"embeddings": True},
+        )
+        self.assertEqual(embedder.batches, [["one"], ["two"], ["three"]])
+        self.assertEqual(len(rows), 3)
+
+    def test_bad_batch_size_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text("[inference]\nbatch_size = 0\n", encoding="utf-8")
+            with self.assertRaises(UsageError) as caught:
+                embed_limits(path)
+            self.assertEqual(str(caught.exception), "batch_size needs a positive count")

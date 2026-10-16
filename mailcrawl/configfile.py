@@ -60,12 +60,19 @@ def taxonomy_path(path: Path) -> Path | None:
     return Path(value)
 
 
+DEFAULT_BATCH_SIZE = 1
+DEFAULT_MAX_TOKENS = 2048
+
+
 def inference_config(path: Path) -> dict[str, bool]:
     raw = _inference_table(path)
+    embed_limits(path)
     flags: dict[str, bool] = {}
     for key, value in raw.items():
         if key == "embedder":
             _embedder_value(value)
+            continue
+        if key in ("batch_size", "max_tokens"):
             continue
         if not isinstance(key, str) or not isinstance(value, bool):
             raise UsageError("inference flags are booleans")
@@ -75,6 +82,14 @@ def inference_config(path: Path) -> dict[str, bool]:
     except BoundaryError as exc:
         raise UsageError(str(exc)) from exc
     return flags
+
+
+def embed_limits(path: Path) -> tuple[int, int]:
+    raw = _inference_table(path)
+    return (
+        _optional_count(raw, "batch_size", DEFAULT_BATCH_SIZE),
+        _optional_count(raw, "max_tokens", DEFAULT_MAX_TOKENS),
+    )
 
 
 def embedder_name(path: Path) -> str:
@@ -98,6 +113,18 @@ def _embedder_value(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise UsageError("embedder is not a name")
     return value.strip()
+
+
+def _optional_count(raw: dict[str, object], key: str, default: int) -> int:
+    if key not in raw:
+        return default
+    return _required_count(raw[key], key)
+
+
+def _required_count(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise UsageError(f"{name} needs a positive count")
+    return value
 
 
 def write_account(path: Path, alias: str, email: str) -> None:
@@ -125,7 +152,12 @@ def write_account(path: Path, alias: str, email: str) -> None:
             if isinstance(key, str) and isinstance(value, bool)
         ]
         named = _embedder_value(inference["embedder"]) if "embedder" in inference else None
-        if saved or named:
+        counted = [
+            (key, _required_count(inference[key], key))
+            for key in ("batch_size", "max_tokens")
+            if key in inference
+        ]
+        if saved or named or counted:
             lines.append("[inference]")
             if named:
                 if '"' in named or "\n" in named:
@@ -133,6 +165,8 @@ def write_account(path: Path, alias: str, email: str) -> None:
                 lines.append(f'embedder = "{named}"')
             for key, value in sorted(saved):
                 lines.append(f"{key} = {'true' if value else 'false'}")
+            for key, value in counted:
+                lines.append(f"{key} = {value}")
             lines.append("")
     for name in sorted(accounts):
         account = accounts[name]
