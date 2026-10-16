@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from mailcrawl.paths import UsageError, canonical_alias
-from mailcrawl.schema import FTS_SQL, SCHEMA_SQL, TRIGRAM_SQL, USER_VERSION, V2_TABLES_SQL
+from mailcrawl.schema import FTS_SQL, JEV_SQL, SCHEMA_SQL, TRIGRAM_SQL, USER_VERSION, V2_TABLES_SQL
 from mailcrawl.textnorm import clean_body
 from mailcrawl.threads import mark_image_only
 
@@ -53,6 +53,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         version = 5
     if version == 5:
         _migrate_v5(conn)
+        version = 6
+    if version == 6:
+        _migrate_v6(conn)
         return
     raise UnsupportedSchema(f"user_version {version}")
 
@@ -242,6 +245,12 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_v5(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA user_version = 6")
+    conn.commit()
+
+
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    _execute_statements(conn, JEV_SQL)
     conn.execute(f"PRAGMA user_version = {USER_VERSION}")
     conn.commit()
 

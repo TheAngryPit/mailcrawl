@@ -241,7 +241,7 @@ try:
     if body != "This body is fake fixture text.":
         raise SystemExit("cleaned body is not the kept sentence")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 6:
+    if version != 7:
         raise SystemExit(f"user_version {version}")
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table in ("decisions", "sender_decisions", "thread_mutes"):
@@ -565,7 +565,7 @@ conn = sqlite3.connect(path)
 conn.row_factory = sqlite3.Row
 try:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 6:
+    if version != 7:
         raise SystemExit(f"user_version {version}")
     flags = {
         row["subject"]: row["image_only"]
@@ -982,13 +982,155 @@ fresh.execute("PRAGMA user_version = 5")
 migrate(fresh)
 version = fresh.execute("PRAGMA user_version").fetchone()[0]
 names = {row[0] for row in fresh.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-if version != USER_VERSION or version != 6:
+if version != USER_VERSION or version != 7:
     raise SystemExit(f"v5 migration {version}")
 if "vec_classification" in names or "vec_search" in names or "embeddings" in names:
     raise SystemExit(f"v5 tables {sorted(names)}")
 print("migration", version, "vec absent")
 PY
 cp "${PROOF_DIR}/phase3.log" "${ARTIFACT_DIR}/phase3.log"
+
+log "check: phase 4 jev stays off until config turns it on"
+PHASE4_DATA="${PROOF_HOME}/phase4-data"
+PHASE4_CFG="${PROOF_HOME}/phase4-config.toml"
+PHASE4_MBOX="${PROOF_HOME}/phase4.mbox"
+cat >"${PHASE4_MBOX}" <<'MBOX'
+From 1768000000000000301@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Reply note
+Date: Thu, 15 Jan 2026 12:00:00 +0000
+Message-ID: <phase4-reply@example.com>
+X-GM-THRID: 1768000000000000301
+X-GM-MSGID: 1768000000000000301
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+please reply shared token shared token
+
+From 1768000000000000302@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Late note
+Date: Thu, 15 Jan 2026 12:05:00 +0000
+Message-ID: <phase4-late@example.com>
+X-GM-THRID: 1768000000000000302
+X-GM-MSGID: 1768000000000000302
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+shared token answers-query
+
+From 1768000000000000303@example.com Thu Jan 15 12:00:00 +0000 2026
+From: Bao Fixture <bao@example.com>
+To: Ada Fixture <ada@example.com>
+Subject: Grey note
+Date: Thu, 15 Jan 2026 12:10:00 +0000
+Message-ID: <phase4-grey@example.com>
+X-GM-THRID: 1768000000000000303
+X-GM-MSGID: 1768000000000000303
+X-Gmail-Labels: Inbox
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+verify your password shared token
+
+MBOX
+(
+  cd "${REPO_ROOT}"
+  python3 -m mailcrawl --home "${PHASE4_DATA}" --config "${PHASE4_CFG}" --json init --account personal --email ada@example.com
+  python3 -m mailcrawl --home "${PHASE4_DATA}" --config "${PHASE4_CFG}" --json import mbox "${PHASE4_MBOX}" --account personal
+) | tee "${PROOF_DIR}/phase4-import.log"
+PHASE4_DATA="${PHASE4_DATA}" PHASE4_CFG="${PHASE4_CFG}" REPO_ROOT="${REPO_ROOT}" python3 - <<'PY' | tee "${PROOF_DIR}/phase4.log"
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+
+home = os.environ["PHASE4_DATA"]
+config = os.environ["PHASE4_CFG"]
+root = os.environ["REPO_ROOT"]
+db_path = os.path.join(home, "personal.db")
+conn = sqlite3.connect(db_path)
+try:
+    threads = {
+        row[0]: row[1]
+        for row in conn.execute(
+            """
+            SELECT messages.subject, threads.gmail_thread_id
+            FROM messages JOIN threads ON threads.thread_pk = messages.thread_pk
+            """
+        )
+    }
+finally:
+    conn.close()
+reply_id = threads["Reply note"]
+grey_id = threads["Grey note"]
+
+def run(args):
+    proc = subprocess.run(
+        [sys.executable, "-m", "mailcrawl", "--home", home, "--config", config, "--json", *args],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise SystemExit(f"{args} {proc.returncode} {proc.stdout} {proc.stderr}")
+    return json.loads(proc.stdout)
+
+off = run(["jev", "--account", "personal", "--thread", reply_id, "--client", "fake", "--now", "10"])
+if off.get("origin") is not None or off.get("next_state") != "needs_review" or off.get("decision_id") is not None:
+    raise SystemExit(f"off jev {off}")
+conn = sqlite3.connect(db_path)
+try:
+    count = conn.execute("SELECT count(*) FROM decisions").fetchone()[0]
+finally:
+    conn.close()
+if count != 0:
+    raise SystemExit(f"off decisions {count}")
+print("off jev needs_review")
+plain = run(["search", "--account", "personal", "--", "shared"])
+if not plain["hits"] or plain["hits"][0]["subject"] != "Reply note" or any(hit["source"] == "jev" for hit in plain["hits"]):
+    raise SystemExit(f"off search {plain}")
+print("off search", plain["hits"][0]["subject"], plain["hits"][0]["source"])
+with open(config, "a", encoding="utf-8") as handle:
+    handle.write("\n[inference]\njev-battery = true\nsearch-reranker = true\n")
+first = run(["jev", "--account", "personal", "--thread", reply_id, "--client", "fake", "--now", "10"])
+second = run(["jev", "--account", "personal", "--thread", reply_id, "--client", "fake", "--now", "11"])
+if first.get("origin") != "model" or first.get("source_detail") != "jev-1.13.0" or first.get("next_state") != "reply":
+    raise SystemExit(f"stored jev {first}")
+if second.get("decision_id") != first.get("decision_id"):
+    raise SystemExit(f"second jev {second}")
+conn = sqlite3.connect(db_path)
+try:
+    stored = conn.execute(
+        "SELECT count(*) FROM decisions WHERE thread_pk = (SELECT thread_pk FROM threads WHERE gmail_thread_id = ?)",
+        (reply_id,),
+    ).fetchone()[0]
+finally:
+    conn.close()
+if stored != 1:
+    raise SystemExit(f"decision rows {stored}")
+print("jev", first["origin"], first["source_detail"], first["next_state"], first["decision_id"])
+grey = run(["jev", "--account", "personal", "--thread", grey_id, "--client", "fake", "--now", "10"])
+grey_again = run(["jev", "--account", "personal", "--thread", grey_id, "--client", "fake", "--now", "11"])
+if grey.get("origin") != "model" or grey.get("source_detail") != "jev-1.13.0" or grey.get("next_state") != "needs_review":
+    raise SystemExit(f"grey {grey}")
+if grey_again.get("decision_id") != grey.get("decision_id"):
+    raise SystemExit(f"grey again {grey_again}")
+print("grey", grey["next_state"], grey["source_detail"])
+ranked = run(["search", "--account", "personal", "--jev-client", "fake", "--", "shared"])
+if len(ranked["hits"]) != len(plain["hits"]):
+    raise SystemExit(f"dropped {ranked}")
+if ranked["hits"][0]["subject"] != "Late note" or ranked["hits"][0]["source"] != "jev":
+    raise SystemExit(f"rerank {ranked}")
+print("rerank", [(hit["subject"], hit["source"]) for hit in ranked["hits"]])
+PY
+cp "${PROOF_DIR}/phase4.log" "${ARTIFACT_DIR}/phase4.log"
 
 record_fixture_hashes "${FIXTURE_AFTER}"
 if ! diff -q "${FIXTURE_BEFORE}" "${FIXTURE_AFTER}" >/dev/null; then
@@ -1029,6 +1171,10 @@ doc = {
         "phase3_fake_knn",
         "phase3_fusion",
         "phase3_migration",
+        "phase4_off_by_default",
+        "phase4_fake_decision",
+        "phase4_grey_review",
+        "phase4_rerank",
         "fixture_sha256_unchanged",
     ],
 }

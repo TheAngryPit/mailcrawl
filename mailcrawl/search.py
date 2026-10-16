@@ -6,6 +6,7 @@ import sqlite3
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.inference import enabled_points, invoke
+from mailcrawl.jev import JevClient, rerank
 from mailcrawl.paths import UsageError
 from mailcrawl.vectors import Embedder, nearest_threads, ordered_hits, require_vec, search_query
 
@@ -23,6 +24,7 @@ def search_messages(
     since: int | None = None,
     until: int | None = None,
     embedder: Embedder | None = None,
+    jev: JevClient | None = None,
     config: dict[str, bool] | None = None,
     fusion: str = "keyword",
     keyword_weight: float = 1.0,
@@ -54,6 +56,7 @@ def search_messages(
             keyword_weight=keyword_weight,
             vec_weight=vec_weight,
         )
+    ranked = rerank(conn, ranked, jev, config, text)
     hits: list[dict[str, str | None]] = []
     for msg_pk, source in ranked:
         message = conn.execute(
