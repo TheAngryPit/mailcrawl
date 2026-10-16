@@ -1,6 +1,6 @@
-"""SQLite schema v2 tables. user_version 3 adds the screener decision state."""
+"""SQLite schema v2 tables. user_version 4 records decision origin."""
 
-USER_VERSION = 3
+USER_VERSION = 4
 
 TABLES = (
     "accounts",
@@ -227,6 +227,8 @@ CREATE TABLE IF NOT EXISTS decisions (
   muted INTEGER NOT NULL DEFAULT 0,
   confidence REAL,
   source TEXT NOT NULL CHECK (source IN ('rule','embedding-cluster','llm','human','legacy-label')),
+  origin TEXT NOT NULL DEFAULT 'rule' CHECK (origin IN ('rule','knn','model','human')),
+  source_detail TEXT NOT NULL DEFAULT '',
   rule_id TEXT,
   rules_version TEXT NOT NULL,
   evidence TEXT NOT NULL,

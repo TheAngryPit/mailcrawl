@@ -1,0 +1,124 @@
+"""Declared inference points. Each one is off unless config turns it on."""
+
+from __future__ import annotations
+
+import ast
+import contextvars
+from collections.abc import Callable
+from pathlib import Path
+from typing import TypeVar
+
+DECLARED_POINTS = (
+    "embeddings",
+    "search-embedding",
+    "jev-battery",
+    "decision-comparison",
+    "ocr-pilot",
+    "search-reranker",
+    "low-confidence-llm",
+)
+MODEL_ATTRS = frozenset({"predict", "embed", "generate", "complete", "systemone"})
+
+T = TypeVar("T")
+_point: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mailcrawl_inference_point",
+    default=None,
+)
+
+
+class BoundaryError(Exception):
+    """A model call is outside a declared, enabled inference point."""
+
+
+def enabled_points(config: dict[str, bool] | None = None) -> frozenset[str]:
+    """Config gates. Missing config and unknown keys stay off. Default is off."""
+    if not config:
+        return frozenset()
+    enabled: set[str] = set()
+    for name, flag in config.items():
+        if name not in DECLARED_POINTS:
+            raise BoundaryError(name)
+        if flag is True:
+            enabled.add(name)
+    return frozenset(enabled)
+
+
+def enter_model() -> None:
+    if _point.get() not in DECLARED_POINTS:
+        raise BoundaryError("model call outside a declared point")
+
+
+def invoke(
+    point: str,
+    call: Callable[[], T],
+    config: dict[str, bool] | None = None,
+) -> T | None:
+    if point not in DECLARED_POINTS:
+        raise BoundaryError(point)
+    if point not in enabled_points(config):
+        return None
+    token = _point.set(point)
+    try:
+        return call()
+    finally:
+        _point.reset(token)
+
+
+def scan_source(text: str, filename: str) -> list[str]:
+    tree = ast.parse(text, filename=filename)
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            child.parent = parent  # type: ignore[attr-defined]
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_invoke(node):
+            point = node.args[0] if node.args else None
+            if not isinstance(point, ast.Constant) or point.value not in DECLARED_POINTS:
+                problems.append(f"{filename}:{node.lineno}: undeclared point")
+        if isinstance(node, ast.Call) and _is_model_call(node) and not _inside_declared_invoke(node):
+            problems.append(f"{filename}:{node.lineno}: model call outside a declared point")
+    return problems
+
+
+def scan_package(root: Path) -> list[str]:
+    found: list[str] = []
+    for path in sorted(root.glob("*.py")):
+        found.extend(scan_source(path.read_text(encoding="utf-8"), str(path)))
+    return found
+
+
+def _is_invoke(node: ast.Call) -> bool:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == "invoke"
+    if isinstance(func, ast.Attribute):
+        return func.attr == "invoke"
+    return False
+
+
+def _is_model_call(node: ast.Call) -> bool:
+    func = node.func
+    return isinstance(func, ast.Attribute) and func.attr in MODEL_ATTRS
+
+
+def _inside_declared_invoke(node: ast.AST) -> bool:
+    current: ast.AST | None = node
+    while current is not None:
+        parent = getattr(current, "parent", None)
+        if isinstance(parent, ast.Call) and _is_invoke(parent) and len(parent.args) >= 2:
+            point = parent.args[0]
+            if (
+                isinstance(point, ast.Constant)
+                and point.value in DECLARED_POINTS
+                and _contains(parent.args[1], node)
+            ):
+                return True
+        current = parent
+    return False
+
+
+def _contains(root: ast.AST, target: ast.AST) -> bool:
+    for node in ast.walk(root):
+        if node is target:
+            return True
+    return False

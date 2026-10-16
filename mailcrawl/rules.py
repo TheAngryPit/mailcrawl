@@ -1162,8 +1162,9 @@ def _insert_decision(
         """
         INSERT INTO decisions(
           thread_pk, next_state, priority, review_date, lane, muted,
-          source, rule_id, rules_version, evidence, created_at, superseded_by
-        ) VALUES (?, ?, ?, ?, ?, ?, 'rule', ?, ?, ?, ?, ?)
+          source, origin, source_detail, rule_id, rules_version, evidence,
+          created_at, superseded_by
+        ) VALUES (?, ?, ?, ?, ?, ?, 'rule', 'rule', ?, ?, ?, ?, ?, ?)
         RETURNING decision_id
         """,
         (
@@ -1173,6 +1174,7 @@ def _insert_decision(
             outcome.review_date,
             outcome.lane,
             outcome.muted,
+            outcome.rule_id,
             outcome.rule_id,
             rules_version,
             evidence,
