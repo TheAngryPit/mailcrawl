@@ -730,6 +730,14 @@ PY
 log "check: phase 3 vectors stay off until config turns them on"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$PROOF_DIR}"
 mkdir -p "${ARTIFACT_DIR}"
+
+publish_log() {
+  local name="$1"
+  if [[ "${ARTIFACT_DIR}" == "${PROOF_DIR}" ]]; then
+    return 0
+  fi
+  cp "${PROOF_DIR}/${name}" "${ARTIFACT_DIR}/${name}"
+}
 PHASE3_DATA="${PROOF_HOME}/phase3-data"
 PHASE3_CFG="${PROOF_HOME}/phase3-config.toml"
 PHASE3_MBOX="${PROOF_HOME}/phase3.mbox"
@@ -988,7 +996,7 @@ if "vec_classification" in names or "vec_search" in names or "vec_image" in name
     raise SystemExit(f"v5 tables {sorted(names)}")
 print("migration", version, "vec absent")
 PY
-cp "${PROOF_DIR}/phase3.log" "${ARTIFACT_DIR}/phase3.log"
+publish_log phase3.log
 
 log "check: phase 3b image_only threads get a fake kNN neighbour"
 PHASE3B_DATA="${PROOF_HOME}/phase3b-data"
@@ -1152,7 +1160,7 @@ if text_prefix != CLASSIFICATION_PREFIX or image_count != 2:
 print("image knn", knn["origin"], knn["source_detail"], knn["next_state"])
 print("text prefix kept")
 PY
-cp "${PROOF_DIR}/phase3b.log" "${ARTIFACT_DIR}/phase3b.log"
+publish_log phase3b.log
 
 log "check: phase 4 jev stays off until config turns it on"
 PHASE4_DATA="${PROOF_HOME}/phase4-data"
@@ -1325,7 +1333,7 @@ if again.get("eligible") != 0 or again.get("decided") != 0 or again.get("review"
     raise SystemExit(f"batch again {again}")
 print("batch", batch["eligible"], batch["decided"], again["eligible"])
 PY
-cp "${PROOF_DIR}/phase4.log" "${ARTIFACT_DIR}/phase4.log"
+publish_log phase4.log
 
 record_fixture_hashes "${FIXTURE_AFTER}"
 if ! diff -q "${FIXTURE_BEFORE}" "${FIXTURE_AFTER}" >/dev/null; then

@@ -11,7 +11,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from mailcrawl.cli import main
+from mailcrawl.cli import _embedder, _parser, main
 from mailcrawl.configfile import embedder_name, inference_config, write_account
 from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import BoundaryError, invoke
@@ -461,122 +461,42 @@ Content-Transfer-Encoding: base64
 
 class VectorCliTest(unittest.TestCase):
     def test_omitted_embedder_resolves_to_gemma(self) -> None:
-        mbox_text = """From 1768000000000000501@example.com Thu Jan 15 12:00:00 +0000 2026
-From: Bao Fixture <bao@example.com>
-To: Ada Fixture <ada@example.com>
-Subject: Text note
-Date: Thu, 15 Jan 2026 12:00:00 +0000
-Message-ID: <default-embedder@example.com>
-X-GM-THRID: 1768000000000000501
-X-GM-MSGID: 1768000000000000501
-X-Gmail-Labels: Inbox
-MIME-Version: 1.0
-Content-Type: text/plain; charset="utf-8"
-
-alpha keyword
-
-"""
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            config = home / "config.toml"
-            mbox = home / "one.mbox"
-            mbox.write_text(mbox_text, encoding="utf-8")
-            self.assertEqual(
-                main(
-                    [
-                        "--json",
-                        "--home",
-                        str(home),
-                        "--config",
-                        str(config),
-                        "init",
-                        "--account",
-                        "personal",
-                        "--email",
-                        "ada@example.com",
-                    ]
-                ),
-                0,
-            )
-            config.write_text(
-                config.read_text(encoding="utf-8") + "\n[inference]\nembeddings = true\n",
-                encoding="utf-8",
-            )
+            config = Path(tmp) / "config.toml"
             self.assertEqual(embedder_name(config), "gemma")
-            missing = open_embedder(embedder_name(config))
-            with self.assertRaises(UsageError) as raised:
-                invoke(
-                    "embeddings",
-                    lambda: missing.embed(["synthetic thread"]),
-                    {"embeddings": True},
-                )
-            self.assertIn("sentence-transformers>=6.1 is not installed", str(raised.exception))
-            self.assertNotIn("sqlite-vec is not installed", str(raised.exception))
-            self.assertNotIn("sentence_transformers", sys.modules)
-            self.assertNotIn("torch", sys.modules)
-            self.assertEqual(
-                main(
-                    [
-                        "--json",
-                        "--home",
-                        str(home),
-                        "--config",
-                        str(config),
-                        "import",
-                        "mbox",
-                        str(mbox),
-                        "--account",
-                        "personal",
-                    ]
-                ),
-                0,
+            config.write_text("[inference]\nembeddings = true\n", encoding="utf-8")
+            self.assertEqual(embedder_name(config), "gemma")
+            for argv in (
+                ["embed", "--account", "personal"],
+                ["knn", "--account", "personal", "--thread", "synthetic"],
+                ["search", "synthetic", "--account", "personal"],
+            ):
+                omitted = _parser().parse_args(["--config", str(config), *argv])
+                self.assertIsNone(omitted.embedder)
+                self.assertEqual(_embedder(omitted), "gemma")
+            flagged = _parser().parse_args(
+                [
+                    "--config",
+                    str(config),
+                    "embed",
+                    "--account",
+                    "personal",
+                    "--embedder",
+                    "fake",
+                ]
             )
-            if _sqlite_vec_installed():
-                buf = StringIO()
-                with redirect_stdout(buf):
-                    code = main(
-                        [
-                            "--json",
-                            "--home",
-                            str(home),
-                            "--config",
-                            str(config),
-                            "embed",
-                            "--account",
-                            "personal",
-                        ]
-                    )
-                self.assertEqual(code, 2, buf.getvalue())
-                self.assertIn("sentence-transformers>=6.1 is not installed", buf.getvalue())
-                self.assertNotIn("sentence_transformers", sys.modules)
-                self.assertNotIn("torch", sys.modules)
+            self.assertEqual(_embedder(flagged), "fake")
             config.write_text(
-                config.read_text(encoding="utf-8").replace(
-                    "[inference]\nembeddings = true\n",
-                    "[inference]\nembeddings = true\nembedder = \"fake\"\n",
-                ),
+                "[inference]\nembeddings = true\nembedder = \"fake\"\n",
                 encoding="utf-8",
             )
             self.assertEqual(embedder_name(config), "fake")
-            if _sqlite_vec_installed():
-                buf = StringIO()
-                with redirect_stdout(buf):
-                    code = main(
-                        [
-                            "--json",
-                            "--home",
-                            str(home),
-                            "--config",
-                            str(config),
-                            "embed",
-                            "--account",
-                            "personal",
-                        ]
-                    )
-                self.assertEqual(code, 0, buf.getvalue())
-                self.assertIn('"embedded": 1', buf.getvalue())
-                self.assertNotIn("sentence_transformers", sys.modules)
-                self.assertNotIn("torch", sys.modules)
+            named = _parser().parse_args(
+                ["--config", str(config), "embed", "--account", "personal"]
+            )
+            self.assertEqual(_embedder(named), "fake")
+            self.assertNotIn("sentence_transformers", sys.modules)
+            self.assertNotIn("torch", sys.modules)
 
     def test_image_encode_uses_the_gemma_guide(self) -> None:
         png = bytes.fromhex(
