@@ -120,7 +120,7 @@ log "check: python tests"
   python3 -m unittest discover -s tests -v
 ) | tee -a "${PROOF_DIR}/tests.log"
 
-for artifact in review-queue.json review-decide.json review-local.json; do
+for artifact in review-queue.json review-decide.json review-local.json time-decisions.json; do
   if [[ ! -s "${PROOF_DIR}/${artifact}" ]]; then
     fail "missing review artifact ${artifact}"
   fi

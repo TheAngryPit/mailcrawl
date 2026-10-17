@@ -12,6 +12,7 @@ from typing import Protocol
 from mailcrawl.decisions import DecisionDraft, decide_open, eligible_thread_pks
 from mailcrawl.inference import enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
+from mailcrawl.timefacts import TimePolicy, apply_time, thread_time_facts
 
 MODEL_ID = "jev-1.13.0"
 BATTERY_VERSION = "battery-v1"
@@ -155,6 +156,10 @@ def jev_decide(
     client: JevClient,
     config: dict[str, bool] | None,
     now: int,
+    *,
+    owners: frozenset[str] = frozenset(),
+    domains: frozenset[str] = frozenset(),
+    policy: TimePolicy | None = None,
 ) -> sqlite3.Row | None:
     if "jev-battery" not in enabled_points(config):
         return None
@@ -165,7 +170,7 @@ def jev_decide(
         conn,
         thread_pk,
         now,
-        lambda: _produce(conn, thread_pk, client, config),
+        lambda: _timed(conn, thread_pk, client, config, now, owners, domains, policy),
     )
 
 
@@ -181,12 +186,25 @@ def score_grey_band(
     client: JevClient,
     config: dict[str, bool] | None,
     now: int,
+    *,
+    owners: frozenset[str] = frozenset(),
+    domains: frozenset[str] = frozenset(),
+    policy: TimePolicy | None = None,
 ) -> GreyPass:
     rows = eligible_thread_pks(conn, include_image_only=False)
     decided = 0
     review = 0
     for thread_pk in rows:
-        decision = jev_decide(conn, thread_pk, client, config, now)
+        decision = jev_decide(
+            conn,
+            thread_pk,
+            client,
+            config,
+            now,
+            owners=owners,
+            domains=domains,
+            policy=policy,
+        )
         if decision is None or decision["next_state"] == "needs_review":
             review += 1
         else:
@@ -346,6 +364,21 @@ def parse_document(
             raise UsageError(f"jev response missed {item.question_id}")
         found[item.question_id] = _parse_answer(item, payload)
     return found, model
+
+
+def _timed(
+    conn: sqlite3.Connection,
+    thread_pk: int,
+    client: JevClient,
+    config: dict[str, bool] | None,
+    now: int,
+    owners: frozenset[str],
+    domains: frozenset[str],
+    policy: TimePolicy | None,
+) -> DecisionDraft:
+    draft = _produce(conn, thread_pk, client, config)
+    facts = thread_time_facts(conn, thread_pk, now, owners, domains)
+    return apply_time(draft, facts, policy)
 
 
 def _produce(

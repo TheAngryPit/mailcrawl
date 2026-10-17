@@ -782,7 +782,36 @@ class ReviewHarnessTest(unittest.TestCase):
             conn = connect(db)
             try:
                 self.assertEqual(_current(conn, "thread-review"), ("rule", "needs_review", "else"))
+                _insert_decision(conn, "thread-open", "rule", "rule", "else", rule_id="else")
+                rule_id = int(
+                    conn.execute(
+                        """
+                        SELECT decision_id FROM decisions
+                        WHERE thread_pk = (
+                          SELECT thread_pk FROM threads WHERE gmail_thread_id = 'thread-open'
+                        ) AND superseded_by IS NULL
+                        """
+                    ).fetchone()[0]
+                )
+                conn.execute(
+                    "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+                    (rule_id, rule_id),
+                )
                 _insert_decision(conn, "thread-open", "knn", "embedding-cluster", "neighbour")
+                knn_id = int(
+                    conn.execute(
+                        """
+                        SELECT decision_id FROM decisions
+                        WHERE thread_pk = (
+                          SELECT thread_pk FROM threads WHERE gmail_thread_id = 'thread-open'
+                        ) AND superseded_by IS NULL
+                        """
+                    ).fetchone()[0]
+                )
+                conn.execute(
+                    "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+                    (knn_id, rule_id),
+                )
                 conn.commit()
             finally:
                 conn.close()
@@ -797,14 +826,16 @@ class ReviewHarnessTest(unittest.TestCase):
                     "personal",
                     "--thread",
                     "thread-open",
+                    "--now",
+                    "90",
                 ]
             )
-            self.assertEqual(code, 2)
-            self.assertEqual(knn["detail"], "undo restores a harness decision")
+            self.assertEqual(code, 0)
+            self.assertEqual(knn["decisions"][0]["origin"], "rule")
             conn = connect(db)
             try:
-                self.assertEqual(_current(conn, "thread-open"), ("knn", "reply", "neighbour"))
-                self.assertEqual(_count(conn, "thread-open"), 1)
+                self.assertEqual(_current(conn, "thread-open"), ("rule", "reply", "else"))
+                self.assertEqual(_count(conn, "thread-open"), 3)
             finally:
                 conn.close()
             code, made = _cli(

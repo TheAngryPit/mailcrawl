@@ -468,6 +468,7 @@ class JevBatteryTest(unittest.TestCase):
             argv = parts[3:]
             argv[argv.index("--db") + 1] = str(data)
             argv[argv.index("--client") + 1] = "fake"
+            argv.extend(["--as-of", "10"])
             joined = " ".join(argv)
             self.assertNotIn("MailVault", joined)
             self.assertNotIn("db-v2", joined)

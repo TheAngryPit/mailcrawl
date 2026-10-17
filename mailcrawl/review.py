@@ -17,6 +17,7 @@ from mailcrawl.inference import enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.rules import supersede_current
 from mailcrawl.threads import embeddable_image
+from mailcrawl.timefacts import thread_time_facts
 from mailcrawl.vectors import truncate_text
 
 STATES = (
@@ -49,6 +50,7 @@ class ReviewItem:
     jev: tuple[dict[str, object], ...]
     untrusted_text: str
     untrusted_images: tuple[str, ...]
+    time: dict[str, object]
 
     def document(self) -> dict[str, object]:
         return {
@@ -58,6 +60,7 @@ class ReviewItem:
             "rule": self.rule,
             "state": self.state,
             "thread_id": self.thread_id,
+            "time": dict(self.time),
             "untrusted": {
                 "images": list(self.untrusted_images),
                 "text": self.untrusted_text,
@@ -147,10 +150,15 @@ def review_queue(
     scope: ReviewScope,
     *,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    as_of: int = 0,
+    owners: frozenset[str] = frozenset(),
+    domains: frozenset[str] = frozenset(),
 ) -> tuple[ReviewItem, ...]:
     sql, params = _queue_sql(scope)
     rows = conn.execute(sql, params).fetchall()
-    return tuple(_item(conn, account, row, max_tokens) for row in rows)
+    return tuple(
+        _item(conn, account, row, max_tokens, as_of, owners, domains) for row in rows
+    )
 
 
 def open_readonly(path: Path) -> sqlite3.Connection:
@@ -231,12 +239,22 @@ def review_run(
     max_tokens: int,
     now: int,
     override: bool = False,
+    owners: frozenset[str] = frozenset(),
+    domains: frozenset[str] = frozenset(),
 ) -> list[tuple[sqlite3.Row, bool]]:
     if settings is None or _POINT not in enabled_points(flags):
         raise UsageError("local llm is off")
     base_url = _endpoint(settings[0], settings[2])
     model = settings[1]
-    items = review_queue(conn, account, scope, max_tokens=max_tokens)
+    items = review_queue(
+        conn,
+        account,
+        scope,
+        max_tokens=max_tokens,
+        as_of=now,
+        owners=owners,
+        domains=domains,
+    )
     stored: list[tuple[sqlite3.Row, bool]] = []
     for item in items:
         current = current_decision(conn, _thread_pk(conn, item.thread_id))
@@ -282,7 +300,7 @@ def undo_decisions(
         raise UsageError("nothing to undo")
     planned: list[tuple[sqlite3.Row, sqlite3.Row]] = []
     for row in targets:
-        if str(row["origin"]) != "model" or str(row["rule_id"]) != _RULE_ID:
+        if not _undo_target(row):
             raise UsageError("undo restores a harness decision")
         previous = conn.execute(
             "SELECT * FROM decisions WHERE superseded_by = ?",
@@ -332,13 +350,24 @@ def undo_document(
     return decision_document(row, thread_id, changed)
 
 
+def _undo_target(row: sqlite3.Row) -> bool:
+    origin = str(row["origin"])
+    if origin == "knn":
+        return True
+    return origin == "model" and str(row["rule_id"]) == _RULE_ID
+
+
 def _item(
     conn: sqlite3.Connection,
     account: str,
     row: sqlite3.Row,
     max_tokens: int,
+    moment: int,
+    owners: frozenset[str],
+    domains: frozenset[str],
 ) -> ReviewItem:
     thread_pk = int(row["thread_pk"])
+    facts = thread_time_facts(conn, thread_pk, moment, owners, domains)
     return ReviewItem(
         str(row["gmail_thread_id"]),
         account,
@@ -348,6 +377,7 @@ def _item(
         _jev(conn, thread_pk),
         _body(conn, thread_pk, max_tokens),
         _images(conn, thread_pk),
+        facts.public(),
     )
 
 

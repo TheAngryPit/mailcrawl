@@ -25,6 +25,7 @@ from mailcrawl.decisions import (
 from mailcrawl.inference import BoundaryError, enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.threads import image_gate, opened_limit_reason, pillow_limits
+from mailcrawl.timefacts import TimePolicy, apply_time, thread_time_facts
 
 NATIVE_DIM = 768
 CLASSIFICATION_PREFIX = "task: classification | query: "
@@ -192,8 +193,10 @@ class GemmaEmbedder:
 
         def encode_one(blob: bytes) -> list[list[float]]:
             with tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / f"0{_image_suffix(blob)}"
-                path.write_bytes(blob)
+                payload = rgb_image_bytes(blob)
+                suffix = _image_suffix(blob) if payload == blob else ".png"
+                path = Path(tmp) / f"0{suffix}"
+                path.write_bytes(payload)
                 raw = _encode_guarded(
                     model,
                     [{"image": str(path)}],
@@ -284,6 +287,10 @@ class MlxEmbedder:
                     if reason:
                         raise RuntimeError(reason)
                     picture.load()
+                    if picture.mode != "RGB":
+                        converted = picture.convert("RGB")
+                        picture.close()
+                        picture = converted
                     inputs = processor(images=[picture], return_tensors="np")
                     embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
                     mx.eval(embeddings)
@@ -608,6 +615,10 @@ def knn_decide(
     embedder: Embedder | None,
     config: dict[str, bool] | None,
     now: int,
+    *,
+    owners: frozenset[str] = frozenset(),
+    domains: frozenset[str] = frozenset(),
+    policy: TimePolicy | None = None,
 ) -> sqlite3.Row | None:
     if "embeddings" not in enabled_points(config) or embedder is None:
         return None
@@ -653,7 +664,12 @@ def knn_decide(
             muted=int(neighbour["muted"] or 0),
         )
 
-    return decide_open(conn, thread_pk, now, produce)
+    def timed() -> DecisionDraft:
+        draft = produce()
+        facts = thread_time_facts(conn, thread_pk, now, owners, domains)
+        return apply_time(draft, facts, policy)
+
+    return decide_open(conn, thread_pk, now, timed)
 
 
 def knn_account(
@@ -661,12 +677,25 @@ def knn_account(
     embedder: Embedder | None,
     config: dict[str, bool] | None,
     now: int,
+    *,
+    owners: frozenset[str] = frozenset(),
+    domains: frozenset[str] = frozenset(),
+    policy: TimePolicy | None = None,
 ) -> tuple[int, int, int]:
     eligible = eligible_thread_pks(conn)
     decided = 0
     review = 0
     for thread_pk in eligible:
-        decision = knn_decide(conn, thread_pk, embedder, config, now)
+        decision = knn_decide(
+            conn,
+            thread_pk,
+            embedder,
+            config,
+            now,
+            owners=owners,
+            domains=domains,
+            policy=policy,
+        )
         if decision is None or decision["next_state"] == "needs_review":
             review += 1
         else:
@@ -906,6 +935,20 @@ def _rows(model_id: str, raw: object) -> list[list[float]]:
             raise UsageError(f"{model_id} returned {len(values)} dimensions")
         vectors.append(truncate(values, NATIVE_DIM))
     return vectors
+
+
+def rgb_image_bytes(blob: bytes) -> bytes:
+    with pillow_limits() as image_mod:
+        if image_mod is None:
+            raise ImportError("Pillow is not installed")
+        with image_mod.open(io.BytesIO(blob)) as picture:
+            picture.load()
+            if picture.mode == "RGB":
+                return blob
+            rgb = picture.convert("RGB")
+            out = io.BytesIO()
+            rgb.save(out, format="PNG")
+            return out.getvalue()
 
 
 def _image_suffix(blob: bytes) -> str:

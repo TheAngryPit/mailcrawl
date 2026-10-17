@@ -44,6 +44,7 @@ from mailcrawl.vectors import (
     knn_account,
     knn_decide,
     open_embedder,
+    rgb_image_bytes,
     require_vec,
     truncate,
 )
@@ -563,6 +564,40 @@ class VectorCliTest(unittest.TestCase):
                 "processing_kwargs": {"image": {"max_soft_tokens": 280}},
             },
         )
+
+    def test_non_rgb_images_are_converted_before_encode(self) -> None:
+        from PIL import Image
+
+        seen: list[tuple[str, tuple[int, int, int]]] = []
+
+        class Recorder:
+            def encode(self, batch, **kwargs):
+                for item in batch:
+                    with Image.open(item["image"]) as picture:
+                        picture.load()
+                        pixel = picture.getpixel((0, 0))
+                        seen.append((picture.mode, pixel))
+                return [[0.0] * NATIVE_DIM]
+
+        embedder = GemmaEmbedder()
+        embedder._loaded = Recorder()
+        blobs = [_mode_image(mode) for mode in ("L", "LA", "P", "1", "CMYK", "I;16")]
+        for blob in blobs:
+            self.assertEqual(image_gate("image/png", 0, len(blob), blob), (True, None))
+            converted = rgb_image_bytes(blob)
+            with Image.open(BytesIO(converted)) as picture:
+                picture.load()
+                self.assertEqual(picture.mode, "RGB")
+                self.assertEqual(len(picture.getpixel((0, 0))), 3)
+            vectors = invoke(
+                "embeddings",
+                lambda blob=blob: embedder.embed_images([blob]),
+                {"embeddings": True},
+            )
+            self.assertEqual(vectors, [[0.0] * NATIVE_DIM])
+        self.assertEqual([mode for mode, _pixel in seen], ["RGB"] * 6)
+        for _mode, pixel in seen:
+            self.assertEqual(len(pixel), 3)
 
     def test_gemma_is_opt_in_and_db_v2_is_refused(self) -> None:
         embedder = open_embedder("gemma")
@@ -1404,6 +1439,16 @@ def _gif_frames(count: int, screen: tuple[int, int]) -> bytes:
     raw = bytearray(buffer.getvalue())
     raw[6:10] = struct.pack("<HH", screen[0], screen[1])
     return bytes(raw)
+
+
+def _mode_image(mode: str) -> bytes:
+    image_mod = __import__("PIL.Image", fromlist=["Image"])
+    image = image_mod.new(mode, (32, 32), 0 if mode != "CMYK" else (0, 0, 0, 0))
+    if mode == "P":
+        image.putpalette([0, 0, 0, 255, 0, 0] + [0] * (256 * 3 - 6))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG" if mode == "CMYK" else "PNG")
+    return buffer.getvalue()
 
 
 def _still_gif(width: int, height: int) -> bytes:
