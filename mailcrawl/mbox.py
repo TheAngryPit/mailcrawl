@@ -10,7 +10,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import re
-import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 import email
@@ -25,6 +24,7 @@ from mailcrawl.contract import PSEUDO_LABEL, LabelRec, MessageRec
 from mailcrawl.eml import allow_headers, parsed_record
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.clock import as_of
+from mailcrawl.takeout_labels import system_id
 from mailcrawl.textnorm import chosen_stamp, parse_date
 
 PROVISIONAL = "mbox:"
@@ -42,48 +42,6 @@ _MESSAGE_ID = re.compile(r"<([^<>\s]+)>")
 _BLANK = b"\r\n"
 _FEED_CHUNK = 1 << 16
 _READ = ("x-gm-msgid", "x-gm-thrid", "x-gmail-message-id", "x-gmail-labels")
-
-SYSTEM_LABELS: dict[str, str] = {
-    "inbox": "INBOX",
-    "caixa de entrada": "INBOX",
-    "sent": "SENT",
-    "sent mail": "SENT",
-    "enviados": "SENT",
-    "enviadas": "SENT",
-    "e-mails enviados": "SENT",
-    "starred": "STARRED",
-    "com estrela": "STARRED",
-    "important": "IMPORTANT",
-    "importante": "IMPORTANT",
-    "unread": "UNREAD",
-    "não lido": "UNREAD",
-    "não lidos": "UNREAD",
-    "não lida": "UNREAD",
-    "não lidas": "UNREAD",
-    "draft": "DRAFT",
-    "drafts": "DRAFT",
-    "rascunho": "DRAFT",
-    "rascunhos": "DRAFT",
-    "spam": "SPAM",
-    "trash": "TRASH",
-    "lixo": "TRASH",
-    "lixeira": "TRASH",
-    "reciclagem": "TRASH",
-    "chat": "CHAT",
-    "chats": "CHAT",
-    "category personal": "CATEGORY_PERSONAL",
-    "categoria pessoal": "CATEGORY_PERSONAL",
-    "category social": "CATEGORY_SOCIAL",
-    "categoria social": "CATEGORY_SOCIAL",
-    "categoria redes sociais": "CATEGORY_SOCIAL",
-    "category promotions": "CATEGORY_PROMOTIONS",
-    "categoria promoções": "CATEGORY_PROMOTIONS",
-    "category updates": "CATEGORY_UPDATES",
-    "categoria atualizações": "CATEGORY_UPDATES",
-    "category forums": "CATEGORY_FORUMS",
-    "categoria fóruns": "CATEGORY_FORUMS",
-}
-SYSTEM_LABELS.update({label_id.lower(): label_id for label_id in set(SYSTEM_LABELS.values())})
 
 PSEUDO_LABELS: dict[str, str] = {
     "opened": PSEUDO_LABEL + "opened",
@@ -142,7 +100,7 @@ def label_names(value: str | None) -> list[str]:
 
 
 def system_label(name: str) -> str | None:
-    return SYSTEM_LABELS.get(unicodedata.normalize("NFC", name).casefold())
+    return system_id(name)
 
 
 def thread_root(references: str | None, in_reply_to: str | None, own: str) -> str:
@@ -436,6 +394,49 @@ def _separator_id(separator: bytes) -> str | None:
     if found is None:
         return None
     return gmail_hex(found.group(1), decimal_only=True)
+
+
+def takeout_block(raw_path: object) -> bool:
+    """True when this row's separator and leading block would be accepted at import."""
+    opened = _open_mbox_row(raw_path)
+    if opened is None:
+        return False
+    _path, separator, head = opened
+    if head.startswith(separator):
+        head = head[len(separator) :]
+    _kept, takeout = _strip_takeout(head, separator)
+    return takeout.labels is not None
+
+
+def stored_receipt(raw_path: object) -> tuple[int, int] | None:
+    """Receipt stamp and trust from the mbox separator, or None when it cannot be proved."""
+    opened = _open_mbox_row(raw_path)
+    if opened is None:
+        return None
+    _path, separator, _head = opened
+    rest = _SEPARATOR_REST.match(separator)
+    fallback = rest.group(1).decode("utf-8", "replace") if rest else None
+    receipt = parse_date(fallback) if fallback else None
+    if receipt is None or receipt <= 0:
+        return None
+    return chosen_stamp(receipt, None, as_of(None))
+
+
+def _open_mbox_row(raw_path: object) -> tuple[Path, bytes, bytes] | None:
+    if not isinstance(raw_path, str) or not raw_path.startswith(RAW_PATH):
+        return None
+    ref = _mbox_ref(raw_path)
+    if ref is None:
+        return None
+    path, offset = ref
+    try:
+        if not path.is_file():
+            return None
+        separator = _read_mbox_separator(path, offset)
+        head = _read_head(path, offset)
+    except OSError:
+        return None
+    return path, separator, head
 
 
 def stored_date_trusted(raw_path: object, stored: int) -> int | None:

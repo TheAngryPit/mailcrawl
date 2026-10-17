@@ -344,6 +344,8 @@ def undo_document(
 
 def _undo_target(row: sqlite3.Row) -> bool:
     origin = str(row["origin"])
+    if str(row["source_detail"]) == "time" and origin in ("rule", "knn", "model"):
+        return True
     if origin == "knn":
         return True
     return origin == "model" and str(row["rule_id"]) == _RULE_ID

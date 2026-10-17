@@ -23,7 +23,7 @@ from mailcrawl.gognative import load_labels, load_native
 from mailcrawl.mbox import PROVISIONAL, RAW_PATH, MboxSource, Refused
 from mailcrawl.paths import UsageError
 from mailcrawl.taxonomy import axis_of, generic_category, load_taxonomy
-from mailcrawl.store import index_message
+from mailcrawl.store import index_message, repair_takeout
 from mailcrawl.textnorm import clean_body, parse_address, subject_norm
 from mailcrawl.threads import embeddable_image, mark_image_only
 from mailcrawl.version import mailcrawl_version, provenance_hash
@@ -41,6 +41,7 @@ class ImportResult:
         n_error: int,
         n_refused: int = 0,
         n_reconciled: int = 0,
+        takeout_sent: str = "",
     ) -> None:
         self.n_seen = n_seen
         self.n_new = n_new
@@ -48,6 +49,7 @@ class ImportResult:
         self.n_error = n_error
         self.n_refused = n_refused
         self.n_reconciled = n_reconciled
+        self.takeout_sent = takeout_sent
 
 
 def load_catalogue_entries(path: Path | None, alias: str) -> dict[str, dict[str, str]]:
@@ -87,6 +89,7 @@ def import_mbox(
     labels_path: Path | None,
     taxonomy_path: Path | None,
     account_email: str,
+    label_map: dict[str, str] | None = None,
 ) -> ImportResult:
     account_id = _account_id(conn, alias)
     seed = load_labels(labels_path) if labels_path is not None else ()
@@ -108,7 +111,7 @@ def import_mbox(
         ).fetchone()
         is not None,
     )
-    return _ingest(
+    result = _ingest(
         conn,
         account_id=account_id,
         alias=alias,
@@ -119,6 +122,9 @@ def import_mbox(
         catalogue=load_catalogue_entries(taxonomy_path, alias),
         account_email=account_email,
     )
+    result.takeout_sent = repair_takeout(conn, label_map)
+    conn.commit()
+    return result
 
 
 def _account_id(conn: sqlite3.Connection, alias: str) -> int:

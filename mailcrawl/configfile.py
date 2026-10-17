@@ -53,6 +53,32 @@ def account_identity(
     )
 
 
+def takeout_label_map(path: Path, alias: str) -> dict[str, str]:
+    document = load_config(path)
+    block = document.get("takeout")
+    if block is None:
+        return {}
+    if not isinstance(block, dict):
+        raise UsageError("takeout label_map needs a table")
+    found: dict[str, str] = {}
+    _merge_label_map(found, block.get("label_map"))
+    account = block.get(canonical_alias(alias))
+    if isinstance(account, dict):
+        _merge_label_map(found, account.get("label_map"))
+    return found
+
+
+def _merge_label_map(found: dict[str, str], value: object) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise UsageError("takeout label_map needs a table")
+    for key, item in value.items():
+        if not isinstance(key, str) or not isinstance(item, str):
+            raise UsageError("takeout label_map needs a table")
+        found[key] = item
+
+
 def taxonomy_path(path: Path) -> Path | None:
     document = load_config(path)
     value = document.get("taxonomy")

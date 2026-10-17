@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from mailcrawl.clock import AS_OF_MAX, AS_OF_MIN, utc_parts
 from mailcrawl.decisions import DecisionDraft
 from mailcrawl.textnorm import parse_address
+from mailcrawl.time_cues import CUES, MONTHS
 
 TEXT_CAP = 8000
 _MAX_DATES = 8
@@ -27,54 +28,57 @@ _AUTOMATED = (
     "mailer-daemon",
     "notifications@",
 )
-_MONTHS = {
-    "jan": 1,
-    "feb": 2,
-    "mar": 3,
-    "apr": 4,
-    "may": 5,
-    "jun": 6,
-    "jul": 7,
-    "aug": 8,
-    "sep": 9,
-    "oct": 10,
-    "nov": 11,
-    "dec": 12,
-    "janeiro": 1,
-    "fevereiro": 2,
-    "marco": 3,
-    "março": 3,
-    "abril": 4,
-    "maio": 5,
-    "junho": 6,
-    "julho": 7,
-    "agosto": 8,
-    "setembro": 9,
-    "outubro": 10,
-    "novembro": 11,
-    "dezembro": 12,
-}
 _FLAGS = re.ASCII | re.IGNORECASE
 _ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b", _FLAGS)
-_DMY = re.compile(
-    r"\b(\d{1,2}) (jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6} (\d{4})\b",
-    _FLAGS,
-)
-_MDY = re.compile(
-    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6} (\d{1,2}),? (\d{4})\b",
-    _FLAGS,
-)
-_PT = re.compile(
-    r"\b(\d{1,2}) de (janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro) de (\d{4})\b",
-    _FLAGS,
-)
 _ATE = re.compile(
     r"\bat[eé] dia (\d{1,2})(?: de ([a-zç]{3,12}))?(?: de (\d{4}))?\b",
     _FLAGS,
 )
-_WORD = r"(?<![A-Za-z0-9_])(?:{})(?![A-Za-z0-9_])"
-_DEADLINE_CUE = re.compile(_WORD.format("deadline|prazo|due"))
-_MEETING_CUE = re.compile(_WORD.format("meeting|meet|reuni(?:ão|ao)?|call"))
+if "marco" not in MONTHS:
+    MONTHS["marco"] = MONTHS.get("março", 3)
+_MONTH_ALT = "|".join(re.escape(name) for name in sorted(MONTHS, key=len, reverse=True))
+_DMY = re.compile(
+    rf"(?<!\d)(\d{{1,2}})\s+({_MONTH_ALT})\s+(\d{{4}})(?!\d)",
+    re.IGNORECASE,
+)
+_MDY = re.compile(
+    rf"(?<!\d)({_MONTH_ALT})\s+(\d{{1,2}}),?\s+(\d{{4}})(?!\d)",
+    re.IGNORECASE,
+)
+_DE_MONTH = re.compile(
+    rf"(?<!\d)(\d{{1,2}})\s+de\s+({_MONTH_ALT})\s+de\s+(\d{{4}})(?!\d)",
+    re.IGNORECASE,
+)
+_DOTTED = re.compile(
+    rf"(?<!\d)(\d{{1,2}})\.\s*({_MONTH_ALT})\s+(\d{{4}})(?!\d)",
+    re.IGNORECASE,
+)
+_YMD_HAN = re.compile(r"(?<!\d)(\d{4})年(\d{1,2})月(\d{1,2})日")
+_YMD_KO = re.compile(r"(?<!\d)(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일")
+
+
+def _cue_pattern(kind: str, *, cjk: bool, latin: bool) -> re.Pattern[str]:
+    words = [word for word, cue in CUES.items() if cue == kind and _is_cjk(word) == cjk and word.isascii() == latin]
+    if not words:
+        return re.compile(r"(?!)")
+    alt = "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
+    if cjk:
+        return re.compile(alt)
+    if latin:
+        return re.compile(rf"(?<![A-Za-z0-9_])(?:{alt})(?![A-Za-z0-9_])", re.IGNORECASE | re.ASCII)
+    return re.compile(rf"(?<!\w)(?:{alt})(?!\w)", re.IGNORECASE)
+
+
+def _is_cjk(text: str) -> bool:
+    return any("\u3040" <= char <= "\u30ff" or "\u4e00" <= char <= "\u9fff" or "\uac00" <= char <= "\ud7af" for char in text)
+
+
+_DEADLINE_LATIN = _cue_pattern("deadline", cjk=False, latin=True)
+_DEADLINE_WORD = _cue_pattern("deadline", cjk=False, latin=False)
+_DEADLINE_CJK = _cue_pattern("deadline", cjk=True, latin=False)
+_MEETING_LATIN = _cue_pattern("meeting", cjk=False, latin=True)
+_MEETING_WORD = _cue_pattern("meeting", cjk=False, latin=False)
+_MEETING_CJK = _cue_pattern("meeting", cjk=True, latin=False)
 
 
 @dataclass(frozen=True)
@@ -295,25 +299,40 @@ def _dates(sample: str, year_hint: int, month_hint: int, day_hint: int) -> list[
             return
         found.append(FoundDate(kind, stamp))
 
+    spans: list[tuple[int, int]] = []
+
+    def take(kind: str, year: int, month: int, day: int, start: int, end: int) -> None:
+        if any(start < right and end > left for left, right in spans):
+            return
+        before = len(found)
+        add(kind, year, month, day)
+        if len(found) != before:
+            spans.append((start, end))
+
     for match in _ISO.finditer(sample):
-        add(_kind(sample, match.start()), int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    for match in _DMY.finditer(sample):
-        add(
-            _kind(sample, match.start()),
-            int(match.group(3)),
-            _MONTHS[match.group(2).lower()[:3]],
-            int(match.group(1)),
-        )
-    for match in _MDY.finditer(sample):
-        add(
-            _kind(sample, match.start()),
-            int(match.group(3)),
-            _MONTHS[match.group(1).lower()[:3]],
-            int(match.group(2)),
-        )
-    for match in _PT.finditer(sample):
-        month_name = match.group(2).lower()
-        add(_kind(sample, match.start()), int(match.group(3)), _MONTHS[month_name], int(match.group(1)))
+        take(_kind(sample, match.start()), int(match.group(1)), int(match.group(2)), int(match.group(3)), match.start(), match.end())
+    for pattern, day_group, month_group, year_group in (
+        (_DE_MONTH, 1, 2, 3),
+        (_DOTTED, 1, 2, 3),
+        (_DMY, 1, 2, 3),
+        (_MDY, 2, 1, 3),
+    ):
+        for match in pattern.finditer(sample):
+            month = _month_number(match.group(month_group))
+            if month is None:
+                continue
+            take(
+                _kind(sample, match.start()),
+                int(match.group(year_group)),
+                month,
+                int(match.group(day_group)),
+                match.start(),
+                match.end(),
+            )
+    for match in _YMD_HAN.finditer(sample):
+        take(_kind(sample, match.start()), int(match.group(1)), int(match.group(2)), int(match.group(3)), match.start(), match.end())
+    for match in _YMD_KO.finditer(sample):
+        take(_kind(sample, match.start()), int(match.group(1)), int(match.group(2)), int(match.group(3)), match.start(), match.end())
     for match in _ATE.finditer(sample):
         month_name = match.group(2)
         year_text = match.group(3)
@@ -325,7 +344,7 @@ def _dates(sample: str, year_hint: int, month_hint: int, day_hint: int) -> list[
             month_name,
             year_text,
         )
-        add("deadline", year, month, day)
+        take("deadline", year, month, day, match.start(), match.end())
     return found
 
 
@@ -343,16 +362,20 @@ def _ate_day(
         if month > 12:
             return year + 1, 1, day
         return year, month, day
-    month = month_hint if month_name is None else _MONTHS.get(month_name.lower(), 0)
+    month = month_hint if month_name is None else (_month_number(month_name) or 0)
     year = year_hint if year_text is None else int(year_text)
     return year, month, day
 
 
+def _month_number(name: str) -> int | None:
+    return MONTHS.get(" ".join(name.casefold().split()))
+
+
 def _kind(sample: str, start: int) -> str:
     window = sample[max(0, start - _CUE) : start]
-    if _DEADLINE_CUE.search(window):
+    if _DEADLINE_LATIN.search(window) or _DEADLINE_WORD.search(window) or _DEADLINE_CJK.search(window):
         return "deadline"
-    if _MEETING_CUE.search(window):
+    if _MEETING_LATIN.search(window) or _MEETING_WORD.search(window) or _MEETING_CJK.search(window):
         return "meeting"
     return "date"
 

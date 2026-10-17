@@ -1,0 +1,635 @@
+"""Localized Takeout labels, the unknown-locale Sent fallback, and time reevaluation."""
+
+import calendar
+import csv
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+from mailcrawl.ingest import import_mbox
+from mailcrawl.mbox import gmail_hex
+from mailcrawl.paths import UsageError
+from mailcrawl.rules import bundled_rules_path
+from mailcrawl.schema import SCHEMA_SQL, USER_VERSION
+from mailcrawl.store import connect, init_account, migrate, repair_takeout
+from mailcrawl.takeout_labels import LABEL_SOURCES, system_id
+
+ROOT = Path(__file__).resolve().parents[1]
+RECEIPT = "Thu Jan 02 10:00:00 +0000 2020"
+HEADER = "Thu, 02 Jan 2020 11:00:00 +0000"
+RECEIPT_STAMP = calendar.timegm((2020, 1, 2, 10, 0, 0))
+HEADER_STAMP = calendar.timegm((2020, 1, 2, 11, 0, 0))
+AS_OF = calendar.timegm((2026, 10, 17, 12, 0, 0))
+RULES = bundled_rules_path()
+
+
+def run_mailcrawl(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["http_proxy"] = "http://127.0.0.1:9"
+    env["https_proxy"] = "http://127.0.0.1:9"
+    env.pop("MAILCRAWL_HOME", None)
+    return subprocess.run(
+        [sys.executable, "-m", "mailcrawl", *args],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _block(number: int, labels: str, sender: str, body: str) -> str:
+    return (
+        f"From {number}@example.com {RECEIPT}\n"
+        f"X-Gmail-Labels: {labels}\n"
+        f"From: {sender}\n"
+        "To: Bao Fixture <bao@example.com>\n"
+        "Subject: synthetic\n"
+        f"Date: {HEADER}\n"
+        f"Message-ID: <m{number}@example.com>\n"
+        "\n"
+        f"{body}\n"
+        "\n"
+    )
+
+
+class TakeoutRepairTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.conn = connect(init_account(self.home, "personal", "ada@example.com"))
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_cited_names_cover_the_requested_languages(self) -> None:
+        self.assertIn("https://support.google.com/mail/answer/90559", LABEL_SOURCES)
+        names = {
+            "Enviado": "SENT",
+            "Enviados": "SENT",
+            "Messages envoyés": "SENT",
+            "Gesendet": "SENT",
+            "Inviati": "SENT",
+            "Verzonden": "SENT",
+            "Wysłane": "SENT",
+            "送信済み": "SENT",
+            "已发邮件": "SENT",
+            "寄件備份": "SENT",
+            "전송됨": "SENT",
+            "отправленные": "SENT",
+            "البريد المرسَل": "SENT",
+            "gönderildi": "SENT",
+            "भेजा गया": "SENT",
+            "Marcado com estrela": "STARRED",
+            "Caixa de entrada": "INBOX",
+            "Postausgang": None,
+            "FooSent": None,
+        }
+        for name, label_id in names.items():
+            self.assertEqual(system_id(name), label_id, name)
+
+    def test_import_maps_pt_es_fr_de_and_japanese_on_an_accepted_block(self) -> None:
+        path = self.home / "langs.mbox"
+        path.write_text(
+            _block(
+                1701,
+                'Enviado,Aberto,"Categoria: Atualizações",Projetos',
+                "Ada Fixture <ada@example.com>",
+                "arquivo",
+            )
+            + _block(
+                1702,
+                "Marcado com estrela,Caixa de entrada,Rascunhos,Importante,Não lida,Lixo,Arquivado",
+                "Bao Fixture <bao@example.com>",
+                "caixa",
+            )
+            + _block(1703, "Enviados,Destacados,Bandeja de entrada", "Ada Fixture <ada@example.com>", "hola")
+            + _block(1704, "Messages envoyés,Boîte de réception", "Ada Fixture <ada@example.com>", "bonjour")
+            + _block(1705, "Gesendet,Posteingang,Papierkorb", "Ada Fixture <ada@example.com>", "hallo")
+            + _block(1706, "送信済み,受信トレイ,未読", "Ada Fixture <ada@example.com>", "こんにちは"),
+            encoding="utf-8",
+        )
+        result = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual(result.n_new, 6)
+        self.assertEqual(result.takeout_sent, "")
+        self.assertEqual(
+            self._labels(1701),
+            ["CATEGORY_UPDATES", "SENT", "mbox:Projetos", "pseudo:opened"],
+        )
+        self.assertEqual(self._row(1701)["is_from_me"], 1)
+        self.assertEqual(self._row(1701)["internal_date"], RECEIPT_STAMP)
+        self.assertEqual(self._row(1701)["date_trusted"], 1)
+        self.assertNotEqual(self._row(1701)["internal_date"], HEADER_STAMP)
+        self.assertEqual(
+            self._labels(1702),
+            ["DRAFT", "IMPORTANT", "INBOX", "STARRED", "TRASH", "UNREAD", "pseudo:archived"],
+        )
+        self.assertEqual(self._row(1702)["is_from_me"], 0)
+        self.assertEqual(self._labels(1703), ["INBOX", "SENT", "STARRED"])
+        self.assertEqual(self._labels(1704), ["INBOX", "SENT"])
+        self.assertEqual(self._labels(1705), ["INBOX", "SENT", "TRASH"])
+        self.assertEqual(self._labels(1706), ["INBOX", "SENT", "UNREAD"])
+        self.assertNotIn("mbox:Aberto", self._kinds())
+        self.assertNotIn("mbox:Enviado", self._kinds())
+
+    def test_a_plain_file_does_not_treat_enviado_as_sent(self) -> None:
+        path = self.home / "plain.mbox"
+        path.write_text(
+            "From bob@example.com Thu Jan 02 10:00:00 +0000 2020\n"
+            "X-Gmail-Labels: Enviado\n"
+            "From: Ada Fixture <ada@example.com>\n"
+            "To: Bao Fixture <bao@example.com>\n"
+            "Subject: plain\n"
+            f"Date: {HEADER}\n"
+            "Message-ID: <plain-enviado@example.com>\n"
+            "\n"
+            "not a takeout block\n",
+            encoding="utf-8",
+        )
+        result = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual((result.n_new, result.n_refused), (1, 0))
+        labels = [
+            row[0]
+            for row in self.conn.execute(
+                "SELECT gmail_label_id FROM labels ORDER BY gmail_label_id"
+            )
+        ]
+        self.assertNotIn("SENT", labels)
+        self.assertNotIn("mbox:Enviado", labels)
+        mine = self.conn.execute("SELECT is_from_me FROM messages").fetchone()
+        self.assertEqual(int(mine[0]), 0)
+
+    def test_unknown_locale_sent_is_recorded_and_a_short_list_is_not(self) -> None:
+        self.assertIsNone(system_id("Postausgang"))
+        long_path = self.home / "long.mbox"
+        parts = []
+        for number in range(1800, 1819):
+            parts.append(_block(number, "Postausgang", "Ada Fixture <ada@example.com>", "out"))
+        parts.append(_block(1819, "Postausgang", "Bao Fixture <bao@example.com>", "out"))
+        long_path.write_text("".join(parts), encoding="utf-8")
+        found = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=long_path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual(found.takeout_sent, "Postausgang")
+        self.assertEqual(self._cursor("takeout_sent"), "Postausgang")
+        self.assertIsNone(self._cursor("owner_flag"))
+        self.assertEqual(self._labels(1819), ["SENT"])
+        self.assertEqual(self._row(1819)["is_from_me"], 1)
+        self.assertEqual(self._row(1800)["is_from_me"], 1)
+        again = repair_takeout(self.conn)
+        self.conn.commit()
+        self.assertEqual(again, "")
+        self.assertEqual(self._cursor("takeout_sent"), "Postausgang")
+
+        short = connect(init_account(self.home, "vcl", "ada@example.com"))
+        try:
+            short_path = self.home / "short.mbox"
+            short_path.write_text(
+                "".join(
+                    _block(number, "Postausgang", "Ada Fixture <ada@example.com>", "out")
+                    for number in range(1900, 1910)
+                ),
+                encoding="utf-8",
+            )
+            missed = import_mbox(
+                short,
+                alias="vcl",
+                mbox_path=short_path,
+                labels_path=None,
+                taxonomy_path=None,
+                account_email="ada@example.com",
+            )
+            self.assertEqual(missed.takeout_sent, "")
+            self.assertEqual(
+                [
+                    row[0]
+                    for row in short.execute(
+                        """
+                        SELECT gmail_label_id FROM message_labels
+                        JOIN messages ON messages.msg_pk = message_labels.msg_pk
+                        WHERE gmail_message_id = ?
+                        """,
+                        (gmail_hex("1900", decimal_only=True),),
+                    )
+                ],
+                ["mbox:Postausgang"],
+            )
+            kept = short.execute(
+                "SELECT value FROM cursors WHERE stream = 'owner_flag'"
+            ).fetchone()
+            self.assertEqual(kept[0], "kept")
+            sent_note = short.execute(
+                "SELECT value FROM cursors WHERE stream = 'takeout_sent'"
+            ).fetchone()
+            self.assertIsNone(sent_note)
+            mines = [int(row[0]) for row in short.execute("SELECT is_from_me FROM messages")]
+            self.assertEqual(mines, [0] * 10)
+        finally:
+            short.close()
+
+    def test_config_label_map_overrides_one_unknown_name(self) -> None:
+        path = self.home / "override.mbox"
+        path.write_text(
+            _block(1601, "FooSent", "Bao Fixture <bao@example.com>", "one"),
+            encoding="utf-8",
+        )
+        with self.assertRaises(UsageError):
+            import_mbox(
+                self.conn,
+                alias="personal",
+                mbox_path=path,
+                labels_path=None,
+                taxonomy_path=None,
+                account_email="ada@example.com",
+                label_map={"FooSent": "NOT_A_LABEL"},
+            )
+        result = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+            label_map={"FooSent": "SENT"},
+        )
+        self.assertEqual(result.takeout_sent, "override:foosent")
+        self.assertEqual(self._labels(1601), ["SENT"])
+        self.assertEqual(self._row(1601)["is_from_me"], 1)
+        self.assertEqual(self._cursor("takeout_sent"), "override:foosent")
+
+    def test_v8_migration_restores_enviado_and_keeps_an_account_with_no_sent(self) -> None:
+        mbox = self.home / "old.mbox"
+        mbox.write_text(
+            _block(1501, "Enviado", "Ada Fixture <ada@example.com>", "old"),
+            encoding="utf-8",
+        )
+        club = self.home / "club.mbox"
+        club.write_text(
+            _block(1502, "Club", "Ada Fixture <ada@example.com>", "club"),
+            encoding="utf-8",
+        )
+        path = self.home / "old.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("PRAGMA user_version = 8")
+            conn.execute(
+                "INSERT INTO accounts(account_id, alias, email_hash, created_at) VALUES (1, 'personal', 'abc', 1)"
+            )
+            conn.execute(
+                "INSERT INTO accounts(account_id, alias, email_hash, created_at) VALUES (2, 'vcl', 'abc', 1)"
+            )
+            conn.execute(
+                "INSERT INTO threads(thread_pk, account_id, gmail_thread_id, msg_count, image_only) VALUES (1, 1, 't1', 1, 0)"
+            )
+            conn.execute(
+                "INSERT INTO threads(thread_pk, account_id, gmail_thread_id, msg_count, image_only) VALUES (2, 2, 't2', 1, 0)"
+            )
+            conn.execute(
+                """
+                INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at)
+                VALUES (1, 'mbox:Enviado', 'Enviado', 'user', 0)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at)
+                VALUES (2, 'mbox:Club', 'Club', 'user', 0)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO messages(
+                  msg_pk, account_id, gmail_message_id, thread_pk, internal_date, is_from_me,
+                  raw_path, raw_sha256, provenance_hash, imported_at
+                ) VALUES (1, 1, 'sent-old', 1, ?, 0, ?, 'a', 'a', 1)
+                """,
+                (HEADER_STAMP, f"mbox:{mbox.resolve()}#0"),
+            )
+            conn.execute(
+                """
+                INSERT INTO messages(
+                  msg_pk, account_id, gmail_message_id, thread_pk, internal_date, is_from_me,
+                  raw_path, raw_sha256, provenance_hash, imported_at
+                ) VALUES (2, 2, 'club-old', 2, ?, 1, ?, 'b', 'b', 1)
+                """,
+                (HEADER_STAMP, f"mbox:{club.resolve()}#0"),
+            )
+            conn.execute(
+                "INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at) VALUES (1, 1, 'mbox:Enviado', 0)"
+            )
+            conn.execute(
+                "INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at) VALUES (2, 2, 'mbox:Club', 0)"
+            )
+            conn.commit()
+            migrate(conn)
+
+            def snapshot():
+                flags = {
+                    str(row[0]): (int(row[1]), int(row[2]), int(row[3]))
+                    for row in conn.execute(
+                        "SELECT gmail_message_id, is_from_me, internal_date, date_trusted FROM messages ORDER BY msg_pk"
+                    )
+                }
+                labels = [
+                    (int(row[0]), str(row[1]))
+                    for row in conn.execute(
+                        "SELECT msg_pk, gmail_label_id FROM message_labels ORDER BY msg_pk, gmail_label_id"
+                    )
+                ]
+                notes = [
+                    (int(row[0]), str(row[1]), str(row[2]))
+                    for row in conn.execute(
+                        "SELECT account_id, stream, value FROM cursors ORDER BY account_id, stream"
+                    )
+                ]
+                version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+                return flags, labels, notes, version
+
+            got = snapshot()
+            self.assertEqual(got[0]["sent-old"], (1, RECEIPT_STAMP, 1))
+            self.assertEqual(got[0]["club-old"], (1, RECEIPT_STAMP, 1))
+            self.assertEqual(got[1], [(1, "SENT"), (2, "mbox:Club")])
+            self.assertEqual(got[2], [(2, "owner_flag", "kept")])
+            self.assertEqual(got[3], USER_VERSION)
+            conn.execute("PRAGMA user_version = 8")
+            conn.commit()
+            migrate(conn)
+            self.assertEqual(snapshot(), got)
+        finally:
+            conn.close()
+
+    def _labels(self, number: int) -> list[str]:
+        return [
+            row[0]
+            for row in self.conn.execute(
+                """
+                SELECT gmail_label_id FROM message_labels
+                JOIN messages ON messages.msg_pk = message_labels.msg_pk
+                WHERE gmail_message_id = ? ORDER BY gmail_label_id
+                """,
+                (gmail_hex(str(number), decimal_only=True),),
+            )
+        ]
+
+    def _row(self, number: int):
+        return self.conn.execute(
+            "SELECT * FROM messages WHERE gmail_message_id = ?",
+            (gmail_hex(str(number), decimal_only=True),),
+        ).fetchone()
+
+    def _kinds(self) -> dict[str, str]:
+        return dict(self.conn.execute("SELECT gmail_label_id, kind FROM labels").fetchall())
+
+    def _cursor(self, stream: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT value FROM cursors WHERE stream = ?",
+            (stream,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row[0])
+
+
+class TimeReevaluateTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.db = init_account(self.home, "personal", "ada@example.com")
+        self.config = self.home / "config.toml"
+        self.config.write_text(
+            '[accounts.personal]\nemail = "ada@example.com"\n',
+            encoding="utf-8",
+        )
+        conn = connect(self.db)
+        try:
+            account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+            when = AS_OF - 100 * 86400
+            rows = (
+                ("rule-thread", "rule", "rule", "rule-4"),
+                ("knn-thread", "knn", "embedding-cluster", "cluster"),
+                ("model-thread", "model", "llm", "local"),
+                ("human-thread", "human", "human", "person"),
+                ("review-thread", "rule", "rule", "rule-0"),
+            )
+            for thread_id, origin, source, detail in rows:
+                conn.execute(
+                    "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (?, ?, 1, 0)",
+                    (account, thread_id),
+                )
+                thread_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                conn.execute(
+                    """
+                    INSERT INTO messages(
+                      account_id, gmail_message_id, thread_pk, internal_date, from_hdr,
+                      subject, body_text, is_from_me, date_trusted, raw_sha256, provenance_hash, imported_at
+                    ) VALUES (?, ?, ?, ?, 'Ada <ada@example.com>', 'synthetic', 'please reply', 1, 1, ?, 'prov', 1)
+                    """,
+                    (account, f"m-{thread_id}", thread_pk, when, f"sha-{thread_id}"),
+                )
+                state = "needs_review" if thread_id == "review-thread" else "reply"
+                conn.execute(
+                    """
+                    INSERT INTO decisions(
+                      thread_pk, next_state, lane, source, origin, source_detail,
+                      rule_id, rules_version, evidence, created_at
+                    ) VALUES (?, ?, 'imbox', ?, ?, ?, '5', 'rules-v4', '[]', 1)
+                    """,
+                    (thread_pk, state, source, origin, detail),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_reevaluate_is_dry_run_until_apply_and_undo_restores_it(self) -> None:
+        bare = run_mailcrawl(
+            self.home,
+            "--json",
+            "--home",
+            str(self.home),
+            "--config",
+            str(self.config),
+            "rules",
+            "--account",
+            "personal",
+            "--rules",
+            str(RULES),
+            "--now",
+            str(AS_OF),
+            "--apply",
+        )
+        self.assertEqual(bare.returncode, 2)
+        missing = run_mailcrawl(
+            self.home,
+            "--json",
+            "--home",
+            str(self.home),
+            "--config",
+            str(self.config),
+            "rules",
+            "--account",
+            "personal",
+            "--rules",
+            str(RULES),
+            "--now",
+            str(AS_OF),
+            "--reevaluate",
+        )
+        self.assertEqual(missing.returncode, 2)
+        csv_path = self.home / "plan.csv"
+        dry = self._rules("--reevaluate", "--csv", str(csv_path))
+        self.assertEqual(dry["applied"], False)
+        self.assertEqual(dry["changed"], 3)
+        self.assertEqual(dry["skipped_human"], 1)
+        self.assertEqual(dry["skipped_review"], 1)
+        self.assertEqual(dry["source_detail"], "time")
+        with csv_path.open(encoding="utf-8", newline="") as handle:
+            plan = list(csv.DictReader(handle))
+        self.assertEqual(
+            set(plan[0].keys()),
+            {
+                "gmail_thread_id",
+                "origin",
+                "state",
+                "lane",
+                "next_state",
+                "next_lane",
+                "changed",
+                "skipped",
+                "reason",
+            },
+        )
+        by_thread = {row["gmail_thread_id"]: row for row in plan}
+        self.assertEqual(by_thread["rule-thread"]["changed"], "1")
+        self.assertEqual(by_thread["rule-thread"]["next_state"], "resolved")
+        self.assertEqual(by_thread["human-thread"]["skipped"], "human")
+        self.assertEqual(by_thread["review-thread"]["skipped"], "needs_review")
+        self.assertEqual(self._current("rule-thread"), ("rule", "reply", "rule-4"))
+        applied = self._rules("--reevaluate", "--apply", "--csv", str(csv_path))
+        self.assertEqual(applied["applied"], True)
+        self.assertEqual(applied["changed"], 3)
+        self.assertEqual(self._current("rule-thread"), ("rule", "resolved", "time"))
+        self.assertEqual(self._current("knn-thread"), ("knn", "resolved", "time"))
+        self.assertEqual(self._current("model-thread"), ("model", "resolved", "time"))
+        self.assertEqual(self._current("human-thread"), ("human", "reply", "person"))
+        self.assertEqual(self._current("review-thread"), ("rule", "needs_review", "rule-0"))
+        undone = run_mailcrawl(
+            self.home,
+            "--json",
+            "--home",
+            str(self.home),
+            "--config",
+            str(self.config),
+            "review",
+            "undo",
+            "--account",
+            "personal",
+            "--source-detail",
+            "time",
+            "--now",
+            str(AS_OF),
+        )
+        self.assertEqual(undone.returncode, 0, undone.stderr)
+        self.assertEqual(self._current("rule-thread"), ("rule", "reply", "rule-4"))
+        self.assertEqual(self._current("knn-thread"), ("knn", "reply", "cluster"))
+        self.assertEqual(self._current("model-thread"), ("model", "reply", "local"))
+        self.assertEqual(self._current("human-thread"), ("human", "reply", "person"))
+
+    def test_dry_run_export_includes_time_columns(self) -> None:
+        export = self.home / "decisions.csv"
+        result = run_mailcrawl(
+            self.home,
+            "--json",
+            "--home",
+            str(self.home),
+            "--config",
+            str(self.config),
+            "dry-run",
+            "--account",
+            "personal",
+            "--rules",
+            str(RULES),
+            "--now",
+            str(AS_OF),
+            "--export-decisions",
+            str(export),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        header = export.read_text(encoding="utf-8").splitlines()[0]
+        for column in (
+            "state",
+            "lane",
+            "last_human",
+            "age_days",
+            "date_trusted",
+            "past_deadline",
+            "reason",
+        ):
+            self.assertIn(column, header.split(","))
+        self.assertNotIn("@", export.read_text(encoding="utf-8"))
+
+    def _rules(self, *extra: str) -> dict:
+        result = run_mailcrawl(
+            self.home,
+            "--json",
+            "--home",
+            str(self.home),
+            "--config",
+            str(self.config),
+            "rules",
+            "--account",
+            "personal",
+            "--rules",
+            str(RULES),
+            "--now",
+            str(AS_OF),
+            *extra,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return json.loads(result.stdout)
+
+    def _current(self, thread_id: str) -> tuple[str, str, str]:
+        conn = sqlite3.connect(self.db)
+        try:
+            row = conn.execute(
+                """
+                SELECT origin, next_state, source_detail FROM decisions
+                JOIN threads ON threads.thread_pk = decisions.thread_pk
+                WHERE gmail_thread_id = ? AND superseded_by IS NULL
+                """,
+                (thread_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return (str(row[0]), str(row[1]), str(row[2]))

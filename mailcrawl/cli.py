@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sqlite3
 import sys
@@ -22,6 +23,7 @@ from mailcrawl.configfile import (
     inference_device,
     local_llm,
     rules_path,
+    takeout_label_map,
     time_policy,
     write_account,
 )
@@ -44,7 +46,7 @@ from mailcrawl.review import (
     undo_decisions,
     undo_document,
 )
-from mailcrawl.rules import apply_rules, load_rules
+from mailcrawl.rules import TIME_DETAIL, apply_rules, load_rules, reevaluate_time
 from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
 from mailcrawl.vectors import embed_threads, knn_account, knn_decide, open_embedder
@@ -159,6 +161,9 @@ def _parser() -> argparse.ArgumentParser:
     rules.add_argument("--account", required=True)
     rules.add_argument("--rules")
     rules.add_argument("--as-of", "--now", dest="now", type=int)
+    rules.add_argument("--reevaluate", action="store_true")
+    rules.add_argument("--apply", action="store_true")
+    rules.add_argument("--csv")
 
     counts = sub.add_parser("stats")
     counts.add_argument("--account", required=True)
@@ -261,7 +266,7 @@ def _import(args: argparse.Namespace) -> int:
     if catalogue is not None:
         load_taxonomy(catalogue)
     db_path = data_dir(args.home) / f"{alias}.db"
-    conn = connect(db_path)
+    conn = connect(db_path, label_map=takeout_label_map(cfg, alias))
     try:
         result: ImportResult
         if args.import_command == "gog-export":
@@ -277,6 +282,7 @@ def _import(args: argparse.Namespace) -> int:
                 conn,
                 alias=alias,
                 mbox_path=Path(args.file),
+                label_map=takeout_label_map(cfg, alias),
                 labels_path=Path(args.labels) if args.labels else None,
                 taxonomy_path=catalogue,
                 account_email=email,
@@ -299,6 +305,7 @@ def _import(args: argparse.Namespace) -> int:
             "n_refused": result.n_refused,
             "n_seen": result.n_seen,
             "ok": True,
+            "takeout_sent": result.takeout_sent,
             "taxonomy_warnings": len(absent),
         },
     )
@@ -319,7 +326,7 @@ def _search(args: argparse.Namespace) -> int:
     jev = None
     if "search-reranker" in enabled_points(flags):
         jev = open_client(args.jev_client)
-    conn = connect(db_path)
+    conn = connect(db_path, label_map=takeout_label_map(config_path(args.config), alias))
     try:
         hits = search_messages(
             conn,
@@ -349,14 +356,41 @@ def _rules(args: argparse.Namespace) -> int:
     db_path = data_dir(args.home) / f"{alias}.db"
     if not db_path.is_file():
         raise UsageError("account is not initialized")
+    if args.apply and not args.reevaluate:
+        raise UsageError("apply needs reevaluate")
     rules_file = _rules_file(args)
     if not rules_file.is_file():
         raise UsageError("rules file is missing")
     config = load_rules(rules_file)
     now = _as_of(args)
     owners, domains, security_senders, test_recipients = _identity(args)
-    conn = connect(db_path)
+    conn = connect(db_path, label_map=takeout_label_map(config_path(args.config), alias))
     try:
+        if args.reevaluate:
+            if not args.csv:
+                raise UsageError("reevaluate needs a csv path")
+            rows = reevaluate_time(
+                conn,
+                now=now,
+                policy=time_policy(config_path(args.config)),
+                apply=bool(args.apply),
+            )
+            _write_reevaluate(Path(args.csv), rows)
+            changed = sum(1 for row in rows if row["changed"] == "1")
+            _emit(
+                args,
+                {
+                    "applied": bool(args.apply),
+                    "changed": changed,
+                    "csv": str(args.csv),
+                    "ok": True,
+                    "skipped_human": sum(1 for row in rows if row["skipped"] == "human"),
+                    "skipped_review": sum(1 for row in rows if row["skipped"] == "needs_review"),
+                    "source_detail": TIME_DETAIL,
+                    "unchanged": sum(1 for row in rows if row["changed"] == "0" and not row["skipped"]),
+                },
+            )
+            return 0
         report = apply_rules(
             conn,
             now=now,
@@ -676,7 +710,25 @@ def _account_db(args: argparse.Namespace) -> sqlite3.Connection:
     db_path = data_dir(args.home) / f"{alias}.db"
     if not db_path.is_file():
         raise UsageError("account is not initialized")
-    return connect(db_path)
+    return connect(db_path, label_map=takeout_label_map(config_path(args.config), alias))
+
+
+def _write_reevaluate(path: Path, rows: list[dict[str, str]]) -> None:
+    fields = (
+        "gmail_thread_id",
+        "origin",
+        "state",
+        "lane",
+        "next_state",
+        "next_lane",
+        "changed",
+        "skipped",
+        "reason",
+    )
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _init_aliases(args: argparse.Namespace) -> list[str]:

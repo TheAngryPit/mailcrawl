@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -106,6 +107,33 @@ class TimeFactsTest(unittest.TestCase):
             facts = thread_time_facts(conn, 1, AS_OF)
         self.assertEqual(facts.found, ())
         self.assertLess(len(late[:TEXT_CAP]), len(late))
+
+    def test_multilingual_cues_and_the_new_patterns_finish(self) -> None:
+        cases = (
+            (11, "plazo 15 de marzo de 2025", "deadline", (2025, 3, 15)),
+            (12, "échéance 15 mars 2025", "deadline", (2025, 3, 15)),
+            (13, "frist 15. märz 2020", "deadline", (2020, 3, 15)),
+            (14, "期限 2025年3月15日", "deadline", (2025, 3, 15)),
+            (15, "会議 2025年3月15日", "meeting", (2025, 3, 15)),
+            (16, "plazox 15 de marzo de 2025", "date", (2025, 3, 15)),
+        )
+        with self._db() as conn:
+            for thread_pk, body, kind, ymd in cases:
+                self._message(conn, thread_pk, "other@example.com", 0, _stamp(2026, 10, 1), "Form", body)
+                facts = thread_time_facts(conn, thread_pk, AS_OF)
+                self.assertEqual(facts.found[0].kind, kind, body)
+                self.assertEqual(facts.found[0].at, calendar.timegm((*ymd, 0, 0, 0)), body)
+            started = time.perf_counter()
+            for thread_pk, body in (
+                (21, "1 de " * 2000),
+                (22, "a" * TEXT_CAP),
+                (23, "期限" * 2000),
+                (24, "1. " * 2000),
+                (25, "2025年" * 500),
+            ):
+                self._message(conn, thread_pk, "other@example.com", 0, _stamp(2026, 10, 1), "Form", body)
+                thread_time_facts(conn, thread_pk, AS_OF)
+            self.assertLess(time.perf_counter() - started, 1.0)
 
     def test_four_closed_threads_move_and_a_fresh_request_stays(self) -> None:
         cases = (
@@ -1144,7 +1172,7 @@ class TimeFactsTest(unittest.TestCase):
                     }
 
                 got = flags()
-                self.assertEqual(got["header"], (0, header_stamp, 0))
+                self.assertEqual(got["header"], (0, receipt_stamp, 1))
                 self.assertEqual(got["receipt"], (0, receipt_stamp, 1))
                 self.assertEqual(got["missing"], (0, header_stamp, 0))
                 self.assertEqual(got["eml-header"], (0, header_stamp, 0))
@@ -1162,7 +1190,12 @@ class TimeFactsTest(unittest.TestCase):
                         """
                     )
                 ]
-                self.assertEqual(after, kept)
+                expected = []
+                for message_id, mine, stamp, raw_path in kept:
+                    if message_id == "header":
+                        stamp = receipt_stamp
+                    expected.append((message_id, mine, stamp, raw_path))
+                self.assertEqual(after, expected)
             finally:
                 conn.close()
 
