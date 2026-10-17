@@ -415,16 +415,26 @@ def checked_label_map(label_map: dict[str, str] | None) -> dict[str, str]:
     for name, label_id in label_map.items():
         if not isinstance(name, str) or not isinstance(label_id, str) or label_id not in allowed:
             raise UsageError("takeout label_map needs a known system id")
-        cleaned[label_key(name)] = label_id
+        key = label_key(name)
+        if key in cleaned:
+            raise UsageError("takeout label_map repeats a name")
+        cleaned[key] = label_id
     return cleaned
 
 
 def resolved_label(name: str, mapping: dict[str, str]) -> str | None:
-    """Config wins, then a known system name. A Sent guess is never returned."""
+    """A non-SENT config entry wins, then a known system name.
+
+    A label_map SENT target on an unknown name stays unmapped here. Repair
+    grants that id only when From matches the account or an owner alias.
+    """
     override = mapping.get(label_key(name))
-    if override is not None:
+    if override is not None and override != "SENT":
         return override
-    return system_id(name)
+    system = system_id(name)
+    if system is not None:
+        return system
+    return None
 
 
 def system_id(name: str) -> str | None:

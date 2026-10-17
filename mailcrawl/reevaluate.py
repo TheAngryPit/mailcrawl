@@ -113,7 +113,8 @@ def _supersede_time(conn: sqlite3.Connection, current: sqlite3.Row, draft: Decis
     review_date = draft.review_date
     if draft.next_state == "waiting" and review_date is None:
         review_date = now
-    stored = replace(draft, source_detail=TIME_DETAIL, review_date=review_date)
+    rule_id = "time" if draft.rule_id == "harness" else draft.rule_id
+    stored = replace(draft, source_detail=TIME_DETAIL, review_date=review_date, rule_id=rule_id)
     supersede_current(
         conn,
         int(current["decision_id"]),

@@ -295,6 +295,7 @@ def _import(args: argparse.Namespace) -> int:
                 labels_path=Path(args.labels) if args.labels else None,
                 taxonomy_path=catalogue,
                 account_email=email,
+                owners=account_identity(cfg, alias)[0],
             )
         else:
             raise UsageError("unknown import command")
@@ -315,7 +316,9 @@ def _import(args: argparse.Namespace) -> int:
             "n_seen": result.n_seen,
             "ok": True,
             "takeout_sent": result.takeout_sent,
+            "takeout_skipped": _skipped_report(result.takeout_skipped),
             "takeout_unmapped": list(result.takeout_unmapped),
+            "takeout_warnings": list(result.takeout_warnings),
             "taxonomy_warnings": len(absent),
         },
     )
@@ -326,17 +329,32 @@ def _takeout(args: argparse.Namespace) -> int:
     if args.takeout_command != "status":
         raise UsageError("unknown takeout command")
     alias = canonical_alias(args.account)
+    cfg = config_path(args.config)
     conn = _account_db(args)
     try:
-        sent, unmapped = takeout_status(conn, takeout_label_map(config_path(args.config), alias))
+        report = takeout_status(
+            conn,
+            takeout_label_map(cfg, alias),
+            owners=account_identity(cfg, alias)[0],
+        )
     finally:
         conn.close()
     _emit(
         args,
-        {"ok": True, "takeout_sent": sent, "takeout_unmapped": list(unmapped)},
-        text=sent or "none",
+        {
+            "ok": True,
+            "takeout_sent": report.sent,
+            "takeout_skipped": _skipped_report(report.skipped),
+            "takeout_unmapped": list(report.unmapped),
+            "takeout_warnings": list(report.warnings),
+        },
+        text=report.sent or "none",
     )
     return 0
+
+
+def _skipped_report(skipped: tuple[tuple[str, int], ...]) -> list[dict[str, object]]:
+    return [{"count": count, "label": label} for label, count in skipped]
 
 
 def _search(args: argparse.Namespace) -> int:
