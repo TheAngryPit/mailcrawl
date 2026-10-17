@@ -12,7 +12,7 @@ import unittest
 import zlib
 from unittest.mock import patch
 from contextlib import redirect_stderr, redirect_stdout
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 
 from mailcrawl.cli import _embedder, _parser, main
@@ -28,7 +28,7 @@ from mailcrawl.inference import BoundaryError, enter_model, invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.store import connect, index_message, init_account
 from mailcrawl.ingest import import_mbox
-from mailcrawl.threads import dimension_skip_reason, embeddable_image, image_gate, image_size
+from mailcrawl.threads import dimension_skip_reason, embeddable_image, image_gate, opened_limit_reason
 from mailcrawl.vectors import (
     LOCAL_VERIFY,
     CLASSIFICATION_PREFIX,
@@ -896,15 +896,21 @@ class FlatEmbedTest(unittest.TestCase):
             conn = connect(Path(tmp) / "personal.db")
             try:
                 ids = _seed(conn)
-                gif = b"GIF89a" + struct.pack("<HH", 1, 1) + b"\x00" * 16
+                gif = _still_gif(1, 1)
                 pixel = Path(tmp) / "pixel.gif"
                 pixel.write_bytes(gif)
                 wide = Path(tmp) / "scan.png"
                 wide.write_bytes(_solid_png(32, 32))
                 narrow = Path(tmp) / "narrow.png"
                 narrow.write_bytes(_solid_png(16, 16))
-                self.assertEqual(image_size(gif), (1, 1))
-                self.assertEqual(image_size(wide.read_bytes()), (32, 32))
+                self.assertEqual(
+                    image_gate("image/gif", 0, len(gif), gif),
+                    (False, "tracking pixel 1x1"),
+                )
+                self.assertEqual(
+                    image_gate("image/png", 0, wide.stat().st_size, wide.read_bytes()),
+                    (True, None),
+                )
                 self.assertFalse(embeddable_image("image/gif", 0, len(gif), 1, 1))
                 self.assertEqual(dimension_skip_reason(1, 1), "tracking pixel 1x1")
                 self.assertEqual(dimension_skip_reason(16, 16), "side 16x16 below 32")
@@ -926,7 +932,7 @@ class FlatEmbedTest(unittest.TestCase):
                         return super().embed(texts)
 
                     def embed_images(self, images: list[bytes]) -> list[list[float]]:
-                        if images and images[0].startswith(b"\x89PNG") and image_size(images[0]) == (32, 32):
+                        if images and images[0] == wide.read_bytes():
                             raise RuntimeError("too many values to unpack")
                         return super().embed_images(images)
 
@@ -1066,69 +1072,86 @@ class FlatEmbedTest(unittest.TestCase):
     def test_oversized_and_unknown_images_are_skipped_before_decode(self) -> None:
         huge_png = _png_header(12000, 12000)
         huge_gif = b"GIF89a" + struct.pack("<HH", 12000, 12000)
-        wide_png = _png_header(5000, 6000)
+        wide_png = _png_stub(5000, 6000)
         unknown = b"not-an-image"
         small = _solid_png(32, 32)
         self.assertEqual(len(huge_png), 33)
-        self.assertEqual(image_size(huge_png), (12000, 12000))
-        self.assertEqual(image_size(huge_gif), (12000, 12000))
         self.assertEqual(
             image_gate("image/png", 0, len(huge_png), huge_png),
-            (False, "side 12000x12000 above 8192"),
+            (False, "image size is unknown"),
         )
         self.assertEqual(
             image_gate("image/gif", 0, len(huge_gif), huge_gif),
-            (False, "side 12000x12000 above 8192"),
+            (False, "image size is unknown"),
         )
-        self.assertEqual(
-            image_gate("image/png", 0, len(wide_png), wide_png),
-            (False, "pixels 5000x6000 above 25000000"),
-        )
+        kept, reason = image_gate("image/png", 0, len(wide_png), wide_png)
+        self.assertEqual(kept, False)
+        self.assertIn("decompression bomb", reason)
         self.assertEqual(
             image_gate("image/webp", 0, len(unknown), unknown),
             (False, "image size is unknown"),
         )
         self.assertEqual(image_gate("image/png", 0, len(small), small), (True, None))
+        self.assertEqual(
+            dimension_skip_reason(5000, 6000),
+            "pixels 5000x6000 above 25000000",
+        )
         self.assertIsNone(dimension_skip_reason(8192, 3051))
         self.assertEqual(
             dimension_skip_reason(8192, 3052),
             "pixels 8192x3052 above 25000000",
         )
-        if importlib.util.find_spec("PIL") is not None:
-            with patch("PIL.Image.open", side_effect=AssertionError("decoded")) as opened:
-                self.assertEqual(
-                    image_gate("image/png", 0, len(huge_png), huge_png),
-                    (False, "side 12000x12000 above 8192"),
-                )
-                self.assertEqual(
-                    image_gate("image/gif", 0, len(huge_gif), huge_gif),
-                    (False, "side 12000x12000 above 8192"),
-                )
-            self.assertEqual(opened.call_count, 0)
+        fake = _chunk(b"fAKE", struct.pack(">II", 64, 64))
+        lying_png = _png_stub(20000, 1000, extra=fake)
+        self.assertEqual(
+            image_gate("image/png", 0, len(lying_png), lying_png),
+            (False, "side 20000x1000 above 8192"),
+        )
+        later_frame = _gif_later_frame((64, 64), (6000, 6000))
+        kept, reason = image_gate("image/gif", 0, len(later_frame), later_frame)
+        self.assertEqual(kept, False)
+        self.assertIn("decompression bomb", reason)
+        under_cap = _gif_later_frame((64, 64), (4000, 4000))
+        self.assertEqual(
+            image_gate("image/gif", 0, len(under_cap), under_cap),
+            (False, "frame 4000x4000 above screen 64x64"),
+        )
+        self.assertEqual(image_gate("image/gif", 0, len(_still_gif(64, 64)), _still_gif(64, 64)), (True, None))
+        loads: list[tuple[int, int]] = []
+        real_open = __import__("PIL.Image", fromlist=["Image"]).open
+
+        def open_spy(handle, *args, **kwargs):
+            picture = real_open(handle, *args, **kwargs)
+            real_load = picture.load
+
+            def load_spy(*load_args, **load_kwargs):
+                loads.append((int(picture.size[0]), int(picture.size[1])))
+                return real_load(*load_args, **load_kwargs)
+
+            picture.load = load_spy
+            return picture
+
+        with patch("PIL.Image.open", open_spy):
+            self.assertEqual(
+                image_gate("image/png", 0, len(lying_png), lying_png),
+                (False, "side 20000x1000 above 8192"),
+            )
+            self.assertEqual(
+                image_gate("image/gif", 0, len(under_cap), under_cap),
+                (False, "frame 4000x4000 above screen 64x64"),
+            )
             bmp = _bmp_header(32, 32)
             bomb = _bmp_header(6000, 5000)
-            self.assertIsNone(image_size(bmp))
-            self.assertIsNone(image_size(bomb))
-            loads = {"count": 0}
-            real_open = __import__("PIL.Image", fromlist=["Image"]).open
-
-            def open_spy(handle, *args, **kwargs):
-                picture = real_open(handle, *args, **kwargs)
-                real_load = picture.load
-
-                def load_spy(*load_args, **load_kwargs):
-                    loads["count"] += 1
-                    return real_load(*load_args, **load_kwargs)
-
-                picture.load = load_spy
-                return picture
-
-            with patch("PIL.Image.open", open_spy):
-                self.assertEqual(image_gate("image/webp", 0, len(bmp), bmp), (True, None))
-                kept, reason = image_gate("image/tiff", 0, len(bomb), bomb)
-            self.assertEqual(kept, False)
-            self.assertIn("decompression bomb", reason)
-            self.assertEqual(loads["count"], 0)
+            self.assertEqual(image_gate("image/webp", 0, len(bmp), bmp), (True, None))
+            kept, reason = image_gate("image/tiff", 0, len(bomb), bomb)
+            picture = real_open(BytesIO(lying_png))
+            try:
+                self.assertEqual(opened_limit_reason(picture), "side 20000x1000 above 8192")
+            finally:
+                picture.close()
+        self.assertEqual(kept, False)
+        self.assertIn("decompression bomb", reason)
+        self.assertEqual(loads, [(64, 64)])
 
     @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
     def test_embed_skips_a_bomb_and_keeps_a_normal_image(self) -> None:
@@ -1140,7 +1163,13 @@ class FlatEmbedTest(unittest.TestCase):
                 files = {
                     "huge.png": (_png_header(12000, 12000), "image/png"),
                     "huge.gif": (b"GIF89a" + struct.pack("<HH", 12000, 12000), "image/gif"),
-                    "wide.png": (_png_header(5000, 6000), "image/png"),
+                    "wide.png": (_png_stub(5000, 6000), "image/png"),
+                    "lying.png": (
+                        _png_stub(20000, 1000, extra=_chunk(b"fAKE", struct.pack(">II", 64, 64))),
+                        "image/png",
+                    ),
+                    "frame.gif": (_gif_later_frame((64, 64), (6000, 6000)), "image/gif"),
+                    "tile.gif": (_gif_later_frame((64, 64), (4000, 4000)), "image/gif"),
                     "unknown.webp": (b"not-an-image", "image/webp"),
                     "scan.png": (_solid_png(32, 32), "image/png"),
                 }
@@ -1173,14 +1202,18 @@ class FlatEmbedTest(unittest.TestCase):
                 with redirect_stderr(err):
                     self.assertEqual(embed_threads(conn, embedder, {"embeddings": True}), 5)
                 log = err.getvalue()
-                self.assertIn("side 12000x12000 above 8192", log)
-                self.assertIn("pixels 5000x6000 above 25000000", log)
                 self.assertIn("image size is unknown", log)
+                self.assertIn("decompression bomb", log)
+                self.assertIn("side 20000x1000 above 8192", log)
+                self.assertIn("frame 4000x4000 above screen 64x64", log)
                 self.assertIn(files["scan.png"][0], embedder.seen)
                 self.assertNotIn(files["huge.png"][0], embedder.seen)
                 self.assertNotIn(files["huge.gif"][0], embedder.seen)
                 self.assertNotIn(files["wide.png"][0], embedder.seen)
                 self.assertNotIn(files["unknown.webp"][0], embedder.seen)
+                self.assertNotIn(files["lying.png"][0], embedder.seen)
+                self.assertNotIn(files["frame.gif"][0], embedder.seen)
+                self.assertNotIn(files["tile.gif"][0], embedder.seen)
                 if "bomb.bmp" in files:
                     self.assertIn("decompression bomb", log)
                     self.assertIn(files["scan.bmp"][0], embedder.seen)
@@ -1286,13 +1319,62 @@ class FlatEmbedTest(unittest.TestCase):
                 conn.close()
 
 
-def _png_header(width: int, height: int) -> bytes:
-    def chunk(tag: bytes, data: bytes) -> bytes:
-        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
-        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+def _chunk(tag: bytes, data: bytes) -> bytes:
+    crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
 
+
+def _png_header(width: int, height: int) -> bytes:
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr)
+
+
+def _png_stub(width: int, height: int, extra: bytes = b"") -> bytes:
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + extra
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", zlib.compress(b"\x00"))
+        + _chunk(b"IEND", b"")
+    )
+
+
+def _still_gif(width: int, height: int) -> bytes:
+    image = __import__("PIL.Image", fromlist=["Image"]).new("P", (width, height))
+    buffer = BytesIO()
+    image.save(buffer, format="GIF")
+    return buffer.getvalue()
+
+
+def _gif_later_frame(screen: tuple[int, int], frame: tuple[int, int]) -> bytes:
+    image_mod = __import__("PIL.Image", fromlist=["Image"])
+    first = image_mod.new("P", screen, 0)
+    second = image_mod.new("P", screen, 1)
+    palette = [0, 0, 0, 255, 0, 0] + [0] * (256 * 3 - 6)
+    first.putpalette(palette)
+    second.putpalette(palette)
+    buffer = BytesIO()
+    first.save(
+        buffer,
+        format="GIF",
+        save_all=True,
+        append_images=[second],
+        duration=50,
+        loop=0,
+        disposal=2,
+    )
+    raw = bytearray(buffer.getvalue())
+    positions: list[int] = []
+    start = 0
+    while True:
+        found = raw.find(b"\x2c", start)
+        if found < 0:
+            break
+        positions.append(found)
+        start = found + 1
+    raw[positions[1] + 5 : positions[1] + 9] = struct.pack("<HH", frame[0], frame[1])
+    return bytes(raw)
 
 
 def _bmp_header(width: int, height: int) -> bytes:

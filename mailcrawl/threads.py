@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import sqlite3
-import struct
 import warnings
 from contextlib import contextmanager
 
@@ -89,36 +88,71 @@ def image_gate(
     size_bytes: int | None,
     blob: bytes,
 ) -> tuple[bool, str | None]:
-    width, height, probe = _image_dimensions(blob)
-    if not embeddable_image(mime_type, is_inline, size_bytes, width, height):
-        return False, dimension_skip_reason(width, height)
-    if width is None or height is None:
-        return False, probe or "image size is unknown"
+    if not embeddable_image(mime_type, is_inline, size_bytes, None, None):
+        return False, None
+    measured = _measure(blob)
+    if isinstance(measured, str):
+        return False, measured
+    reason = dimension_skip_reason(measured[0], measured[1])
+    if reason:
+        return False, reason
     return True, None
 
 
-def _image_dimensions(blob: bytes) -> tuple[int | None, int | None, str | None]:
-    parsed = image_size(blob)
-    if parsed is not None:
-        return parsed[0], parsed[1], None
-    size, reason = _pil_header_size(blob)
-    if size is None:
-        return None, None, reason or "image size is unknown"
-    return size[0], size[1], None
+def opened_limit_reason(picture) -> str | None:
+    frames = int(getattr(picture, "n_frames", 1) or 1)
+    canvas = (int(picture.size[0]), int(picture.size[1]))
+    widest, tallest = canvas
+    passed = False
+    try:
+        for index in range(frames):
+            if index:
+                picture.seek(index)
+            current = (int(picture.size[0]), int(picture.size[1]))
+            boxes = [current]
+            for tile in picture.tile or ():
+                box = tile[1]
+                if len(box) != 4:
+                    continue
+                boxes.append((int(box[2] - box[0]), int(box[3] - box[1])))
+            for width, height in boxes:
+                if width > canvas[0] or height > canvas[1]:
+                    return (
+                        f"frame {width}x{height} above screen {canvas[0]}x{canvas[1]}"
+                    )
+                widest = max(widest, width)
+                tallest = max(tallest, height)
+                reason = dimension_skip_reason(widest, tallest)
+                if reason:
+                    return reason
+        passed = True
+        return dimension_skip_reason(widest, tallest)
+    finally:
+        if passed and frames > 1:
+            picture.seek(0)
 
 
-def _pil_header_size(blob: bytes) -> tuple[tuple[int, int] | None, str | None]:
+def _measure(blob: bytes) -> tuple[int, int] | str:
     with pillow_limits() as image_mod:
         if image_mod is None:
-            return None, "image size is unknown"
+            return "image size is unknown"
         try:
             with image_mod.open(io.BytesIO(blob)) as picture:
-                return (int(picture.size[0]), int(picture.size[1])), None
-        except (image_mod.DecompressionBombError, image_mod.DecompressionBombWarning) as exc:
-            text = str(exc).splitlines()[0][:200] if str(exc) else "decompression bomb"
-            return None, text or "decompression bomb"
-        except Exception:
-            return None, "image size is unknown"
+                reason = opened_limit_reason(picture)
+                if reason:
+                    return reason
+                return (int(picture.size[0]), int(picture.size[1]))
+        except Exception as exc:
+            return _open_failure(exc)
+
+
+def _open_failure(exc: BaseException) -> str:
+    text = str(exc).splitlines()[0][:200] if str(exc) else ""
+    if type(exc).__name__ in ("DecompressionBombError", "DecompressionBombWarning"):
+        return text or "decompression bomb"
+    if "decompression bomb" in text.lower():
+        return text
+    return "image size is unknown"
 
 
 @contextmanager
@@ -132,43 +166,6 @@ def pillow_limits():
     with warnings.catch_warnings():
         warnings.simplefilter("error", Image.DecompressionBombWarning)
         yield Image
-
-
-def image_size(blob: bytes) -> tuple[int, int] | None:
-    if len(blob) >= 10 and blob[:6] in (b"GIF87a", b"GIF89a"):
-        return struct.unpack_from("<HH", blob, 6)
-    if len(blob) >= 24 and blob.startswith(b"\x89PNG\r\n\x1a\n"):
-        return struct.unpack_from(">II", blob, 16)
-    if blob.startswith(b"\xff\xd8"):
-        return _jpeg_size(blob)
-    return None
-
-
-def _jpeg_size(blob: bytes) -> tuple[int, int] | None:
-    index = 2
-    length = len(blob)
-    while index + 8 < length:
-        if blob[index] != 0xFF:
-            return None
-        while index < length and blob[index] == 0xFF:
-            index += 1
-        if index >= length:
-            return None
-        marker = blob[index]
-        index += 1
-        if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
-            continue
-        if index + 2 > length:
-            return None
-        segment = int.from_bytes(blob[index : index + 2], "big")
-        if segment < 2:
-            return None
-        if marker in (0xC0, 0xC1, 0xC2) and index + 7 <= length:
-            height = int.from_bytes(blob[index + 3 : index + 5], "big")
-            width = int.from_bytes(blob[index + 5 : index + 7], "big")
-            return width, height
-        index += segment
-    return None
 
 
 def mark_image_only(conn: sqlite3.Connection, account_id: int | None = None) -> None:

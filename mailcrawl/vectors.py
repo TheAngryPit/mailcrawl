@@ -24,7 +24,7 @@ from mailcrawl.decisions import (
 )
 from mailcrawl.inference import BoundaryError, enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
-from mailcrawl.threads import image_gate, pillow_limits
+from mailcrawl.threads import image_gate, opened_limit_reason, pillow_limits
 
 NATIVE_DIM = 768
 CLASSIFICATION_PREFIX = "task: classification | query: "
@@ -280,6 +280,9 @@ class MlxEmbedder:
                     raise ImportError("Pillow is not installed")
                 picture = image_mod.open(io.BytesIO(blob))
                 try:
+                    reason = opened_limit_reason(picture)
+                    if reason:
+                        raise RuntimeError(reason)
                     picture.load()
                     inputs = processor(images=[picture], return_tensors="np")
                     embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
