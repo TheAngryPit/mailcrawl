@@ -74,6 +74,7 @@ class TimeFactsTest(unittest.TestCase):
             "import importlib\nimportlib.import_module('time')\n",
             "from importlib import import_module\nimport_module('time')\n",
             "from importlib import import_module as load\nload('time')\n",
+            "from importlib import import_module\nimport_module('datetime').datetime.now()\n",
             "x = \"SELECT datetime('now')\"\n",
             "x = \"unixepoch('now')\"\n",
             "x = 'CURRENT_TIMESTAMP'\n",
@@ -942,6 +943,40 @@ class TimeFactsTest(unittest.TestCase):
                         self.assertNotEqual(row["gmail_thread_id"], planted, name)
                 finally:
                     conn.close()
+
+    def test_plain_mbox_ignores_a_leading_gmail_message_id(self) -> None:
+        planted = "186cc6acd4b0004d"
+        rfc822 = "rfc822:9b326deee1f214baee80e9e2bff76764e04fdf0760e1c25eac463bc094cba24c"
+        text = (
+            "From bob@client.com Wed Oct 15 10:00:00 2026\n"
+            "X-GM-MSGID: 1760000000000000077\n"
+            "From: Bob <bob@client.com>\n"
+            "To: Ada <ada@example.com>\n"
+            "Subject: Contrato\n"
+            "Date: Wed, 15 Oct 2026 10:00:00 +0000\n"
+            "Message-ID: <plain-msgid@client.com>\n"
+            "\nPlease reply with the signed contract today.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            path = home / "x.mbox"
+            path.write_text(text, encoding="utf-8")
+            conn = connect(init_account(home, "personal", "ada@example.com"))
+            try:
+                import_mbox(
+                    conn,
+                    alias="personal",
+                    mbox_path=path,
+                    labels_path=None,
+                    taxonomy_path=None,
+                    account_email="ada@example.com",
+                )
+                row = conn.execute("SELECT gmail_message_id, is_from_me FROM messages").fetchone()
+                self.assertEqual(row["gmail_message_id"], rfc822)
+                self.assertNotEqual(row["gmail_message_id"], planted)
+                self.assertEqual(int(row["is_from_me"]), 0)
+            finally:
+                conn.close()
 
     def test_v7_gog_header_only_date_is_untrusted(self) -> None:
         header = "Thu, 02 Jan 2020 10:00:00 +0000"
