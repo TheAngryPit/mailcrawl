@@ -3,21 +3,31 @@
 import importlib.util
 import json
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
+import zlib
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 
 from mailcrawl.cli import _embedder, _parser, main
-from mailcrawl.configfile import embed_limits, embedder_name, inference_config, write_account
+from mailcrawl.configfile import (
+    embed_limits,
+    embedder_name,
+    inference_config,
+    inference_device,
+    write_account,
+)
 from mailcrawl.decisions import DecisionDraft, decide_once
-from mailcrawl.inference import BoundaryError, invoke
+from mailcrawl.inference import BoundaryError, enter_model, invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.store import connect, index_message, init_account
 from mailcrawl.ingest import import_mbox
+from mailcrawl.threads import dimension_skip_reason, embeddable_image, image_size
 from mailcrawl.vectors import (
     LOCAL_VERIFY,
     CLASSIFICATION_PREFIX,
@@ -26,7 +36,11 @@ from mailcrawl.vectors import (
     FakeEmbedder,
     GemmaEmbedder,
     ScriptedEmbedder,
+    _load_gemma,
+    _resolve_device,
+    bounded_text_rows,
     embed_threads,
+    knn_account,
     knn_decide,
     open_embedder,
     require_vec,
@@ -37,6 +51,16 @@ from mailcrawl.search import search_messages
 
 def _sqlite_vec_installed() -> bool:
     return importlib.util.find_spec("sqlite_vec") is not None
+
+
+def _solid_png(width: int, height: int) -> bytes:
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    raw = b"".join(b"\x00" + (b"\x10\x20\x30" * width) for _ in range(height))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
 
 
 class CountingEmbedder:
@@ -131,7 +155,9 @@ class VectorSearchTest(unittest.TestCase):
                 embedder = CountingEmbedder(ScriptedEmbedder())
                 flags = {"embeddings": True, "search-embedding": True}
                 self.assertEqual(embed_threads(conn, embedder, flags), 5)
-                self.assertEqual(embed_threads(conn, embedder, flags), 5)
+                stored_calls = embedder.calls
+                self.assertEqual(embed_threads(conn, embedder, flags), 0)
+                self.assertEqual(embedder.calls, stored_calls)
                 self.assertEqual(conn.execute("SELECT count(*) FROM vec_search").fetchone()[0], 5)
                 self.assertEqual(conn.execute("SELECT count(*) FROM vec_classification").fetchone()[0], 5)
                 prefix, dim = conn.execute(
@@ -277,11 +303,8 @@ class VectorSearchTest(unittest.TestCase):
 
     @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
     def test_image_only_thread_copies_a_fake_neighbour(self) -> None:
-        png = bytes.fromhex(
-            "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
-            "0000000c4944415408d763f8cfc000000301010018dd8db40000000049454e44ae426082"
-        )
-        encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAMBAQAY3Y20AAAAAElFTkSuQmCC"
+        png = _solid_png(32, 32)
+        encoded = __import__("base64").b64encode(png).decode("ascii")
         mbox = f"""From 1768000000000000401@example.com Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
@@ -453,7 +476,7 @@ Content-Transfer-Encoding: base64
                     evidence,
                     [{"distance": 0.0, "neighbour_thread_pk": threads["Image reviewed"]}],
                 )
-                self.assertEqual(embed_threads(conn, FakeEmbedder(), flags_on), 4)
+                self.assertEqual(embed_threads(conn, FakeEmbedder(), flags_on), 0)
                 self.assertEqual(conn.execute("SELECT count(*) FROM vec_image").fetchone()[0], 2)
             finally:
                 conn.close()
@@ -677,12 +700,21 @@ class BoundTest(unittest.TestCase):
                 body = " ".join(f"w{i:02d}" for i in range(30))
                 conn.execute("UPDATE messages SET body_text = ?", (body,))
                 conn.commit()
-                embedder = FakeEmbedder()
+                class Remember(FakeEmbedder):
+                    def __init__(self) -> None:
+                        self.all: list[list[str]] = []
+
+                    def embed(self, texts: list[str]) -> list[list[float]]:
+                        rows = super().embed(texts)
+                        self.all.extend(self.batches)
+                        return rows
+
+                embedder = Remember()
                 embedder.batch_size = 4
                 embedder.max_tokens = 8
                 self.assertEqual(embed_threads(conn, embedder, {"embeddings": True}), 5)
-                self.assertEqual([len(chunk) for chunk in embedder.batches], [4, 4, 2])
-                for chunk in embedder.batches:
+                self.assertEqual([len(chunk) for chunk in embedder.all], [2, 2, 2, 2, 2])
+                for chunk in embedder.all:
                     for text in chunk:
                         self.assertLessEqual(len(text.split()), 8)
                         self.assertLessEqual(len(text), 32)
@@ -736,3 +768,296 @@ class BoundTest(unittest.TestCase):
             with self.assertRaises(UsageError) as caught:
                 embed_limits(path)
             self.assertEqual(str(caught.exception), "batch_size needs a positive count")
+
+
+class FlatEmbedTest(unittest.TestCase):
+    def test_allocations_stay_flat_across_items(self) -> None:
+        class AllocEmbedder(FakeEmbedder):
+            def __init__(self) -> None:
+                self.live = 0
+                self.high = 0
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                enter_model()
+                parent = FakeEmbedder()
+
+                def encode(chunk: list[str]) -> list[list[float]]:
+                    self.live += len(chunk)
+                    self.high = max(self.high, self.live)
+                    return parent.embed(chunk)
+
+                return bounded_text_rows(self, texts, encode)
+
+            def release_batch(self) -> None:
+                self.live = 0
+
+        embedder = AllocEmbedder()
+        embedder.batch_size = 1
+        texts = [f"synthetic item {index}" for index in range(64)]
+        rows = invoke("embeddings", lambda: embedder.embed(texts), {"embeddings": True})
+        self.assertEqual(len(rows), 64)
+        self.assertEqual(embedder.high, 1)
+        self.assertEqual(embedder.live, 0)
+
+    def test_gemma_encode_uses_inference_mode_and_empties_the_cache(self) -> None:
+        events: list[str] = []
+        torch = types.ModuleType("torch")
+        torch.inference_mode = lambda: events.append("inference_mode") or __import__("contextlib").nullcontext()
+        torch.backends = types.SimpleNamespace(
+            mps=types.SimpleNamespace(is_available=lambda: True)
+        )
+        torch.cuda = types.SimpleNamespace(is_available=lambda: False, empty_cache=lambda: events.append("cuda"))
+        torch.mps = types.SimpleNamespace(empty_cache=lambda: events.append("empty_cache"))
+        torch.bfloat16 = "bf16"
+        torch.float32 = "f32"
+
+        class Model:
+            def encode(self, batch, **kwargs):
+                events.append(f"encode {len(batch)}")
+                return [[0.0] * NATIVE_DIM for _ in batch]
+
+        previous = sys.modules.get("torch")
+        sys.modules["torch"] = torch
+        try:
+            embedder = GemmaEmbedder()
+            embedder.device = "mps"
+            embedder._loaded = Model()
+            rows = invoke(
+                "embeddings",
+                lambda: embedder.embed(["one", "two"]),
+                {"embeddings": True},
+            )
+        finally:
+            if previous is None:
+                sys.modules.pop("torch", None)
+            else:
+                sys.modules["torch"] = previous
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(events.count("inference_mode"), 2)
+        self.assertEqual(events.count("empty_cache"), 4)
+        self.assertEqual([item for item in events if item.startswith("encode")], ["encode 1", "encode 1"])
+
+    def test_auto_device_prefers_mps_when_cuda_is_absent(self) -> None:
+        class Torch:
+            bfloat16 = "bf16"
+            float32 = "f32"
+
+            class cuda:
+                @staticmethod
+                def is_available() -> bool:
+                    return False
+
+            class backends:
+                class mps:
+                    @staticmethod
+                    def is_available() -> bool:
+                        return True
+
+        seen: dict[str, object] = {}
+
+        def factory(*_args, **kwargs):
+            seen["kwargs"] = kwargs
+            return "model"
+
+        self.assertEqual(_load_gemma(factory, Torch(), "auto"), "model")
+        self.assertEqual(seen["kwargs"]["device"], "mps")
+        self.assertEqual(seen["kwargs"]["model_kwargs"], {"torch_dtype": "bf16"})
+        self.assertEqual(_resolve_device(Torch(), "cpu"), "cpu")
+        with self.assertRaises(UsageError) as caught:
+            _resolve_device(Torch(), "cuda")
+        self.assertEqual(str(caught.exception), "cuda is not available")
+
+    def test_device_is_config_and_stays_out_of_the_boolean_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text(
+                '[inference]\nembeddings = true\ndevice = "cpu"\nbatch_size = 1\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(inference_device(path), "cpu")
+            self.assertEqual(inference_config(path), {"embeddings": True})
+            self.assertEqual(embed_limits(path), (1, 2048))
+            write_account(path, "personal", "ada@example.com")
+            self.assertIn('device = "cpu"', path.read_text(encoding="utf-8"))
+            self.assertEqual(inference_device(path), "cpu")
+            path.write_text('[inference]\ndevice = "metal"\n', encoding="utf-8")
+            with self.assertRaises(UsageError) as caught:
+                inference_config(path)
+            self.assertEqual(str(caught.exception), "device is auto, mps, cuda, or cpu")
+            spec = Path(__file__).resolve().parents[1].joinpath("docs/SPEC.md").read_text(encoding="utf-8")
+            self.assertIn("M4", spec)
+            self.assertIn(LOCAL_VERIFY, spec)
+            self.assertIn('device` is `auto`', spec)
+
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
+    def test_a_failed_item_is_skipped_and_a_rerun_keeps_committed_threads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                gif = b"GIF89a" + struct.pack("<HH", 1, 1) + b"\x00" * 16
+                pixel = Path(tmp) / "pixel.gif"
+                pixel.write_bytes(gif)
+                wide = Path(tmp) / "scan.png"
+                wide.write_bytes(_solid_png(32, 32))
+                narrow = Path(tmp) / "narrow.png"
+                narrow.write_bytes(_solid_png(16, 16))
+                self.assertEqual(image_size(gif), (1, 1))
+                self.assertEqual(image_size(wide.read_bytes()), (32, 32))
+                self.assertFalse(embeddable_image("image/gif", 0, len(gif), 1, 1))
+                self.assertEqual(dimension_skip_reason(1, 1), "tracking pixel 1x1")
+                self.assertEqual(dimension_skip_reason(16, 16), "side 16x16 below 32")
+                for path, mime in ((pixel, "image/gif"), (wide, "image/png"), (narrow, "image/png")):
+                    conn.execute(
+                        """
+                        INSERT INTO attachments(
+                          msg_pk, mime_type, size_bytes, is_inline, stored_path, extract_status
+                        ) VALUES (?, ?, ?, 0, ?, 'skipped')
+                        """,
+                        (ids["alpha-msg"], mime, path.stat().st_size, str(path)),
+                    )
+                conn.commit()
+
+                class FailFar(FakeEmbedder):
+                    def embed(self, texts: list[str]) -> list[list[float]]:
+                        if any("completely different" in text for text in texts):
+                            raise RuntimeError("channel dimension is ambiguous")
+                        return super().embed(texts)
+
+                    def embed_images(self, images: list[bytes]) -> list[list[float]]:
+                        if images and images[0].startswith(b"\x89PNG") and image_size(images[0]) == (32, 32):
+                            raise RuntimeError("too many values to unpack")
+                        return super().embed_images(images)
+
+                err = StringIO()
+                with redirect_stderr(err):
+                    written = embed_threads(conn, FailFar(), {"embeddings": True})
+                self.assertEqual(written, 4)
+                log = err.getvalue()
+                self.assertIn("skipped image", log)
+                self.assertIn("tracking pixel 1x1", log)
+                self.assertIn("side 16x16 below 32", log)
+                self.assertIn("too many values to unpack", log)
+                self.assertIn("channel dimension is ambiguous", log)
+                self.assertIsNotNone(
+                    conn.execute(
+                        "SELECT embedding FROM vec_classification WHERE thread_pk = ?",
+                        (ids["alpha"],),
+                    ).fetchone()
+                )
+                self.assertIsNone(
+                    conn.execute(
+                        "SELECT embedding FROM vec_classification WHERE thread_pk = ?",
+                        (ids["far"],),
+                    ).fetchone()
+                )
+                self.assertEqual(conn.execute("SELECT count(*) FROM vec_image").fetchone()[0], 0)
+                self.assertEqual(embed_threads(conn, FakeEmbedder(), {"embeddings": True}), 1)
+                self.assertEqual(conn.execute("SELECT count(*) FROM vec_classification").fetchone()[0], 5)
+                self.assertEqual(embed_threads(conn, FakeEmbedder(), {"embeddings": True}), 0)
+            finally:
+                conn.close()
+
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
+    def test_knn_replaces_rule_review_and_leaves_human_and_settled_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                flags = {"embeddings": True}
+                embedder = FakeEmbedder()
+                self.assertEqual(embed_threads(conn, embedder, flags), 5)
+                decide_once(
+                    conn,
+                    ids["near"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="reference",
+                        lane="paper_trail",
+                        rule_id="3",
+                        rules_version="rules-v4",
+                        origin="human",
+                        source_detail="review",
+                    ),
+                )
+                decide_once(
+                    conn,
+                    ids["target"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="needs_review",
+                        lane="imbox",
+                        rule_id="else",
+                        rules_version="rules-v4",
+                        origin="rule",
+                        source_detail="else",
+                    ),
+                )
+                decide_once(
+                    conn,
+                    ids["far"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="needs_review",
+                        lane="imbox",
+                        rule_id="else",
+                        rules_version="rules-v4",
+                        origin="human",
+                        source_detail="review",
+                    ),
+                )
+                decide_once(
+                    conn,
+                    ids["vec"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="reference",
+                        lane="paper_trail",
+                        rule_id="3",
+                        rules_version="rules-v4",
+                        origin="rule",
+                        source_detail="3",
+                    ),
+                )
+                first = knn_decide(conn, ids["target"], embedder, flags, 20)
+                second = knn_decide(conn, ids["target"], embedder, flags, 30)
+                self.assertEqual(first["origin"], "knn")
+                self.assertEqual(first["next_state"], "reference")
+                self.assertEqual(int(first["decision_id"]), int(second["decision_id"]))
+                rows = conn.execute(
+                    "SELECT origin, superseded_by IS NULL FROM decisions WHERE thread_pk = ? ORDER BY decision_id",
+                    (ids["target"],),
+                ).fetchall()
+                self.assertEqual([(row[0], int(row[1])) for row in rows], [("rule", 0), ("knn", 1)])
+                human = knn_decide(conn, ids["far"], embedder, flags, 40)
+                self.assertEqual(human["origin"], "human")
+                self.assertEqual(human["next_state"], "needs_review")
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT count(*) FROM decisions WHERE thread_pk = ?",
+                        (ids["far"],),
+                    ).fetchone()[0],
+                    1,
+                )
+                settled = knn_decide(conn, ids["vec"], embedder, flags, 40)
+                self.assertEqual((settled["origin"], settled["next_state"]), ("rule", "reference"))
+                self.assertIsNone(knn_decide(conn, ids["alpha"], embedder, None, 50))
+                eligible, decided, review = knn_account(conn, embedder, flags, 60)
+                self.assertEqual(eligible, 1)
+                self.assertEqual(decided + review, 1)
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT origin FROM decisions WHERE thread_pk = ? AND superseded_by IS NULL",
+                        (ids["far"],),
+                    ).fetchone()[0],
+                    "human",
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT origin FROM decisions WHERE thread_pk = ? AND superseded_by IS NULL",
+                        (ids["alpha"],),
+                    ).fetchone()[0],
+                    "knn",
+                )
+            finally:
+                conn.close()

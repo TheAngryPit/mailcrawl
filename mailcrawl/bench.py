@@ -19,7 +19,7 @@ from mailcrawl.configfile import DEFAULT_BATCH_SIZE, DEFAULT_MAX_TOKENS
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.inference import invoke
 from mailcrawl.paths import UsageError
-from mailcrawl.threads import embeddable_image
+from mailcrawl.threads import embeddable_image, image_size
 from mailcrawl.vectors import (
     classification_text,
     open_embedder,
@@ -332,12 +332,20 @@ def _threads_with_images(conn: sqlite3.Connection) -> set[int]:
     ).fetchall()
     found: set[int] = set()
     for thread_pk, mime, inline, size, stored in rows:
-        if not stored:
+        path = Path(str(stored)) if stored else None
+        if path is None or not path.is_file():
             continue
-        if not embeddable_image(mime, int(inline or 0), None if size is None else int(size)):
+        blob = path.read_bytes()
+        width, height = image_size(blob) or (None, None)
+        if not embeddable_image(
+            mime,
+            int(inline or 0),
+            None if size is None else int(size),
+            width,
+            height,
+        ):
             continue
-        if Path(str(stored)).is_file():
-            found.add(int(thread_pk))
+        found.add(int(thread_pk))
     return found
 
 

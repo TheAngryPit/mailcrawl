@@ -836,6 +836,7 @@ import sys
 from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.schema import SCHEMA_SQL, USER_VERSION
 from mailcrawl.store import connect, migrate
+from mailcrawl.vectors import require_vec
 
 home = os.environ["PHASE3_DATA"]
 config = os.environ["PHASE3_CFG"]
@@ -927,9 +928,20 @@ if fused_order != [("Vec only", "fused"), ("Alpha keyword", "fused")]:
 print("fusion keyword", order)
 print("fusion rrf", fused_order)
 
+conn = connect(db_path)
+require_vec(conn)
+try:
+    conn.execute("DELETE FROM vec_classification")
+    conn.execute("DELETE FROM vec_search")
+    conn.commit()
+finally:
+    conn.close()
 code, embedded = run(["embed", "--account", "personal", "--embedder", "fake"])
 if code != 0 or embedded.get("embedded") != 5:
     raise SystemExit(f"fake embed {embedded}")
+code, again = run(["embed", "--account", "personal", "--embedder", "fake"])
+if code != 0 or again.get("embedded") != 0:
+    raise SystemExit(f"resume embed {again}")
 conn = connect(db_path)
 try:
     threads = {
@@ -1011,8 +1023,20 @@ PHASE3B_DATA="${PROOF_HOME}/phase3b-data"
 PHASE3B_CFG="${PROOF_HOME}/phase3b-config.toml"
 PHASE3B_MBOX="${PROOF_HOME}/phase3b.mbox"
 python3 - "${PHASE3B_MBOX}" <<'PY'
+import base64
+import struct
 import sys
-encoded = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAMBAQAY3Y20AAAAAElFTkSuQmCC"
+import zlib
+
+def solid_png(width, height):
+    def chunk(tag, data):
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+    raw = b"".join(b"\x00" + (b"\x10\x20\x30" * width) for _ in range(height))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+encoded = base64.b64encode(solid_png(32, 32)).decode("ascii")
 text = f"""From 1768000000000000401@example.com Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
@@ -1349,12 +1373,20 @@ BENCH_CFG="${PROOF_HOME}/bench-config.toml"
 BENCH_MBOX="${PROOF_HOME}/bench.mbox"
 python3 - "${BENCH_MBOX}" <<'PY'
 import base64
+import struct
 import sys
+import zlib
 from pathlib import Path
 
-encoded = base64.b64encode(base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAMBAQAY3Y20AAAAAElFTkSuQmCC"
-)).decode("ascii")
+def solid_png(width, height):
+    def chunk(tag, data):
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+    raw = b"".join(b"\x00" + (b"\x10\x20\x30" * width) for _ in range(height))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+encoded = base64.b64encode(solid_png(32, 32)).decode("ascii")
 Path(sys.argv[1]).write_text(
     f"""From 1768000000000000701@example.com Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
