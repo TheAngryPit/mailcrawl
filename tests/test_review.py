@@ -390,6 +390,25 @@ class ReviewHarnessTest(unittest.TestCase):
                     """,
                     (msg_pk, account_id),
                 )
+                human_msg = int(
+                    conn.execute(
+                        "SELECT msg_pk FROM messages WHERE gmail_message_id = 'm-4'"
+                    ).fetchone()[0]
+                )
+                conn.execute(
+                    """
+                    INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at)
+                    VALUES (?, 'Label_2', 'Sourcery', 'user', 1)
+                    """,
+                    (account_id,),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+                    VALUES (?, ?, 'Label_2', 1)
+                    """,
+                    (human_msg, account_id),
+                )
                 conn.commit()
             finally:
                 conn.close()
@@ -404,6 +423,7 @@ class ReviewHarnessTest(unittest.TestCase):
             self.assertEqual(_queue_ids(home, "--rule", "else"), ["thread-review"])
             self.assertEqual(_queue_ids(home, "--label", "Source"), ["thread-open"])
             self.assertEqual(_queue_ids(home, "--label", "Source/GitHub"), ["thread-open"])
+            self.assertEqual(_queue_ids(home, "--label", "Sourcery"), ["thread-human"])
             self.assertEqual(_queue_ids(home, "--since", "5"), [])
             self.assertEqual(
                 _queue_ids(home, "--all"),
@@ -659,6 +679,316 @@ class ReviewHarnessTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(undone["decisions"][0]["origin"], "rule")
             self.assertEqual(undone["decisions"][0]["state"], "reply")
+
+
+    def test_redirect_stores_nothing_and_skips_the_second_host(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            db = home / "personal.db"
+            _seed(db)
+            contacted: list[str] = []
+            second = _status_server(contacted, 200)
+            second_port = second.server_address[1]
+            first = _redirect_server(second_port)
+            first_thread = threading.Thread(target=first.serve_forever, daemon=True)
+            second_thread = threading.Thread(target=second.serve_forever, daemon=True)
+            first_thread.start()
+            second_thread.start()
+            try:
+                conn = connect(db)
+                try:
+                    with self.assertRaises(UsageError) as caught:
+                        review_run(
+                            conn,
+                            "personal",
+                            (f"http://127.0.0.1:{first.server_address[1]}/v1", "fixture-local", False),
+                            ReviewScope(),
+                            {"low-confidence-llm": True},
+                            max_tokens=8,
+                            now=70,
+                        )
+                    self.assertEqual(str(caught.exception), "local llm refuses a redirect")
+                    self.assertEqual(_count(conn, "thread-open"), 0)
+                    self.assertEqual(_count(conn, "thread-review"), 1)
+                finally:
+                    conn.close()
+            finally:
+                first.shutdown()
+                second.shutdown()
+                first.server_close()
+                second.server_close()
+                first_thread.join(timeout=2)
+                second_thread.join(timeout=2)
+            self.assertEqual(contacted, [])
+
+    def test_bad_port_and_whitespace_are_usage_errors(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "personal.db"
+            _seed(db)
+            conn = connect(db)
+            try:
+                for url in ("http://localhost:99999/v1", "http://localhost:abc/v1"):
+                    with self.assertRaises(UsageError) as caught:
+                        review_run(
+                            conn,
+                            "personal",
+                            (url, "fixture-local", False),
+                            ReviewScope(),
+                            {"low-confidence-llm": True},
+                            max_tokens=8,
+                            now=71,
+                        )
+                    self.assertEqual(str(caught.exception), "local llm base_url is not a URL")
+                for url in (
+                    "http://127.0.0.1:9/v1 ",
+                    "http://127.0.0.1:9/v1\n",
+                    "http://127.0.0.1:9/\x00v1",
+                ):
+                    with self.assertRaises(UsageError) as caught:
+                        review_run(
+                            conn,
+                            "personal",
+                            (url, "fixture-local", True),
+                            ReviewScope(),
+                            {"low-confidence-llm": True},
+                            max_tokens=8,
+                            now=72,
+                        )
+                    self.assertEqual(str(caught.exception), "local llm refuses a remote URL")
+                self.assertEqual(_count(conn, "thread-open"), 0)
+            finally:
+                conn.close()
+
+    def test_undo_refuses_rule_knn_human_and_a_missing_previous(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            db = home / "personal.db"
+            _seed(db)
+            code, refused = _cli(
+                [
+                    "--json",
+                    "--home",
+                    str(home),
+                    "review",
+                    "undo",
+                    "--account",
+                    "personal",
+                    "--thread",
+                    "thread-review",
+                ]
+            )
+            self.assertEqual(code, 2)
+            self.assertEqual(refused["detail"], "undo restores a harness decision")
+            conn = connect(db)
+            try:
+                self.assertEqual(_current(conn, "thread-review"), ("rule", "needs_review", "else"))
+                _insert_decision(conn, "thread-open", "knn", "embedding-cluster", "neighbour")
+                conn.commit()
+            finally:
+                conn.close()
+            code, knn = _cli(
+                [
+                    "--json",
+                    "--home",
+                    str(home),
+                    "review",
+                    "undo",
+                    "--account",
+                    "personal",
+                    "--thread",
+                    "thread-open",
+                ]
+            )
+            self.assertEqual(code, 2)
+            self.assertEqual(knn["detail"], "undo restores a harness decision")
+            conn = connect(db)
+            try:
+                self.assertEqual(_current(conn, "thread-open"), ("knn", "reply", "neighbour"))
+                self.assertEqual(_count(conn, "thread-open"), 1)
+            finally:
+                conn.close()
+            code, made = _cli(
+                [
+                    "--json",
+                    "--home",
+                    str(home),
+                    "decide",
+                    "--account",
+                    "personal",
+                    "--thread",
+                    "thread-scan",
+                    "--state",
+                    "reference",
+                    "--lane",
+                    "paper_trail",
+                    "--source-detail",
+                    "harness-fixture",
+                    "--now",
+                    "80",
+                ]
+            )
+            self.assertEqual(code, 0)
+            self.assertTrue(made["decisions"][0]["changed"])
+            code, missing = _cli(
+                [
+                    "--json",
+                    "--home",
+                    str(home),
+                    "review",
+                    "undo",
+                    "--account",
+                    "personal",
+                    "--thread",
+                    "thread-scan",
+                ]
+            )
+            self.assertEqual(code, 2)
+            self.assertEqual(missing["detail"], "undo needs a previous row")
+            conn = connect(db)
+            try:
+                self.assertEqual(_current(conn, "thread-scan"), ("model", "reference", "harness-fixture"))
+                self.assertEqual(_count(conn, "thread-scan"), 1)
+                _insert_decision(conn, "thread-gap", "human", "human", "person")
+                human_id = int(
+                    conn.execute(
+                        """
+                        SELECT decision_id FROM decisions
+                        WHERE thread_pk = (
+                          SELECT thread_pk FROM threads WHERE gmail_thread_id = 'thread-gap'
+                        )
+                        """
+                    ).fetchone()[0]
+                )
+                conn.execute(
+                    "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+                    (human_id, human_id),
+                )
+                _insert_decision(conn, "thread-gap", "model", "llm", "harness-fixture", rule_id="harness")
+                model_id = int(
+                    conn.execute(
+                        """
+                        SELECT decision_id FROM decisions
+                        WHERE thread_pk = (
+                          SELECT thread_pk FROM threads WHERE gmail_thread_id = 'thread-gap'
+                        ) AND superseded_by IS NULL
+                        """
+                    ).fetchone()[0]
+                )
+                conn.execute(
+                    "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+                    (model_id, human_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            code, human = _cli(
+                [
+                    "--json",
+                    "--home",
+                    str(home),
+                    "review",
+                    "undo",
+                    "--account",
+                    "personal",
+                    "--thread",
+                    "thread-gap",
+                ]
+            )
+            self.assertEqual(code, 2)
+            self.assertEqual(human["detail"], "a human decision stays")
+            conn = connect(db)
+            try:
+                self.assertEqual(_current(conn, "thread-gap"), ("model", "reply", "harness-fixture"))
+                origins = [
+                    str(row[0])
+                    for row in conn.execute(
+                        """
+                        SELECT origin FROM decisions
+                        WHERE thread_pk = (
+                          SELECT thread_pk FROM threads WHERE gmail_thread_id = 'thread-gap'
+                        )
+                        ORDER BY decision_id
+                        """
+                    )
+                ]
+                self.assertEqual(origins, ["human", "model"])
+            finally:
+                conn.close()
+
+
+def _redirect_server(port: int) -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{port}/chat/completions")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            return
+
+    return ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+
+
+def _status_server(seen: list[str], status: int) -> ThreadingHTTPServer:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            seen.append(self.path)
+            body = b"{}"
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args: object) -> None:
+            return
+
+    return ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+
+
+def _insert_decision(
+    conn,
+    thread_id: str,
+    origin: str,
+    source: str,
+    source_detail: str,
+    *,
+    rule_id: str = "0",
+) -> None:
+    row = conn.execute(
+        "SELECT thread_pk, account_id FROM threads WHERE gmail_thread_id = ?",
+        (thread_id,),
+    ).fetchone()
+    if row is None:
+        account_id = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only)
+            VALUES (?, ?, 1, 0)
+            """,
+            (account_id, thread_id),
+        )
+        thread_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO messages(
+              account_id, gmail_message_id, thread_pk, internal_date, subject,
+              body_text, raw_sha256, provenance_hash, imported_at
+            ) VALUES (?, ?, ?, 1, 'Synthetic', 'gap', ?, 'prov', 1)
+            """,
+            (account_id, f"m-{thread_id}", thread_pk, f"sha-{thread_id}"),
+        )
+    else:
+        thread_pk = int(row["thread_pk"])
+    conn.execute(
+        """
+        INSERT INTO decisions(
+          thread_pk, next_state, lane, source, origin, source_detail,
+          rule_id, rules_version, evidence, created_at
+        ) VALUES (?, 'reply', 'imbox', ?, ?, ?, ?, 'rules-v4', '[]', 1)
+        """,
+        (thread_pk, source, origin, source_detail, rule_id),
+    )
 
 
 def _queue_ids(home: Path, *extra: str) -> list[str]:

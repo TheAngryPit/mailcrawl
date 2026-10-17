@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
+from mailcrawl.paths import UsageError
 from mailcrawl.taxonomy import CONTENT, ORIGIN, effective_keys
 from mailcrawl.textnorm import parse_address
 
@@ -262,12 +263,14 @@ def _apply_thread(
     current = conn.execute(
         """
         SELECT decision_id, thread_pk, next_state, rule_id, lane, priority,
-               review_date, muted, created_at
+               review_date, muted, created_at, origin
         FROM decisions
         WHERE thread_pk = ? AND superseded_by IS NULL
         """,
         (thread_pk,),
     ).fetchone()
+    if current is not None and str(current["origin"]) == "human":
+        return
     if current is not None:
         outcome = _transition(current, facts, now, config)
         if outcome is None:
@@ -1114,6 +1117,12 @@ def supersede_current(
     old_id: int,
     insert_new: Callable[[], int],
 ) -> int:
+    row = conn.execute(
+        "SELECT origin FROM decisions WHERE decision_id = ?",
+        (old_id,),
+    ).fetchone()
+    if row is not None and str(row["origin"]) == "human":
+        raise UsageError("a human decision stays")
     conn.execute(
         "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
         (old_id, old_id),

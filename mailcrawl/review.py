@@ -280,13 +280,23 @@ def undo_decisions(
         )
     if not targets:
         raise UsageError("nothing to undo")
+    planned: list[tuple[sqlite3.Row, sqlite3.Row]] = []
     for row in targets:
-        if str(row["origin"]) == "human":
+        if str(row["origin"]) != "model" or str(row["rule_id"]) != _RULE_ID:
+            raise UsageError("undo restores a harness decision")
+        previous = conn.execute(
+            "SELECT * FROM decisions WHERE superseded_by = ?",
+            (int(row["decision_id"]),),
+        ).fetchone()
+        if previous is None:
+            raise UsageError("undo needs a previous row")
+        if str(previous["origin"]) == "human":
             raise UsageError("a human decision stays")
+        planned.append((row, previous))
     restored: list[tuple[str, sqlite3.Row | None, bool]] = []
     try:
-        for row in targets:
-            restored.append(_undo_one(conn, row, now))
+        for row, previous in planned:
+            restored.append(_undo_one(conn, row, previous, now))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -568,22 +578,18 @@ def _can_replace(current: sqlite3.Row | None, override: bool) -> bool:
 def _undo_one(
     conn: sqlite3.Connection,
     current: sqlite3.Row,
+    previous: sqlite3.Row,
     now: int,
 ) -> tuple[str, sqlite3.Row | None, bool]:
     thread_pk = int(current["thread_pk"])
     thread_id = _gmail_thread_id(conn, thread_pk)
-    previous = conn.execute(
-        "SELECT * FROM decisions WHERE superseded_by = ?",
-        (int(current["decision_id"]),),
-    ).fetchone()
-    old_id = int(current["decision_id"])
-    if previous is None:
-        conn.execute(
-            "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
-            (old_id, old_id),
-        )
-        return thread_id, None, True
-    supersede_current(conn, old_id, lambda: _copy_decision(conn, previous, now))
+    if str(previous["origin"]) == "human":
+        raise UsageError("a human decision stays")
+    supersede_current(
+        conn,
+        int(current["decision_id"]),
+        lambda: _copy_decision(conn, previous, now),
+    )
     stored = current_decision(conn, thread_pk)
     if stored is None:
         raise UsageError("decision was not stored")
@@ -591,6 +597,8 @@ def _undo_one(
 
 
 def _copy_decision(conn: sqlite3.Connection, previous: sqlite3.Row, now: int) -> int:
+    if str(previous["origin"]) == "human":
+        raise UsageError("a human decision stays")
     row = conn.execute(
         """
         INSERT INTO decisions(
@@ -641,11 +649,13 @@ def _complete(base_url: str, model: str, item: ReviewItem) -> AgentDecision:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
         with opener.open(request, timeout=60) as response:
             raw = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as exc:
+    except UsageError:
+        raise
+    except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, ValueError) as exc:
         raise UsageError("local llm did not answer") from exc
     content = _message_content(raw)
     return _decision_from_model(content, item.thread_id, model)
@@ -700,17 +710,30 @@ def _decision_from_model(content: str, thread_id: str, model: str) -> AgentDecis
     )
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise UsageError("local llm refuses a redirect")
+
+
 def _endpoint(base_url: str, allow_remote: bool) -> str:
-    if "@" in base_url or "\\" in base_url:
+    if "@" in base_url or "\\" in base_url or any(_forbidden_url_char(char) for char in base_url):
         raise UsageError("local llm refuses a remote URL")
-    parsed = urlparse(base_url)
-    host = (parsed.hostname or "").lower()
+    try:
+        parsed = urlparse(base_url)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError as exc:
+        raise UsageError("local llm base_url is not a URL") from exc
     if parsed.scheme not in ("http", "https") or not host:
         raise UsageError("local llm base_url is not a URL")
     if host not in _LOCAL_HOSTS and not allow_remote:
         raise UsageError("local llm refuses a remote URL")
     name = f"[{host}]" if ":" in host else host
-    netloc = name if parsed.port is None else f"{name}:{parsed.port}"
+    netloc = name if port is None else f"{name}:{port}"
     path = parsed.path or ""
     rebuilt = urlunparse((parsed.scheme, netloc, path, "", "", ""))
     return rebuilt.rstrip("/")
+
+
+def _forbidden_url_char(char: str) -> bool:
+    return char.isspace() or ord(char) < 32 or ord(char) == 127
