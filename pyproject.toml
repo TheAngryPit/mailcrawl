@@ -13,10 +13,12 @@ dependencies = []
 vectors = [
   "sqlite-vec",
   "sentence-transformers[image]>=6.1",
+  "pillow>=10.3",
 ]
 mlx = [
   "mlx>=0.32.3",
   "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git@3d87e88402f307efbf68e568971aa887ee7d9ed0",
+  "pillow>=10.3",
 ]
 
 [tool.setuptools.packages.find]

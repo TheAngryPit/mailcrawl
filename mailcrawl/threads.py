@@ -12,6 +12,8 @@ INLINE_IMAGE_FLOOR = 20 * 1024
 MIN_IMAGE_SIDE = 32
 MAX_IMAGE_SIDE = 8192
 MAX_IMAGE_PIXELS = 25_000_000
+MAX_FRAMES = 64
+MAX_FRAME_WORK = 100_000_000
 TRACKING_PIXELS = frozenset({(1, 1)})
 RASTER_IMAGES = frozenset(
     {
@@ -102,6 +104,11 @@ def image_gate(
 def opened_limit_reason(picture) -> str | None:
     frames = int(getattr(picture, "n_frames", 1) or 1)
     canvas = (int(picture.size[0]), int(picture.size[1]))
+    if frames > MAX_FRAMES:
+        return f"frames {frames} above {MAX_FRAMES}"
+    work = frames * canvas[0] * canvas[1]
+    if work > MAX_FRAME_WORK:
+        return f"frame work {work} above {MAX_FRAME_WORK}"
     widest, tallest = canvas
     passed = False
     try:
