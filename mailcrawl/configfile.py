@@ -92,6 +92,19 @@ def embed_limits(path: Path) -> tuple[int, int]:
     )
 
 
+def allow_override(path: Path) -> bool:
+    document = load_config(path)
+    block = document.get("review")
+    if block is None:
+        return False
+    if not isinstance(block, dict):
+        raise UsageError("review config is not a table")
+    value = block.get("allow_override", False)
+    if not isinstance(value, bool):
+        raise UsageError("allow_override is a boolean")
+    return value
+
+
 def local_llm(path: Path) -> tuple[str, str, bool] | None:
     raw = _inference_table(path)
     block = raw.get("llm")
@@ -190,6 +203,9 @@ def write_account(path: Path, alias: str, email: str) -> None:
             lines.append("")
         if isinstance(llm, dict):
             lines.extend(_llm_lines(llm))
+    review = document.get("review")
+    if isinstance(review, dict) and review.get("allow_override") is True:
+        lines.extend(["[review]", "allow_override = true", ""])
     for name in sorted(accounts):
         account = accounts[name]
         if not isinstance(account, dict):

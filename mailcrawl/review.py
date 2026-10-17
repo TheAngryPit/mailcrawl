@@ -8,11 +8,12 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from mailcrawl.configfile import DEFAULT_MAX_TOKENS
+from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.decisions import DecisionDraft, current_decision
-from mailcrawl.inference import enter_model, invoke
+from mailcrawl.inference import enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.rules import supersede_current
 from mailcrawl.threads import embeddable_image
@@ -30,6 +31,8 @@ STATES = (
     "screener",
 )
 LANES = ("imbox", "feed", "paper_trail", "screened_out")
+_QUEUE_ORIGINS = ("rule", "knn", "model")
+_OVERRIDABLE = frozenset(_QUEUE_ORIGINS)
 _POINT = "low-confidence-llm"
 _RULE_ID = "harness"
 _RULES_VERSION = "review-v1"
@@ -75,6 +78,53 @@ class AgentDecision:
         return "model"
 
 
+@dataclass(frozen=True)
+class ReviewScope:
+    everything: bool = False
+    origins: tuple[str, ...] = ()
+    rule: str | None = None
+    label: str | None = None
+    state: str | None = None
+    since: int | None = None
+    limit: int | None = None
+
+
+def parse_scope(
+    *,
+    everything: bool,
+    origin: str | None,
+    rule: str | None,
+    label: str | None,
+    state: str | None,
+    since: int | None,
+    limit: int | None,
+) -> ReviewScope:
+    origins: tuple[str, ...] = ()
+    if origin is not None:
+        origins = tuple(part.strip() for part in origin.split(",") if part.strip())
+        if not origins or any(part not in _QUEUE_ORIGINS for part in origins):
+            raise UsageError("origin is not in the fixed list")
+    if rule is not None and not rule.strip():
+        raise UsageError("rule is required")
+    if label is not None and not label.strip():
+        raise UsageError("label is required")
+    if state is not None:
+        state = _choice(state, STATES, "state")
+    if since is not None and since < 0:
+        raise UsageError("since needs a time")
+    if limit is not None and limit < 1:
+        raise UsageError("limit needs a positive count")
+    return ReviewScope(
+        everything=everything,
+        origins=origins,
+        rule=None if rule is None else rule.strip(),
+        label=None if label is None else label.strip(),
+        state=state,
+        since=since,
+        limit=limit,
+    )
+
+
 def parse_agent_decision(raw: object) -> AgentDecision:
     if not isinstance(raw, dict):
         raise UsageError("a decision is one JSON object")
@@ -94,27 +144,12 @@ def parse_agent_decision(raw: object) -> AgentDecision:
 def review_queue(
     conn: sqlite3.Connection,
     account: str,
+    scope: ReviewScope,
     *,
-    limit: int | None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> tuple[ReviewItem, ...]:
-    if limit is not None and limit < 1:
-        raise UsageError("limit needs a positive count")
-    sql = """
-        SELECT threads.thread_pk, threads.gmail_thread_id,
-               decisions.next_state, decisions.lane, decisions.rule_id
-        FROM threads
-        LEFT JOIN decisions
-          ON decisions.thread_pk = threads.thread_pk
-         AND decisions.superseded_by IS NULL
-        WHERE decisions.next_state = 'needs_review'
-           OR (decisions.decision_id IS NULL AND threads.image_only = 0)
-        ORDER BY threads.thread_pk
-    """
-    if limit is None:
-        rows = conn.execute(sql).fetchall()
-    else:
-        rows = conn.execute(sql + " LIMIT ?", (limit,)).fetchall()
+    sql, params = _queue_sql(scope)
+    rows = conn.execute(sql, params).fetchall()
     return tuple(_item(conn, account, row, max_tokens) for row in rows)
 
 
@@ -131,12 +166,15 @@ def apply_agent_decision(
     conn: sqlite3.Connection,
     decision: AgentDecision,
     now: int,
+    *,
+    override: bool = False,
+    commit: bool = True,
 ) -> tuple[sqlite3.Row, bool]:
     thread_pk = _thread_pk(conn, decision.thread_id)
     current = current_decision(conn, thread_pk)
     if current is not None and str(current["origin"]) == "human":
         raise UsageError("a human decision stays")
-    if current is not None and str(current["next_state"]) != "needs_review":
+    if not _can_replace(current, override):
         return current, False
     if current is not None and _same_model(current, decision):
         return current, False
@@ -150,7 +188,8 @@ def apply_agent_decision(
             old_id,
             lambda: _insert_model(conn, thread_pk, draft, now),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
     stored = current_decision(conn, thread_pk)
     if stored is None:
         raise UsageError("decision was not stored")
@@ -161,18 +200,24 @@ def apply_jsonl(
     conn: sqlite3.Connection,
     lines: list[str],
     now: int,
+    *,
+    override: bool = False,
 ) -> list[tuple[sqlite3.Row, bool]]:
+    decisions = _parsed_lines(lines)
+    for decision in decisions:
+        current = current_decision(conn, _thread_pk(conn, decision.thread_id))
+        if current is not None and str(current["origin"]) == "human":
+            raise UsageError("a human decision stays")
     found: list[tuple[sqlite3.Row, bool]] = []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            raw = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise UsageError("a decision line is not JSON") from exc
-        found.append(apply_agent_decision(conn, parse_agent_decision(raw), now))
-    if not found:
-        raise UsageError("decide needs one item")
+    try:
+        for decision in decisions:
+            found.append(
+                apply_agent_decision(conn, decision, now, override=override, commit=False)
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return found
 
 
@@ -180,30 +225,73 @@ def review_run(
     conn: sqlite3.Connection,
     account: str,
     settings: tuple[str, str, bool] | None,
+    scope: ReviewScope,
+    flags: dict[str, bool] | None,
     *,
-    limit: int | None,
     max_tokens: int,
     now: int,
+    override: bool = False,
 ) -> list[tuple[sqlite3.Row, bool]]:
-    if settings is None:
+    if settings is None or _POINT not in enabled_points(flags):
         raise UsageError("local llm is off")
-    _refuse_remote(settings[0], settings[2])
-    items = review_queue(conn, account, limit=limit, max_tokens=max_tokens)
-    flags = {_POINT: True}
+    base_url = _endpoint(settings[0], settings[2])
+    model = settings[1]
+    items = review_queue(conn, account, scope, max_tokens=max_tokens)
     stored: list[tuple[sqlite3.Row, bool]] = []
     for item in items:
         current = current_decision(conn, _thread_pk(conn, item.thread_id))
-        if current is not None and str(current["origin"]) == "human":
+        if not _can_replace(current, override):
             continue
         parsed = invoke(
             "low-confidence-llm",
-            lambda item=item: _complete(settings, item),
+            lambda item=item: _complete(base_url, model, item),
             flags,
         )
         if not isinstance(parsed, AgentDecision):
             raise UsageError("local llm is off")
-        stored.append(apply_agent_decision(conn, parsed, now))
+        stored.append(apply_agent_decision(conn, parsed, now, override=override))
     return stored
+
+
+def undo_decisions(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: str | None,
+    source_detail: str | None,
+    now: int,
+) -> list[tuple[str, sqlite3.Row | None, bool]]:
+    thread_id = thread_id.strip() if thread_id else None
+    source_detail = source_detail.strip() if source_detail else None
+    if (thread_id is None) == (source_detail is None):
+        raise UsageError("undo needs one thread or one source_detail")
+    if thread_id is not None:
+        current = current_decision(conn, _thread_pk(conn, thread_id))
+        targets = [] if current is None else [current]
+    else:
+        targets = list(
+            conn.execute(
+                """
+                SELECT * FROM decisions
+                WHERE source_detail = ? AND superseded_by IS NULL
+                ORDER BY thread_pk
+                """,
+                (source_detail,),
+            ).fetchall()
+        )
+    if not targets:
+        raise UsageError("nothing to undo")
+    for row in targets:
+        if str(row["origin"]) == "human":
+            raise UsageError("a human decision stays")
+    restored: list[tuple[str, sqlite3.Row | None, bool]] = []
+    try:
+        for row in targets:
+            restored.append(_undo_one(conn, row, now))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return restored
 
 
 def decision_document(row: sqlite3.Row, thread_id: str, changed: bool) -> dict[str, object]:
@@ -215,6 +303,23 @@ def decision_document(row: sqlite3.Row, thread_id: str, changed: bool) -> dict[s
         "state": row["next_state"],
         "thread_id": thread_id,
     }
+
+
+def undo_document(
+    thread_id: str,
+    row: sqlite3.Row | None,
+    changed: bool,
+) -> dict[str, object]:
+    if row is None:
+        return {
+            "changed": changed,
+            "lane": None,
+            "origin": None,
+            "source_detail": None,
+            "state": None,
+            "thread_id": thread_id,
+        }
+    return decision_document(row, thread_id, changed)
 
 
 def _item(
@@ -371,19 +476,167 @@ def _text_field(value: object, name: str) -> str:
     return value.strip()
 
 
-def _complete(
-    settings: tuple[str, str, bool],
-    item: ReviewItem,
-) -> AgentDecision:
+def _queue_sql(scope: ReviewScope) -> tuple[str, list[object]]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if not scope.everything:
+        clauses.append(
+            "(decisions.next_state = 'needs_review'"
+            " OR (decisions.decision_id IS NULL AND threads.image_only = 0))"
+        )
+    if scope.origins:
+        marks = ", ".join("?" for _ in scope.origins)
+        clauses.append(f"decisions.origin IN ({marks})")
+        params.extend(scope.origins)
+    if scope.rule is not None:
+        clauses.append("decisions.rule_id = ?")
+        params.append(scope.rule)
+    if scope.state is not None:
+        clauses.append("decisions.next_state = ?")
+        params.append(scope.state)
+    if scope.since is not None:
+        clauses.append(
+            """EXISTS (
+                SELECT 1 FROM messages
+                WHERE messages.thread_pk = threads.thread_pk
+                  AND messages.internal_date >= ?
+            )"""
+        )
+        params.append(scope.since)
+    if scope.label is not None:
+        clauses.append(
+            f"""EXISTS (
+                SELECT 1 FROM messages
+                JOIN message_labels ON message_labels.msg_pk = messages.msg_pk
+                JOIN labels
+                  ON labels.account_id = message_labels.account_id
+                 AND labels.gmail_label_id = message_labels.gmail_label_id
+                WHERE messages.thread_pk = threads.thread_pk
+                  AND {GMAIL_LABEL_SQL}
+                  AND (labels.name = ? OR labels.name LIKE ? ESCAPE '\\')
+            )"""
+        )
+        params.append(scope.label)
+        params.append(_like_prefix(scope.label))
+    where = " AND ".join(clauses) if clauses else "1 = 1"
+    sql = f"""
+        SELECT threads.thread_pk, threads.gmail_thread_id,
+               decisions.next_state, decisions.lane, decisions.rule_id
+        FROM threads
+        LEFT JOIN decisions
+          ON decisions.thread_pk = threads.thread_pk
+         AND decisions.superseded_by IS NULL
+        WHERE {where}
+        ORDER BY threads.thread_pk
+    """
+    if scope.limit is not None:
+        sql += " LIMIT ?"
+        params.append(scope.limit)
+    return sql, params
+
+
+def _like_prefix(label: str) -> str:
+    escaped = label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped + "/%"
+
+
+def _parsed_lines(lines: list[str]) -> list[AgentDecision]:
+    decisions: list[AgentDecision] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise UsageError("a decision line is not JSON") from exc
+        decisions.append(parse_agent_decision(raw))
+    if not decisions:
+        raise UsageError("decide needs one item")
+    return decisions
+
+
+def _can_replace(current: sqlite3.Row | None, override: bool) -> bool:
+    if current is None:
+        return True
+    if str(current["origin"]) == "human":
+        return False
+    if str(current["next_state"]) == "needs_review":
+        return True
+    return override and str(current["origin"]) in _OVERRIDABLE
+
+
+def _undo_one(
+    conn: sqlite3.Connection,
+    current: sqlite3.Row,
+    now: int,
+) -> tuple[str, sqlite3.Row | None, bool]:
+    thread_pk = int(current["thread_pk"])
+    thread_id = _gmail_thread_id(conn, thread_pk)
+    previous = conn.execute(
+        "SELECT * FROM decisions WHERE superseded_by = ?",
+        (int(current["decision_id"]),),
+    ).fetchone()
+    old_id = int(current["decision_id"])
+    if previous is None:
+        conn.execute(
+            "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+            (old_id, old_id),
+        )
+        return thread_id, None, True
+    supersede_current(conn, old_id, lambda: _copy_decision(conn, previous, now))
+    stored = current_decision(conn, thread_pk)
+    if stored is None:
+        raise UsageError("decision was not stored")
+    return thread_id, stored, True
+
+
+def _copy_decision(conn: sqlite3.Connection, previous: sqlite3.Row, now: int) -> int:
+    row = conn.execute(
+        """
+        INSERT INTO decisions(
+          thread_pk, next_state, priority, review_date, lane, muted,
+          source, origin, source_detail, rule_id, rules_version, evidence, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING decision_id
+        """,
+        (
+            int(previous["thread_pk"]),
+            previous["next_state"],
+            previous["priority"],
+            previous["review_date"],
+            previous["lane"],
+            previous["muted"],
+            previous["source"],
+            previous["origin"],
+            previous["source_detail"],
+            previous["rule_id"],
+            previous["rules_version"],
+            previous["evidence"],
+            now,
+        ),
+    ).fetchone()
+    return int(row["decision_id"])
+
+
+def _gmail_thread_id(conn: sqlite3.Connection, thread_pk: int) -> str:
+    row = conn.execute(
+        "SELECT gmail_thread_id FROM threads WHERE thread_pk = ?",
+        (thread_pk,),
+    ).fetchone()
+    if row is None:
+        raise UsageError("thread is not in the archive")
+    return str(row["gmail_thread_id"])
+
+
+def _complete(base_url: str, model: str, item: ReviewItem) -> AgentDecision:
     enter_model()
-    base_url, model, _allow_remote = settings
     payload = {
         "messages": [{"role": "user", "content": _prompt(item)}],
         "model": model,
         "temperature": 0,
     }
     request = urllib.request.Request(
-        base_url.rstrip("/") + "/chat/completions",
+        base_url + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -447,10 +700,17 @@ def _decision_from_model(content: str, thread_id: str, model: str) -> AgentDecis
     )
 
 
-def _refuse_remote(base_url: str, allow_remote: bool) -> None:
+def _endpoint(base_url: str, allow_remote: bool) -> str:
+    if "@" in base_url or "\\" in base_url:
+        raise UsageError("local llm refuses a remote URL")
     parsed = urlparse(base_url)
     host = (parsed.hostname or "").lower()
     if parsed.scheme not in ("http", "https") or not host:
         raise UsageError("local llm base_url is not a URL")
     if host not in _LOCAL_HOSTS and not allow_remote:
         raise UsageError("local llm refuses a remote URL")
+    name = f"[{host}]" if ":" in host else host
+    netloc = name if parsed.port is None else f"{name}:{parsed.port}"
+    path = parsed.path or ""
+    rebuilt = urlunparse((parsed.scheme, netloc, path, "", "", ""))
+    return rebuilt.rstrip("/")
