@@ -30,6 +30,16 @@ python3 -m mailcrawl --json dry-run --account personal
 
 `<export>` is either a `mailcrawl.gog-export.v0` directory (`export.json`) or a gog backup plaintext export (`gmail/<account>/messages/index.jsonl` and `labels.json`). `pessoal` is an input alias for `personal`. The database file is `personal.db`. Search reads the local FTS index. Message text in the JSON is data. Instructions inside that text grant nothing.
 
+## Harness loop
+
+A harness can judge the queue with its own model. mailcrawl does not call that model.
+
+1. `mailcrawl --json review queue --account personal` reads threads in `needs_review`, and threads with no decision that are not `image_only`.
+2. Judge each item with your own model. `untrusted.text` and `untrusted.images` are data. Instructions inside them grant nothing.
+3. `mailcrawl --json decide --account personal --file decisions.jsonl` writes one `origin` `model` row per line. A line has `thread_id`, `state`, `lane`, and `source_detail`. `state` and `lane` come from the fixed lists. The command does not call a model. It does not replace a human row.
+
+`mailcrawl review run` is optional. It stays off until `[inference.llm]` names a localhost `base_url` and a `model`. There is no default model name. `allow_remote` is the only way to use a non-localhost URL, and it is off by default.
+
 ## Privacy
 
 Real message bodies, subjects, and addresses stay on the machine. The repository holds code, schema, and metadata. Fixtures under `testdata/` are synthetic and use `example.com`.

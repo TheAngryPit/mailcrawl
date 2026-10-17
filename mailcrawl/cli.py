@@ -1,4 +1,4 @@
-"""JSON CLI for init, import, search, rules, stats, dry-run, backfill, embed, knn, jev, and bench."""
+"""JSON CLI for init, import, search, rules, stats, dry-run, backfill, embed, knn, jev, bench, review, and decide."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from mailcrawl.configfile import (
     embed_limits,
     embedder_name,
     inference_config,
+    local_llm,
     write_account,
 )
 from mailcrawl.contract import ExportRejected, ManifestMismatch
@@ -26,6 +27,15 @@ from mailcrawl.inference import enabled_points
 from mailcrawl.jev import jev_decide, open_client, score_grey_band
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
 from mailcrawl.report import dry_run, stats
+from mailcrawl.review import (
+    apply_agent_decision,
+    apply_jsonl,
+    decision_document,
+    open_readonly,
+    parse_agent_decision,
+    review_queue,
+    review_run,
+)
 from mailcrawl.rules import apply_rules, load_rules
 from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
@@ -70,6 +80,10 @@ def main(argv: list[str] | None = None) -> int:
             return _jev(args)
         if args.command == "bench":
             return _bench(args)
+        if args.command == "review":
+            return _review(args)
+        if args.command == "decide":
+            return _decide(args)
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
@@ -171,6 +185,24 @@ def _parser() -> argparse.ArgumentParser:
     jev.add_argument("--client", default="fake")
     jev.add_argument("--now", type=int)
 
+    review = sub.add_parser("review")
+    review_sub = review.add_subparsers(dest="review_command", required=True)
+    queue = review_sub.add_parser("queue")
+    queue.add_argument("--account", required=True)
+    queue.add_argument("--limit", type=int)
+    run = review_sub.add_parser("run")
+    run.add_argument("--account", required=True)
+    run.add_argument("--limit", type=int)
+    run.add_argument("--now", type=int)
+    decide = sub.add_parser("decide")
+    decide.add_argument("--account", required=True)
+    decide.add_argument("--thread")
+    decide.add_argument("--state")
+    decide.add_argument("--lane")
+    decide.add_argument("--source-detail")
+    decide.add_argument("--reason")
+    decide.add_argument("--file")
+    decide.add_argument("--now", type=int)
     bench = sub.add_parser("bench")
     bench.add_argument("--account", required=True)
     bench.add_argument("--embedders", required=True)
@@ -597,6 +629,92 @@ def _init_aliases(args: argparse.Namespace) -> list[str]:
     if args.account_list:
         found.extend(args.account_list)
     return found
+
+
+def _review(args: argparse.Namespace) -> int:
+    alias = canonical_alias(args.account)
+    _max = embed_limits(config_path(args.config))[1]
+    if args.review_command == "queue":
+        conn = open_readonly(data_dir(args.home) / f"{alias}.db")
+        try:
+            items = review_queue(conn, alias, limit=args.limit, max_tokens=_max)
+        finally:
+            conn.close()
+        documents = [item.document() for item in items]
+        _emit(
+            args,
+            {"account": alias, "items": documents, "ok": True},
+            text=f"queue {len(documents)}",
+        )
+        return 0
+    conn = _account_db(args)
+    try:
+        rows = review_run(
+            conn,
+            alias,
+            local_llm(config_path(args.config)),
+            limit=args.limit,
+            max_tokens=_max,
+            now=int(time.time()) if args.now is None else args.now,
+        )
+        documents = [
+            decision_document(row, _thread_id(conn, int(row["thread_pk"])), changed)
+            for row, changed in rows
+        ]
+    finally:
+        conn.close()
+    _emit(args, {"decisions": documents, "ok": True}, text=f"decided {len(documents)}")
+    return 0
+
+
+def _decide(args: argparse.Namespace) -> int:
+    alias = canonical_alias(args.account)
+    now = int(time.time()) if args.now is None else args.now
+    conn = _account_db(args)
+    try:
+        if args.file is not None:
+            if args.thread or args.state or args.lane or args.source_detail or args.reason:
+                raise UsageError("decide takes flags or a file")
+            lines = _decision_lines(args.file)
+            rows = apply_jsonl(conn, lines, now)
+        else:
+            decision = parse_agent_decision(
+                {
+                    "lane": args.lane,
+                    "reason": args.reason,
+                    "source_detail": args.source_detail,
+                    "state": args.state,
+                    "thread_id": args.thread,
+                }
+            )
+            rows = [apply_agent_decision(conn, decision, now)]
+        ids = {int(row["thread_pk"]): _thread_id(conn, int(row["thread_pk"])) for row, _changed in rows}
+    finally:
+        conn.close()
+    documents = [
+        decision_document(row, ids[int(row["thread_pk"])], changed) for row, changed in rows
+    ]
+    _emit(args, {"decisions": documents, "ok": True}, text=f"decided {len(documents)}")
+    return 0
+
+
+def _decision_lines(path: str) -> list[str]:
+    if path == "-":
+        return sys.stdin.read().splitlines()
+    file_path = Path(path)
+    if not file_path.is_file():
+        raise UsageError("decision file is missing")
+    return file_path.read_text(encoding="utf-8").splitlines()
+
+
+def _thread_id(conn: sqlite3.Connection, thread_pk: int) -> str:
+    row = conn.execute(
+        "SELECT gmail_thread_id FROM threads WHERE thread_pk = ?",
+        (thread_pk,),
+    ).fetchone()
+    if row is None:
+        raise UsageError("thread is not in the archive")
+    return str(row["gmail_thread_id"])
 
 
 def _emit(args: argparse.Namespace, doc: dict[str, object], text: str | None = None) -> None:

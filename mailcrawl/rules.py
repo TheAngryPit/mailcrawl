@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1108,6 +1109,23 @@ def _outcome(
     return _Outcome(state, rule_id, lane, priority, review_date, muted, evidence)
 
 
+def supersede_current(
+    conn: sqlite3.Connection,
+    old_id: int,
+    insert_new: Callable[[], int],
+) -> int:
+    conn.execute(
+        "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+        (old_id, old_id),
+    )
+    new_id = insert_new()
+    conn.execute(
+        "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+        (new_id, old_id),
+    )
+    return new_id
+
+
 def _supersede(
     conn: sqlite3.Connection,
     current: sqlite3.Row,
@@ -1117,22 +1135,17 @@ def _supersede(
 ) -> None:
     if _same(current, outcome):
         return
-    old_id = int(current["decision_id"])
-    conn.execute(
-        "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
-        (old_id, old_id),
-    )
-    new_id = _insert_decision(
+    supersede_current(
         conn,
-        int(current["thread_pk"]),
-        outcome,
-        now,
-        rules_version,
-        None,
-    )
-    conn.execute(
-        "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
-        (new_id, old_id),
+        int(current["decision_id"]),
+        lambda: _insert_decision(
+            conn,
+            int(current["thread_pk"]),
+            outcome,
+            now,
+            rules_version,
+            None,
+        ),
     )
 
 
