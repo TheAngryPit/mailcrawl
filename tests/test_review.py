@@ -66,7 +66,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--reason",
                     "synthetic",
                     "--now",
-                    "10",
+                    "1700000010",
                 ]
             )
             self.assertEqual(code, 0)
@@ -90,7 +90,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--source-detail",
                     "harness-fixture",
                     "--now",
-                    "11",
+                    "1700000011",
                 ]
             )
             self.assertEqual(code, 0)
@@ -116,7 +116,7 @@ class ReviewHarnessTest(unittest.TestCase):
                         "--source-detail",
                         "harness-fixture",
                         "--now",
-                        "12",
+                        "1700000012",
                     ]
                 )
                 self.assertEqual(code, 2)
@@ -164,7 +164,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--file",
                     str(path),
                     "--now",
-                    "20",
+                    "1700000020",
                 ]
             )
             self.assertEqual(code, 0)
@@ -245,7 +245,7 @@ class ReviewHarnessTest(unittest.TestCase):
                         "--account",
                         "personal",
                         "--now",
-                        "40",
+                        "1700000040",
                     ]
                 )
             finally:
@@ -482,7 +482,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     str(path),
                     "--override",
                     "--now",
-                    "60",
+                    "1700000060",
                 ]
             )
             self.assertEqual(code, 2)
@@ -524,7 +524,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     str(path),
                     "--override",
                     "--now",
-                    "61",
+                    "1700000061",
                 ]
             )
             self.assertEqual(code, 2)
@@ -547,7 +547,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--source-detail",
                     "harness-fixture",
                     "--now",
-                    "62",
+                    "1700000062",
                 ]
             )
             self.assertEqual(code, 0)
@@ -572,7 +572,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--source-detail",
                     "batch-1",
                     "--now",
-                    "63",
+                    "1700000063",
                 ]
             )
             self.assertEqual(code, 0)
@@ -596,7 +596,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--source-detail",
                     "batch-1",
                     "--now",
-                    "64",
+                    "1700000064",
                 ]
             )
             self.assertEqual(code, 2)
@@ -619,7 +619,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--source-detail",
                     "batch-1",
                     "--now",
-                    "65",
+                    "1700000065",
                 ]
             )
             self.assertEqual(code, 0)
@@ -655,7 +655,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--source-detail",
                     "config-override",
                     "--now",
-                    "66",
+                    "1700000066",
                 ]
             )
             self.assertEqual(code, 0)
@@ -673,7 +673,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--thread",
                     "thread-review",
                     "--now",
-                    "67",
+                    "1700000067",
                 ]
             )
             self.assertEqual(code, 0)
@@ -827,7 +827,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--thread",
                     "thread-open",
                     "--now",
-                    "90",
+                    "1700000090",
                 ]
             )
             self.assertEqual(code, 0)
@@ -855,7 +855,7 @@ class ReviewHarnessTest(unittest.TestCase):
                     "--source-detail",
                     "harness-fixture",
                     "--now",
-                    "80",
+                    "1700000080",
                 ]
             )
             self.assertEqual(code, 0)

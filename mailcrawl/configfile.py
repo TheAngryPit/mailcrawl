@@ -6,6 +6,7 @@ import os
 import tomllib
 from pathlib import Path
 
+from mailcrawl.clock import require_as_of
 from mailcrawl.inference import BoundaryError, enabled_points
 from mailcrawl.paths import UsageError, canonical_alias
 
@@ -100,9 +101,9 @@ def configured_as_of(path: Path) -> int | None:
     value = load_config(path).get("as_of")
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int):
         raise UsageError("as_of needs a time")
-    return value
+    return require_as_of(value)
 
 
 def time_policy(path: Path) -> TimePolicy:

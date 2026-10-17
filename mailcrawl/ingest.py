@@ -6,10 +6,10 @@ import hashlib
 import json
 import os
 import sqlite3
-import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+from mailcrawl.clock import as_of
 from mailcrawl.contract import (
     AttachmentRec,
     ExportDocument,
@@ -145,7 +145,7 @@ def _ingest(
 ) -> ImportResult:
     version = mailcrawl_version()
     me = account_email.strip().lower()
-    started = int(time.time())
+    started = as_of(None)
     counts = {"new": 0, "dup": 0, "conflict": 0, "reconciled": 0}
     conflicts: list[str] = []
     reconciled: list[dict[str, str]] = []
@@ -199,7 +199,7 @@ def _ingest(
             """,
             (account_id, source, manifest_sha, updated_at),
         )
-        finished = int(time.time())
+        finished = as_of(None)
         conn.execute(
             """
             INSERT INTO import_runs(
@@ -399,7 +399,7 @@ def _upsert_message(
             message.raw_json,
             message.auth_results,
             prov,
-            int(time.time()),
+            as_of(None),
         ),
     ).fetchone()
     if inserted is not None:
@@ -698,7 +698,7 @@ def _append_ledger(
         "SELECT row_hash FROM ledger ORDER BY seq DESC LIMIT 1"
     ).fetchone()
     prev_hash = "" if prev is None else str(prev["row_hash"])
-    ts = int(time.time())
+    ts = as_of(None)
     detail_json = json.dumps(detail, sort_keys=True, separators=(",", ":"))
     canonical = json.dumps(
         {

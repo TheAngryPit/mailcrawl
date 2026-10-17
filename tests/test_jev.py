@@ -468,7 +468,7 @@ class JevBatteryTest(unittest.TestCase):
             argv = parts[3:]
             argv[argv.index("--db") + 1] = str(data)
             argv[argv.index("--client") + 1] = "fake"
-            argv.extend(["--as-of", "10"])
+            argv.extend(["--as-of", "1700000010"])
             joined = " ".join(argv)
             self.assertNotIn("MailVault", joined)
             self.assertNotIn("db-v2", joined)
@@ -485,6 +485,7 @@ class JevBatteryTest(unittest.TestCase):
                 try:
                     account_id = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
                     ids = _threads(conn, account_id)
+                    conn.execute("UPDATE messages SET internal_date = 1700000000")
                     conn.execute(
                         "UPDATE threads SET image_only = 1 WHERE thread_pk = ?",
                         (ids["grey"],),

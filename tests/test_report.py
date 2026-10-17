@@ -71,7 +71,7 @@ class StatsDryRunTest(unittest.TestCase):
             ["--json", "--home", str(self.home), "stats", "--account", "vcl"]
         )
         dry = self._run(
-            ["--json", "--home", str(self.home), "dry-run", "--account", "vcl"]
+            ["--json", "--home", str(self.home), "dry-run", "--account", "vcl", "--now", str(NOW)]
         )
 
         categories = {

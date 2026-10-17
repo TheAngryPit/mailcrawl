@@ -157,8 +157,6 @@ def jev_decide(
     config: dict[str, bool] | None,
     now: int,
     *,
-    owners: frozenset[str] = frozenset(),
-    domains: frozenset[str] = frozenset(),
     policy: TimePolicy | None = None,
 ) -> sqlite3.Row | None:
     if "jev-battery" not in enabled_points(config):
@@ -170,7 +168,7 @@ def jev_decide(
         conn,
         thread_pk,
         now,
-        lambda: _timed(conn, thread_pk, client, config, now, owners, domains, policy),
+        lambda: _timed(conn, thread_pk, client, config, now, policy),
     )
 
 
@@ -187,8 +185,6 @@ def score_grey_band(
     config: dict[str, bool] | None,
     now: int,
     *,
-    owners: frozenset[str] = frozenset(),
-    domains: frozenset[str] = frozenset(),
     policy: TimePolicy | None = None,
 ) -> GreyPass:
     rows = eligible_thread_pks(conn, include_image_only=False)
@@ -201,8 +197,6 @@ def score_grey_band(
             client,
             config,
             now,
-            owners=owners,
-            domains=domains,
             policy=policy,
         )
         if decision is None or decision["next_state"] == "needs_review":
@@ -372,12 +366,10 @@ def _timed(
     client: JevClient,
     config: dict[str, bool] | None,
     now: int,
-    owners: frozenset[str],
-    domains: frozenset[str],
     policy: TimePolicy | None,
 ) -> DecisionDraft:
     draft = _produce(conn, thread_pk, client, config)
-    facts = thread_time_facts(conn, thread_pk, now, owners, domains)
+    facts = thread_time_facts(conn, thread_pk, now)
     return apply_time(draft, facts, policy)
 
 

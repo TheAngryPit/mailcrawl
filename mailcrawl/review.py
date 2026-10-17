@@ -151,14 +151,10 @@ def review_queue(
     *,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     as_of: int = 0,
-    owners: frozenset[str] = frozenset(),
-    domains: frozenset[str] = frozenset(),
 ) -> tuple[ReviewItem, ...]:
     sql, params = _queue_sql(scope)
     rows = conn.execute(sql, params).fetchall()
-    return tuple(
-        _item(conn, account, row, max_tokens, as_of, owners, domains) for row in rows
-    )
+    return tuple(_item(conn, account, row, max_tokens, as_of) for row in rows)
 
 
 def open_readonly(path: Path) -> sqlite3.Connection:
@@ -239,8 +235,6 @@ def review_run(
     max_tokens: int,
     now: int,
     override: bool = False,
-    owners: frozenset[str] = frozenset(),
-    domains: frozenset[str] = frozenset(),
 ) -> list[tuple[sqlite3.Row, bool]]:
     if settings is None or _POINT not in enabled_points(flags):
         raise UsageError("local llm is off")
@@ -252,8 +246,6 @@ def review_run(
         scope,
         max_tokens=max_tokens,
         as_of=now,
-        owners=owners,
-        domains=domains,
     )
     stored: list[tuple[sqlite3.Row, bool]] = []
     for item in items:
@@ -363,11 +355,9 @@ def _item(
     row: sqlite3.Row,
     max_tokens: int,
     moment: int,
-    owners: frozenset[str],
-    domains: frozenset[str],
 ) -> ReviewItem:
     thread_pk = int(row["thread_pk"])
-    facts = thread_time_facts(conn, thread_pk, moment, owners, domains)
+    facts = thread_time_facts(conn, thread_pk, moment)
     return ReviewItem(
         str(row["gmail_thread_id"]),
         account,

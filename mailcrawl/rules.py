@@ -136,6 +136,7 @@ def preview_rules(
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
+    policy=None,
 ) -> list[Preview]:
     found: list[Preview] = []
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
@@ -151,7 +152,14 @@ def preview_rules(
             domains,
             security_senders,
         )
-        outcome = _classify(facts, now, config, test_recipients)
+        outcome = _with_time(
+            conn,
+            thread_pk,
+            _classify(facts, now, config, test_recipients),
+            now,
+            config.rules_version,
+            policy,
+        )
         found.append(Preview(thread_pk, outcome.next_state, outcome.rule_id, outcome.lane))
     return found
 
@@ -165,6 +173,7 @@ def apply_rules(
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
+    policy=None,
 ) -> Coverage:
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
     for thread in threads:
@@ -178,6 +187,7 @@ def apply_rules(
             domains,
             security_senders,
             test_recipients,
+            policy,
         )
     conn.commit()
     return coverage_counts(conn)
@@ -249,6 +259,7 @@ def _apply_thread(
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
+    policy=None,
 ) -> None:
     facts = _load(
         conn,
@@ -275,9 +286,22 @@ def _apply_thread(
         outcome = _transition(current, facts, now, config)
         if outcome is None:
             return
-        _supersede(conn, current, outcome, now, config.rules_version)
+        _supersede(
+            conn,
+            current,
+            _with_time(conn, thread_pk, outcome, now, config.rules_version, policy),
+            now,
+            config.rules_version,
+        )
         return
-    outcome = _classify(facts, now, config, test_recipients)
+    outcome = _with_time(
+        conn,
+        thread_pk,
+        _classify(facts, now, config, test_recipients),
+        now,
+        config.rules_version,
+        policy,
+    )
     _insert_decision(conn, thread_pk, outcome, now, config.rules_version, None)
 
 
@@ -1098,6 +1122,37 @@ def _labels(items: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ..
     for item in items:
         cleaned.append({"type": "label", "id": item.get("id"), "name": item.get("name")})
     return tuple(cleaned)
+
+
+def _with_time(conn, thread_pk: int, outcome: _Outcome, now: int, rules_version: str, policy) -> _Outcome:
+    # decisions imports rules, so timefacts loads only after this module exists.
+    from mailcrawl.decisions import DecisionDraft
+    from mailcrawl.timefacts import apply_time, thread_time_facts
+
+    draft = DecisionDraft(
+        next_state=outcome.next_state,
+        lane=outcome.lane,
+        rule_id=outcome.rule_id,
+        rules_version=rules_version,
+        origin="rule",
+        source_detail=outcome.rule_id,
+        evidence=outcome.evidence,
+        priority=outcome.priority,
+        review_date=outcome.review_date,
+        muted=outcome.muted,
+    )
+    adjusted = apply_time(draft, thread_time_facts(conn, thread_pk, now), policy)
+    if adjusted is draft:
+        return outcome
+    return _outcome(
+        adjusted.next_state,
+        outcome.rule_id,
+        adjusted.lane,
+        outcome.priority,
+        adjusted.review_date,
+        outcome.muted,
+        adjusted.evidence,
+    )
 
 
 def _outcome(

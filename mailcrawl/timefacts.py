@@ -8,6 +8,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from mailcrawl.clock import AS_OF_MAX, AS_OF_MIN
 from mailcrawl.decisions import DecisionDraft
 from mailcrawl.textnorm import parse_address
 
@@ -54,23 +55,27 @@ _MONTHS = {
     "novembro": 11,
     "dezembro": 12,
 }
-_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_FLAGS = re.ASCII | re.IGNORECASE
+_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b", _FLAGS)
 _DMY = re.compile(
     r"\b(\d{1,2}) (jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6} (\d{4})\b",
-    re.IGNORECASE,
+    _FLAGS,
 )
 _MDY = re.compile(
     r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6} (\d{1,2}),? (\d{4})\b",
-    re.IGNORECASE,
+    _FLAGS,
 )
 _PT = re.compile(
     r"\b(\d{1,2}) de (janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro) de (\d{4})\b",
-    re.IGNORECASE,
+    _FLAGS,
 )
 _ATE = re.compile(
     r"\bat[eé] dia (\d{1,2})(?: de ([a-zç]{3,12}))?(?: de (\d{4}))?\b",
-    re.IGNORECASE,
+    _FLAGS,
 )
+_WORD = r"(?<![A-Za-z0-9_])(?:{})(?![A-Za-z0-9_])"
+_DEADLINE_CUE = re.compile(_WORD.format("deadline|prazo|due"))
+_MEETING_CUE = re.compile(_WORD.format("meeting|meet|reuni(?:ão|ao)?|call"))
 
 
 @dataclass(frozen=True)
@@ -112,8 +117,8 @@ def thread_time_facts(
     conn: sqlite3.Connection,
     thread_pk: int,
     moment: int,
-    owners: frozenset[str] = frozenset(),
-    domains: frozenset[str] = frozenset(),
+    _owners: frozenset[str] = frozenset(),
+    _domains: frozenset[str] = frozenset(),
 ) -> TimeFacts:
     rows = conn.execute(
         """
@@ -128,7 +133,7 @@ def thread_time_facts(
     first_at = min(stamps) if stamps else None
     last_at = max(stamps) if stamps else None
     age = None if last_at is None else (moment - last_at) // 86400
-    last_human = _last_human(rows, owners, domains)
+    last_human = _last_human(rows)
     found: list[FoundDate] = []
     used = 0
     for row in rows:
@@ -138,9 +143,8 @@ def thread_time_facts(
         room = TEXT_CAP - used
         sample = piece[:room]
         used += len(sample)
-        year_hint = _year(row["internal_date"], moment)
-        month_hint = _month(row["internal_date"], moment)
-        found.extend(_dates(sample, year_hint, month_hint))
+        year_hint, month_hint, day_hint = _hints(row["internal_date"], moment)
+        found.extend(_dates(sample, year_hint, month_hint, day_hint))
     kept = tuple(found[:_MAX_DATES])
     return TimeFacts(
         as_of=moment,
@@ -169,11 +173,9 @@ def apply_time(draft: DecisionDraft, facts: TimeFacts, policy: TimePolicy | None
         state = "resolved"
         lane = "paper_trail"
         reasons.append("waiting is stale")
-    if facts.past_deadline or facts.past_meeting:
-        if lane == "imbox" or state in ("reply", "action", "needs_review"):
-            state = "reference"
-            lane = "paper_trail"
-            reasons.append("past date")
+    if (facts.past_deadline or facts.past_meeting) and state in ("reply", "action"):
+        state = "needs_review"
+        reasons.append("past date")
     if (
         facts.age_days is not None
         and facts.age_days > chosen.old_days
@@ -200,29 +202,28 @@ def apply_time(draft: DecisionDraft, facts: TimeFacts, policy: TimePolicy | None
     )
 
 
-def _last_human(rows, owners: frozenset[str], domains: frozenset[str]) -> str:
+def _last_human(rows) -> str:
     for row in reversed(rows):
         header = "" if row["from_hdr"] is None else str(row["from_hdr"])
         _name, address, domain = parse_address(header)
-        if _automated(header, address):
+        if _automated(address, domain):
             continue
-        if int(row["is_from_me"] or 0) == 1 or _owner(address, domain, owners, domains):
+        if int(row["is_from_me"] or 0) == 1:
             return "owner"
         return "other"
     return "none"
 
 
-def _owner(address: str | None, domain: str | None, owners: frozenset[str], domains: frozenset[str]) -> bool:
-    if address is not None and address in owners:
-        return True
-    return domain is not None and domain in domains
-
-
-def _automated(header: str, address: str | None) -> bool:
-    haystack = header.lower()
-    if address:
-        haystack = f"{haystack} {address}"
-    return any(token in haystack for token in _AUTOMATED)
+def _automated(address: str | None, domain: str | None) -> bool:
+    if not address:
+        return False
+    local = address.split("@", 1)[0]
+    host = domain or ""
+    for token in _AUTOMATED:
+        needle = token[:-1] if token.endswith("@") else token
+        if needle in local or needle in host:
+            return True
+    return False
 
 
 def _piece(row) -> str:
@@ -231,18 +232,23 @@ def _piece(row) -> str:
     return f"{subject}\n{body}".lower()
 
 
-def _year(stamp, moment: int) -> int:
-    source = moment if stamp is None else int(stamp)
-    return _parts(source)[0]
+def _hints(stamp, moment: int) -> tuple[int, int, int]:
+    parts = None if stamp is None else _parts(stamp)
+    if parts is None:
+        parts = _parts(moment)
+    if parts is None:
+        return (2000, 1, 1)
+    return parts
 
 
-def _month(stamp, moment: int) -> int:
-    source = moment if stamp is None else int(stamp)
-    return _parts(source)[1]
-
-
-def _parts(stamp: int) -> tuple[int, int, int]:
-    year, month, day = time.gmtime(int(stamp))[:3]
+def _parts(stamp) -> tuple[int, int, int] | None:
+    try:
+        number = int(stamp)
+    except (TypeError, ValueError):
+        return None
+    if number < AS_OF_MIN or number > AS_OF_MAX:
+        return None
+    year, month, day = time.gmtime(number)[:3]
     return int(year), int(month), int(day)
 
 
@@ -250,7 +256,7 @@ def _before(found: int, moment: int) -> bool:
     return found // 86400 < moment // 86400
 
 
-def _dates(sample: str, year_hint: int, month_hint: int) -> list[FoundDate]:
+def _dates(sample: str, year_hint: int, month_hint: int, day_hint: int) -> list[FoundDate]:
     found: list[FoundDate] = []
 
     def add(kind: str, year: int, month: int, day: int) -> None:
@@ -283,17 +289,42 @@ def _dates(sample: str, year_hint: int, month_hint: int) -> list[FoundDate]:
     for match in _ATE.finditer(sample):
         month_name = match.group(2)
         year_text = match.group(3)
-        month = month_hint if month_name is None else _MONTHS.get(month_name.lower(), 0)
-        year = year_hint if year_text is None else int(year_text)
-        add("deadline", year, month, int(match.group(1)))
+        year, month, day = _ate_day(
+            int(match.group(1)),
+            year_hint,
+            month_hint,
+            day_hint,
+            month_name,
+            year_text,
+        )
+        add("deadline", year, month, day)
     return found
+
+
+def _ate_day(
+    day: int,
+    year_hint: int,
+    month_hint: int,
+    day_hint: int,
+    month_name: str | None,
+    year_text: str | None,
+) -> tuple[int, int, int]:
+    if month_name is None and year_text is None and day < day_hint:
+        month = month_hint + 1
+        year = year_hint
+        if month > 12:
+            return year + 1, 1, day
+        return year, month, day
+    month = month_hint if month_name is None else _MONTHS.get(month_name.lower(), 0)
+    year = year_hint if year_text is None else int(year_text)
+    return year, month, day
 
 
 def _kind(sample: str, start: int) -> str:
     window = sample[max(0, start - _CUE) : start]
-    if "deadline" in window or "prazo" in window or "due " in window:
+    if _DEADLINE_CUE.search(window):
         return "deadline"
-    if "meet" in window or "reuni" in window or "call" in window:
+    if _MEETING_CUE.search(window):
         return "meeting"
     return "date"
 

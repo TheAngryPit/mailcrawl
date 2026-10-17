@@ -616,8 +616,6 @@ def knn_decide(
     config: dict[str, bool] | None,
     now: int,
     *,
-    owners: frozenset[str] = frozenset(),
-    domains: frozenset[str] = frozenset(),
     policy: TimePolicy | None = None,
 ) -> sqlite3.Row | None:
     if "embeddings" not in enabled_points(config) or embedder is None:
@@ -666,7 +664,7 @@ def knn_decide(
 
     def timed() -> DecisionDraft:
         draft = produce()
-        facts = thread_time_facts(conn, thread_pk, now, owners, domains)
+        facts = thread_time_facts(conn, thread_pk, now)
         return apply_time(draft, facts, policy)
 
     return decide_open(conn, thread_pk, now, timed)
@@ -678,8 +676,6 @@ def knn_account(
     config: dict[str, bool] | None,
     now: int,
     *,
-    owners: frozenset[str] = frozenset(),
-    domains: frozenset[str] = frozenset(),
     policy: TimePolicy | None = None,
 ) -> tuple[int, int, int]:
     eligible = eligible_thread_pks(conn)
@@ -692,8 +688,6 @@ def knn_account(
             embedder,
             config,
             now,
-            owners=owners,
-            domains=domains,
             policy=policy,
         )
         if decision is None or decision["next_state"] == "needs_review":

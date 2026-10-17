@@ -365,6 +365,7 @@ def _rules(args: argparse.Namespace) -> int:
             domains=domains,
             security_senders=security_senders,
             test_recipients=test_recipients,
+            policy=time_policy(config_path(args.config)),
         )
     finally:
         conn.close()
@@ -429,6 +430,7 @@ def _dry_run(args: argparse.Namespace) -> int:
             security_senders=security_senders,
             test_recipients=test_recipients,
             advisor=StubAdvisor() if args.advise else None,
+            policy=time_policy(config_path(args.config)),
         )
 
     _emit(args, {**_counted(args, report), "ok": True})
@@ -440,8 +442,7 @@ def _as_of(args: argparse.Namespace) -> int:
 
 
 def _time_args(args: argparse.Namespace) -> dict[str, object]:
-    owners, domains, _security, _tests = _identity(args)
-    return {"owners": owners, "domains": domains, "policy": time_policy(config_path(args.config))}
+    return {"policy": time_policy(config_path(args.config))}
 
 
 def _identity(
@@ -716,15 +717,12 @@ def _review(args: argparse.Namespace) -> int:
     if args.review_command == "queue":
         conn = open_readonly(data_dir(args.home) / f"{alias}.db")
         try:
-            owners, domains, _security, _tests = _identity(args)
             items = review_queue(
                 conn,
                 alias,
                 _review_scope(args),
                 max_tokens=_max,
                 as_of=_as_of(args),
-                owners=owners,
-                domains=domains,
             )
         finally:
             conn.close()
@@ -750,7 +748,6 @@ def _review(args: argparse.Namespace) -> int:
             ]
         else:
             override = bool(args.override) or allow_override(config)
-            owners, domains, _security, _tests = _identity(args)
             rows = review_run(
                 conn,
                 alias,
@@ -760,8 +757,6 @@ def _review(args: argparse.Namespace) -> int:
                 max_tokens=_max,
                 now=now,
                 override=override,
-                owners=owners,
-                domains=domains,
             )
             documents = [
                 decision_document(row, _thread_id(conn, int(row["thread_pk"])), changed)

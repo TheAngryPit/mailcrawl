@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-import time
 from pathlib import Path
 
+from mailcrawl.clock import as_of
 from mailcrawl.paths import UsageError, canonical_alias
 from mailcrawl.schema import FTS_SQL, JEV_SQL, SCHEMA_SQL, TRIGRAM_SQL, USER_VERSION, V2_TABLES_SQL
 from mailcrawl.textnorm import clean_body
@@ -334,7 +334,7 @@ def init_account(data: Path, alias: str, email: str) -> Path:
                 INSERT INTO accounts(alias, email_hash, created_at)
                 VALUES (?, ?, ?)
                 """,
-                (canonical, digest, int(time.time())),
+                (canonical, digest, as_of(None)),
             )
             conn.commit()
         elif row["email_hash"] != digest:
