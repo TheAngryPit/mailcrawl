@@ -1116,6 +1116,18 @@ class FlatEmbedTest(unittest.TestCase):
             image_gate("image/gif", 0, len(under_cap), under_cap),
             (False, "frame 4000x4000 above screen 64x64"),
         )
+        many = _gif_frames(200, (5000, 4000))
+        budget = _gif_frames(64, (5000, 4000))
+        self.assertEqual(
+            image_gate("image/gif", 0, len(many), many),
+            (False, "frames 200 above 64"),
+        )
+        self.assertEqual(
+            image_gate("image/gif", 0, len(budget), budget),
+            (False, "frame work 1280000000 above 100000000"),
+        )
+        allowed = _gif_frames(64, (32, 32))
+        self.assertEqual(image_gate("image/gif", 0, len(allowed), allowed), (True, None))
         self.assertEqual(image_gate("image/gif", 0, len(_still_gif(64, 64)), _still_gif(64, 64)), (True, None))
         loads: list[tuple[int, int]] = []
         real_open = __import__("PIL.Image", fromlist=["Image"]).open
@@ -1125,13 +1137,24 @@ class FlatEmbedTest(unittest.TestCase):
             real_load = picture.load
 
             def load_spy(*load_args, **load_kwargs):
-                loads.append((int(picture.size[0]), int(picture.size[1])))
+                loads.append(
+                    (int(picture.size[0]), int(picture.size[1]), int(picture.tell()))
+                )
                 return real_load(*load_args, **load_kwargs)
 
             picture.load = load_spy
             return picture
 
         with patch("PIL.Image.open", open_spy):
+            self.assertEqual(
+                image_gate("image/gif", 0, len(many), many),
+                (False, "frames 200 above 64"),
+            )
+            self.assertEqual(
+                image_gate("image/gif", 0, len(budget), budget),
+                (False, "frame work 1280000000 above 100000000"),
+            )
+            self.assertEqual(loads, [])
             self.assertEqual(
                 image_gate("image/png", 0, len(lying_png), lying_png),
                 (False, "side 20000x1000 above 8192"),
@@ -1151,7 +1174,7 @@ class FlatEmbedTest(unittest.TestCase):
                 picture.close()
         self.assertEqual(kept, False)
         self.assertIn("decompression bomb", reason)
-        self.assertEqual(loads, [(64, 64)])
+        self.assertEqual(loads, [(64, 64, 0)])
 
     @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
     def test_embed_skips_a_bomb_and_keeps_a_normal_image(self) -> None:
@@ -1170,6 +1193,8 @@ class FlatEmbedTest(unittest.TestCase):
                     ),
                     "frame.gif": (_gif_later_frame((64, 64), (6000, 6000)), "image/gif"),
                     "tile.gif": (_gif_later_frame((64, 64), (4000, 4000)), "image/gif"),
+                    "many.gif": (_gif_frames(200, (5000, 4000)), "image/gif"),
+                    "budget.gif": (_gif_frames(64, (5000, 4000)), "image/gif"),
                     "unknown.webp": (b"not-an-image", "image/webp"),
                     "scan.png": (_solid_png(32, 32), "image/png"),
                 }
@@ -1206,6 +1231,8 @@ class FlatEmbedTest(unittest.TestCase):
                 self.assertIn("decompression bomb", log)
                 self.assertIn("side 20000x1000 above 8192", log)
                 self.assertIn("frame 4000x4000 above screen 64x64", log)
+                self.assertIn("frames 200 above 64", log)
+                self.assertIn("frame work 1280000000 above 100000000", log)
                 self.assertIn(files["scan.png"][0], embedder.seen)
                 self.assertNotIn(files["huge.png"][0], embedder.seen)
                 self.assertNotIn(files["huge.gif"][0], embedder.seen)
@@ -1214,6 +1241,8 @@ class FlatEmbedTest(unittest.TestCase):
                 self.assertNotIn(files["lying.png"][0], embedder.seen)
                 self.assertNotIn(files["frame.gif"][0], embedder.seen)
                 self.assertNotIn(files["tile.gif"][0], embedder.seen)
+                self.assertNotIn(files["many.gif"][0], embedder.seen)
+                self.assertNotIn(files["budget.gif"][0], embedder.seen)
                 if "bomb.bmp" in files:
                     self.assertIn("decompression bomb", log)
                     self.assertIn(files["scan.bmp"][0], embedder.seen)
@@ -1338,6 +1367,31 @@ def _png_stub(width: int, height: int, extra: bytes = b"") -> bytes:
         + _chunk(b"IDAT", zlib.compress(b"\x00"))
         + _chunk(b"IEND", b"")
     )
+
+
+def _gif_frames(count: int, screen: tuple[int, int]) -> bytes:
+    image_mod = __import__("PIL.Image", fromlist=["Image"])
+    palette = [0, 0, 0, 255, 0, 0] + [0] * (256 * 3 - 6)
+    first = image_mod.new("P", (8, 8), 0)
+    first.putpalette(palette)
+    rest = []
+    for index in range(1, count):
+        frame = image_mod.new("P", (8, 8), index % 2)
+        frame.putpalette(palette)
+        rest.append(frame)
+    buffer = BytesIO()
+    first.save(
+        buffer,
+        format="GIF",
+        save_all=True,
+        append_images=rest,
+        duration=1,
+        loop=0,
+        disposal=2,
+    )
+    raw = bytearray(buffer.getvalue())
+    raw[6:10] = struct.pack("<HH", screen[0], screen[1])
+    return bytes(raw)
 
 
 def _still_gif(width: int, height: int) -> bytes:
