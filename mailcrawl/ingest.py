@@ -6,10 +6,10 @@ import hashlib
 import json
 import os
 import sqlite3
-import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+from mailcrawl.clock import as_of
 from mailcrawl.contract import (
     AttachmentRec,
     ExportDocument,
@@ -145,7 +145,7 @@ def _ingest(
 ) -> ImportResult:
     version = mailcrawl_version()
     me = account_email.strip().lower()
-    started = int(time.time())
+    started = as_of(None)
     counts = {"new": 0, "dup": 0, "conflict": 0, "reconciled": 0}
     conflicts: list[str] = []
     reconciled: list[dict[str, str]] = []
@@ -199,7 +199,7 @@ def _ingest(
             """,
             (account_id, source, manifest_sha, updated_at),
         )
-        finished = int(time.time())
+        finished = as_of(None)
         conn.execute(
             """
             INSERT INTO import_runs(
@@ -356,8 +356,8 @@ def _upsert_message(
     never touches a row that came from another source.
     """
     thread_pk = _ensure_thread(conn, account_id, message.gmail_thread_id)
-    sender_id, address = _ensure_sender(conn, account_id, message.from_hdr)
-    is_from_me = 1 if address is not None and address == me else 0
+    sender_id, _address = _ensure_sender(conn, account_id, message.from_hdr)
+    is_from_me = 1 if "SENT" in message.label_ids else 0
     prov = provenance_hash(alias, message.gmail_message_id, message.raw_sha256, version)
     raw_body = message.body_text
     cleaned = clean_body(raw_body)
@@ -367,9 +367,9 @@ def _upsert_message(
           account_id, gmail_message_id, thread_pk, gmail_history_id, internal_date,
           rfc822_message_id, in_reply_to, references_hdr, sender_id,
           from_hdr, to_hdr, cc_hdr, bcc_hdr, reply_to_hdr,
-          subject, snippet, body_text_raw, body_text, size_bytes, is_from_me,
+          subject, snippet, body_text_raw, body_text, size_bytes, is_from_me, date_trusted,
           raw_path, raw_sha256, raw_json, auth_results, provenance_hash, imported_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(account_id, gmail_message_id) DO NOTHING
         RETURNING msg_pk
         """,
@@ -394,12 +394,13 @@ def _upsert_message(
             cleaned,
             message.size_bytes,
             is_from_me,
+            message.date_trusted,
             message.raw_path,
             message.raw_sha256,
             message.raw_json,
             message.auth_results,
             prov,
-            int(time.time()),
+            as_of(None),
         ),
     ).fetchone()
     if inserted is not None:
@@ -425,6 +426,14 @@ def _upsert_message(
     else:
         return "conflict", kept_sha
     msg_pk = int(existing["msg_pk"])
+    conn.execute(
+        """
+        UPDATE messages
+        SET is_from_me = ?, internal_date = ?, date_trusted = ?
+        WHERE msg_pk = ?
+        """,
+        (is_from_me, message.internal_date, message.date_trusted, msg_pk),
+    )
     _replace_labels(conn, account_id, msg_pk, message, source)
     current = str(existing["gmail_thread_id"])
     incoming = message.gmail_thread_id
@@ -698,7 +707,7 @@ def _append_ledger(
         "SELECT row_hash FROM ledger ORDER BY seq DESC LIMIT 1"
     ).fetchone()
     prev_hash = "" if prev is None else str(prev["row_hash"])
-    ts = int(time.time())
+    ts = as_of(None)
     detail_json = json.dumps(detail, sort_keys=True, separators=(",", ":"))
     canonical = json.dumps(
         {

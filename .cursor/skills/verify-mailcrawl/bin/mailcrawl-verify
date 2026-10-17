@@ -818,7 +818,7 @@ try:
         ("1886e1a4667f4002", "pseudo:archived"),
         ("18873038f7ce4003", "pseudo:archived"),
     ]
-    if [row for row in pseudo if not row[0].startswith("rfc822:")] != want or len(pseudo) != 4:
+    if pseudo != want:
         sys.exit(f"pseudo-labels after the gog import {pseudo}")
     if conn.execute("SELECT name FROM labels WHERE gmail_label_id = 'Label_opened'").fetchone() != ("Opened",):
         sys.exit("gog user label Opened missing")

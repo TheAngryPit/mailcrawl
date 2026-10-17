@@ -264,11 +264,11 @@ class RulesEngineTest(unittest.TestCase):
         self.assertEqual(self._current(calendar)["next_state"], "resolved")
         self.assertEqual(self._current(notes)["rule_id"], "auto-ref")
         self.assertEqual(self._current(human_report)["rule_id"], "5")
-        self.assertEqual(self._current(short_close)["rule_id"], "8")
-        self.assertEqual(self._current(short_close)["next_state"], "resolved")
+        self.assertEqual(self._current(short_close)["rule_id"], "5")
+        self.assertEqual(self._current(short_close)["next_state"], "reply")
         self.assertEqual(self._current(long_close)["rule_id"], "5")
-        self.assertEqual(self._current(owner)["rule_id"], "6")
-        self.assertEqual(self._current(owner)["next_state"], "waiting")
+        self.assertEqual(self._current(owner)["rule_id"], "5")
+        self.assertEqual(self._current(owner)["next_state"], "reply")
         self.assertEqual(self._current(to_self)["rule_id"], "housekeeping")
         self.assertNotEqual(self._current(to_self)["next_state"], "waiting")
 
@@ -371,6 +371,24 @@ class RulesEngineTest(unittest.TestCase):
         self.assertEqual(self._current(sales)["rule_id"], "screener")
         self.assertEqual(self._current(sales)["next_state"], "screener")
         self.assertEqual(self._current(repeat)["rule_id"], "screener")
+
+    def test_rule_8_resolves_only_an_owner_sent_closing(self) -> None:
+        mine = self._thread("ok thanks", from_me=1)
+        other = self._thread("ok thanks")
+        forged = self._thread("ok thanks", address="ada@example.com")
+        apply_rules(
+            self.conn,
+            now=NOW,
+            config=self.config,
+            owners=frozenset({"ada@example.com"}),
+            domains=frozenset({"example.com"}),
+        )
+        self.assertEqual(self._current(mine)["rule_id"], "8")
+        self.assertEqual(self._current(mine)["next_state"], "resolved")
+        self.assertEqual(self._current(other)["rule_id"], "5")
+        self.assertEqual(self._current(other)["next_state"], "reply")
+        self.assertEqual(self._current(forged)["rule_id"], "5")
+        self.assertEqual(self._current(forged)["next_state"], "reply")
 
     def test_rules_v4_unions_tabs_and_keeps_precedence(self) -> None:
         promo = self._thread(
@@ -564,8 +582,8 @@ class RulesEngineTest(unittest.TestCase):
         preview = preview_rules(
             self.conn, now=NOW, config=self.config, owners=owners, domains=domains
         )
-        self.assertEqual(preview[0].rule_id, "6")
-        self.assertNotEqual(preview[0].rule_id, "5")
+        self.assertEqual(preview[0].rule_id, "5")
+        self.assertNotEqual(preview[0].rule_id, "6")
 
     def test_rules_uses_the_config_path_unless_the_flag_is_set(self) -> None:
         self._thread("hello there")

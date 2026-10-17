@@ -6,10 +6,10 @@
 
 - `mbox-import`. Init `pessoal` and import with `--alias pessoal`. The JSON reports `account` `personal`, `n_seen` 6, `n_new` 5, `n_refused` 1, and `n_error` 0.
 - `mbox-search`. `search mboxtoken` returns `18867251edfa0001`, the hex form of the decimal From-line id. `search anexotoken` finds the attachment text on `18873038f7ce4003`.
-- `mbox-pseudo-labels`. `Opened` and `Aberto` are stored as `pseudo:opened`, and `Archived` and `Arquivada` as `pseudo:archived`, on four messages. `rules` and `dry-run` on that account print the same JSON as an account imported from a copy without those names, and neither prints `pseudo:`.
+- `mbox-pseudo-labels`. `Opened` is stored as `pseudo:opened`. `Archived` and `Arquivada` are stored as `pseudo:archived`. That is three messages. `Aberto` on `From 12ab@example.com` is not stored. `rules` and `dry-run` on that account print the same JSON as an account imported from a copy without those names, and neither prints `pseudo:`.
 - `mbox-takeout-shapes`. `search crlftoken` returns `18867251edfa0001`, whose body mixes LF and CRLF and has a `>From ` line. Its `raw_sha256` equals the SHA-256 of the pure-CRLF gog `m1.eml`, which lacks the `X-Gm-*`, `X-Gmail-*`, and `X-Google-*` headers and keeps `X-Get-Message-Sender-Via` and `x-gong-email-entity`. Its `body_text_raw` has no CR.
 - `mbox-reimport`. A second import with `--account personal` reports `n_new` 0 and `n_dup` 5. The ordered-row-dump hash does not change.
-- `mbox-then-gog`. `import gog-export --dir testdata/fixtures/mbox/gog-after` reports `n_dup` 1 and `n_reconciled` 1. The archive still has 5 messages. No `mbox:` label id is left. `1886e1a4667f4002` moves to thread `1886e1a4667f4002`. All four `pseudo:` links survive, and the gog user label `Opened` (`Label_opened`) sits beside `pseudo:opened`.
+- `mbox-then-gog`. `import gog-export --dir testdata/fixtures/mbox/gog-after` reports `n_dup` 1 and `n_reconciled` 1. The archive still has 5 messages. No `mbox:` label id is left. `1886e1a4667f4002` moves to thread `1886e1a4667f4002`. All three `pseudo:` links survive, and the gog user label `Opened` (`Label_opened`) sits beside `pseudo:opened`.
 - `mbox-gog-reimport`. A second `import gog-export` of the same directory reports `n_new` 0, `n_dup` 1, and `n_reconciled` 1 again. `n_reconciled` is a state count: the kept mbox row's hash still differs from the gog copy (SPEC section 4.1).
 - `mbox-not-mbox`. A text file that does not start with `From ` exits 3 with `unsupported_schema` and no traceback.
 

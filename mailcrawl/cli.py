@@ -6,14 +6,15 @@ import argparse
 import json
 import sqlite3
 import sys
-import time
 from pathlib import Path
 
 from mailcrawl.advise import StubAdvisor
 from mailcrawl.bench import run_bench
+from mailcrawl.clock import as_of
 from mailcrawl.configfile import (
     account_email,
     account_identity,
+    configured_as_of,
     embed_limits,
     embedder_name,
     allow_override,
@@ -21,6 +22,7 @@ from mailcrawl.configfile import (
     inference_device,
     local_llm,
     rules_path,
+    time_policy,
     write_account,
 )
 from mailcrawl.contract import ExportRejected, ManifestMismatch
@@ -156,7 +158,7 @@ def _parser() -> argparse.ArgumentParser:
     rules = sub.add_parser("rules")
     rules.add_argument("--account", required=True)
     rules.add_argument("--rules")
-    rules.add_argument("--now", type=int)
+    rules.add_argument("--as-of", "--now", dest="now", type=int)
 
     counts = sub.add_parser("stats")
     counts.add_argument("--account", required=True)
@@ -166,7 +168,7 @@ def _parser() -> argparse.ArgumentParser:
     preview.add_argument("--account", required=True)
     preview.add_argument("--taxonomy")
     preview.add_argument("--rules")
-    preview.add_argument("--now", type=int)
+    preview.add_argument("--as-of", "--now", dest="now", type=int)
     preview.add_argument("--export-decisions")
     preview.add_argument("--sample", type=int)
     preview.add_argument("--seed", type=int)
@@ -183,29 +185,30 @@ def _parser() -> argparse.ArgumentParser:
     knn.add_argument("--account", required=True)
     knn.add_argument("--thread")
     knn.add_argument("--embedder")
-    knn.add_argument("--now", type=int)
+    knn.add_argument("--as-of", "--now", dest="now", type=int)
 
     jev = sub.add_parser("jev")
     jev.add_argument("--account", required=True)
     jev.add_argument("--thread")
     jev.add_argument("--client", default="fake")
-    jev.add_argument("--now", type=int)
+    jev.add_argument("--as-of", "--now", dest="now", type=int)
 
     review = sub.add_parser("review")
     review_sub = review.add_subparsers(dest="review_command", required=True)
     queue = review_sub.add_parser("queue")
     queue.add_argument("--account", required=True)
+    queue.add_argument("--as-of", "--now", dest="now", type=int)
     _scope_args(queue)
     run = review_sub.add_parser("run")
     run.add_argument("--account", required=True)
     run.add_argument("--override", action="store_true")
-    run.add_argument("--now", type=int)
+    run.add_argument("--as-of", "--now", dest="now", type=int)
     _scope_args(run)
     undo = review_sub.add_parser("undo")
     undo.add_argument("--account", required=True)
     undo.add_argument("--thread")
     undo.add_argument("--source-detail")
-    undo.add_argument("--now", type=int)
+    undo.add_argument("--as-of", "--now", dest="now", type=int)
     decide = sub.add_parser("decide")
     decide.add_argument("--account", required=True)
     decide.add_argument("--thread")
@@ -215,7 +218,7 @@ def _parser() -> argparse.ArgumentParser:
     decide.add_argument("--reason")
     decide.add_argument("--file")
     decide.add_argument("--override", action="store_true")
-    decide.add_argument("--now", type=int)
+    decide.add_argument("--as-of", "--now", dest="now", type=int)
     bench = sub.add_parser("bench")
     bench.add_argument("--account", required=True)
     bench.add_argument("--embedders", required=True)
@@ -350,7 +353,7 @@ def _rules(args: argparse.Namespace) -> int:
     if not rules_file.is_file():
         raise UsageError("rules file is missing")
     config = load_rules(rules_file)
-    now = int(time.time()) if args.now is None else args.now
+    now = _as_of(args)
     owners, domains, security_senders, test_recipients = _identity(args)
     conn = connect(db_path)
     try:
@@ -362,6 +365,7 @@ def _rules(args: argparse.Namespace) -> int:
             domains=domains,
             security_senders=security_senders,
             test_recipients=test_recipients,
+            policy=time_policy(config_path(args.config)),
         )
     finally:
         conn.close()
@@ -402,7 +406,7 @@ def _stats(args: argparse.Namespace) -> int:
 
 
 def _dry_run(args: argparse.Namespace) -> int:
-    now = int(time.time()) if args.now is None else args.now
+    now = _as_of(args)
     config = None if not args.rules else load_rules(Path(args.rules))
     export_path, sample, seed = _export_args(args)
     owners, domains, security_senders, test_recipients = _identity(args)
@@ -426,10 +430,19 @@ def _dry_run(args: argparse.Namespace) -> int:
             security_senders=security_senders,
             test_recipients=test_recipients,
             advisor=StubAdvisor() if args.advise else None,
+            policy=time_policy(config_path(args.config)),
         )
 
     _emit(args, {**_counted(args, report), "ok": True})
     return 0
+
+
+def _as_of(args: argparse.Namespace) -> int:
+    return as_of(args.now, configured_as_of(config_path(args.config)))
+
+
+def _time_args(args: argparse.Namespace) -> dict[str, object]:
+    return {"policy": time_policy(config_path(args.config))}
 
 
 def _identity(
@@ -533,7 +546,7 @@ def _knn(args: argparse.Namespace) -> int:
     embedder = None
     if "embeddings" in enabled_points(flags):
         embedder = _open_embedder(args)
-    now = int(time.time()) if args.now is None else args.now
+    now = _as_of(args)
     conn = _account_db(args)
     decision = None
     counted = None
@@ -545,9 +558,9 @@ def _knn(args: argparse.Namespace) -> int:
             ).fetchone()
             if row is None:
                 raise UsageError("unknown thread")
-            decision = knn_decide(conn, int(row["thread_pk"]), embedder, flags, now)
+            decision = knn_decide(conn, int(row["thread_pk"]), embedder, flags, now, **_time_args(args))
         else:
-            counted = knn_account(conn, embedder, flags, now)
+            counted = knn_account(conn, embedder, flags, now, **_time_args(args))
     finally:
         conn.close()
     if args.thread:
@@ -579,7 +592,7 @@ def _knn(args: argparse.Namespace) -> int:
 def _jev(args: argparse.Namespace) -> int:
     data_dir(args.home)
     flags = inference_config(config_path(args.config))
-    now = int(time.time()) if args.now is None else args.now
+    now = _as_of(args)
     conn = _account_db(args)
     decision = None
     passed = None
@@ -592,9 +605,11 @@ def _jev(args: argparse.Namespace) -> int:
             ).fetchone()
             if row is None:
                 raise UsageError("unknown thread")
-            decision = jev_decide(conn, int(row["thread_pk"]), client, flags, now)
+            decision = jev_decide(
+                conn, int(row["thread_pk"]), client, flags, now, **_time_args(args)
+            )
         else:
-            passed = score_grey_band(conn, client, flags, now)
+            passed = score_grey_band(conn, client, flags, now, **_time_args(args))
     finally:
         conn.close()
     if args.thread:
@@ -702,7 +717,13 @@ def _review(args: argparse.Namespace) -> int:
     if args.review_command == "queue":
         conn = open_readonly(data_dir(args.home) / f"{alias}.db")
         try:
-            items = review_queue(conn, alias, _review_scope(args), max_tokens=_max)
+            items = review_queue(
+                conn,
+                alias,
+                _review_scope(args),
+                max_tokens=_max,
+                as_of=_as_of(args),
+            )
         finally:
             conn.close()
         documents = [item.document() for item in items]
@@ -714,7 +735,7 @@ def _review(args: argparse.Namespace) -> int:
         return 0
     conn = _account_db(args)
     try:
-        now = int(time.time()) if args.now is None else args.now
+        now = _as_of(args)
         if args.review_command == "undo":
             restored = undo_decisions(
                 conn,
@@ -750,7 +771,7 @@ def _review(args: argparse.Namespace) -> int:
 
 def _decide(args: argparse.Namespace) -> int:
     alias = canonical_alias(args.account)
-    now = int(time.time()) if args.now is None else args.now
+    now = _as_of(args)
     override = bool(args.override) or allow_override(config_path(args.config))
     conn = _account_db(args)
     try:

@@ -136,6 +136,7 @@ def preview_rules(
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
+    policy=None,
 ) -> list[Preview]:
     found: list[Preview] = []
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
@@ -151,7 +152,14 @@ def preview_rules(
             domains,
             security_senders,
         )
-        outcome = _classify(facts, now, config, test_recipients)
+        outcome = _with_time(
+            conn,
+            thread_pk,
+            _classify(facts, now, config, test_recipients),
+            now,
+            config.rules_version,
+            policy,
+        )
         found.append(Preview(thread_pk, outcome.next_state, outcome.rule_id, outcome.lane))
     return found
 
@@ -165,6 +173,7 @@ def apply_rules(
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
+    policy=None,
 ) -> Coverage:
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
     for thread in threads:
@@ -178,6 +187,7 @@ def apply_rules(
             domains,
             security_senders,
             test_recipients,
+            policy,
         )
     conn.commit()
     return coverage_counts(conn)
@@ -249,6 +259,7 @@ def _apply_thread(
     domains: frozenset[str] = frozenset(),
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
+    policy=None,
 ) -> None:
     facts = _load(
         conn,
@@ -275,9 +286,22 @@ def _apply_thread(
         outcome = _transition(current, facts, now, config)
         if outcome is None:
             return
-        _supersede(conn, current, outcome, now, config.rules_version)
+        _supersede(
+            conn,
+            current,
+            _with_time(conn, thread_pk, outcome, now, config.rules_version, policy),
+            now,
+            config.rules_version,
+        )
         return
-    outcome = _classify(facts, now, config, test_recipients)
+    outcome = _with_time(
+        conn,
+        thread_pk,
+        _classify(facts, now, config, test_recipients),
+        now,
+        config.rules_version,
+        policy,
+    )
     _insert_decision(conn, thread_pk, outcome, now, config.rules_version, None)
 
 
@@ -502,7 +526,12 @@ def _classify(
             0,
             ({"type": "rule", "name": "handoff"},),
         )
-    if _short_closing(facts.body, config) and not protected and not _inbox_noise(facts):
+    if (
+        facts.last_from_me
+        and _short_closing(facts.body, config)
+        and not protected
+        and not _inbox_noise(facts)
+    ):
         return _outcome("resolved", "8", "imbox", None, None, 0, ({"type": "rule", "name": "8"},))
     if (
         facts.human
@@ -530,7 +559,8 @@ def _classify(
     if not facts.last_from_me and not facts.listish and not facts.promotions and _task(facts.body, config):
         return _outcome("action", "7", "imbox", None, None, 0, ({"type": "rule", "name": "7"},))
     if (
-        _closing(facts.body, config)
+        facts.last_from_me
+        and _closing(facts.body, config)
         and not _question(facts.body, config)
         and not _task(facts.body, config)
         and not _inbox_noise(facts)
@@ -630,10 +660,7 @@ def _load(
         """,
         (thread_pk,),
     ).fetchall()
-    outbound = any(
-        bool(message["is_from_me"]) or _is_owner(message["address_norm"], owners, domains)
-        for message in messages
-    )
+    outbound = any(bool(message["is_from_me"]) for message in messages)
     if outbound:
         kept = [message for message in messages if not _tracking_message(message, config)]
         if kept:
@@ -708,9 +735,7 @@ def _load(
     body = "" if last is None or last["body_text"] is None else str(last["body_text"])
     last_address = None if last is None else last["address_norm"]
     subject = "" if last is None or last["subject"] is None else str(last["subject"])
-    last_from_me = bool(
-        last and (last["is_from_me"] or _is_owner(last_address, owners, domains))
-    )
+    last_from_me = bool(last and last["is_from_me"])
     machine_sender = bool(
         last is not None
         and not last_from_me
@@ -747,10 +772,7 @@ def _load(
     if mute is not None and (mute["until"] is None or int(mute["until"]) >= now):
         muted = True
     to_hdr = "" if last is None or last["to_hdr"] is None else str(last["to_hdr"])
-    replied = any(
-        bool(message["is_from_me"]) or _is_owner(message["address_norm"], owners, domains)
-        for message in messages
-    )
+    replied = any(bool(message["is_from_me"]) for message in messages)
     address = "" if not isinstance(last_address, str) else last_address.strip().lower()
     return _Facts(
         starred=bool(star_labels),
@@ -1098,6 +1120,36 @@ def _labels(items: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ..
     for item in items:
         cleaned.append({"type": "label", "id": item.get("id"), "name": item.get("name")})
     return tuple(cleaned)
+
+
+def _with_time(conn, thread_pk: int, outcome: _Outcome, now: int, rules_version: str, policy) -> _Outcome:
+    from mailcrawl.decisions import DecisionDraft
+    from mailcrawl.timefacts import apply_time, thread_time_facts
+
+    draft = DecisionDraft(
+        next_state=outcome.next_state,
+        lane=outcome.lane,
+        rule_id=outcome.rule_id,
+        rules_version=rules_version,
+        origin="rule",
+        source_detail=outcome.rule_id,
+        evidence=outcome.evidence,
+        priority=outcome.priority,
+        review_date=outcome.review_date,
+        muted=outcome.muted,
+    )
+    adjusted = apply_time(draft, thread_time_facts(conn, thread_pk, now), policy)
+    if adjusted is draft:
+        return outcome
+    return _outcome(
+        adjusted.next_state,
+        outcome.rule_id,
+        adjusted.lane,
+        outcome.priority,
+        adjusted.review_date,
+        outcome.muted,
+        adjusted.evidence,
+    )
 
 
 def _outcome(

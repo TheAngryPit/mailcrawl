@@ -6,12 +6,12 @@ import csv
 import datetime
 import random
 import sqlite3
-import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple
 
 from mailcrawl.advise import MODEL_NAME, AdviceCase, Advisor
+from mailcrawl.clock import as_of
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.rules import RulesConfig, bundled_rules_path, load_rules, preview_rules
 from mailcrawl.taxonomy import (
@@ -84,12 +84,13 @@ def dry_run(
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
     advisor: Advisor | None = None,
+    policy=None,
 ) -> dict[str, object]:
     backfill_categories(conn)
     active = _active(categories)
     if config is None:
         config = load_rules(bundled_rules_path())
-    stamp_now = int(time.time()) if now is None else now
+    stamp_now = as_of(now)
     by_state: dict[str, int] = {}
     by_rule: dict[str, int] = {}
     by_label: dict[str, int] = {}
@@ -107,6 +108,7 @@ def dry_run(
         domains=domains,
         security_senders=security_senders,
         test_recipients=test_recipients,
+        policy=policy,
     ):
         state = preview.next_state
         rule_id = preview.rule_id
@@ -324,7 +326,7 @@ def _review_split(
 ) -> tuple[int, int]:
     if config is None:
         config = load_rules(bundled_rules_path())
-    stamp_now = int(time.time()) if now is None else now
+    stamp_now = as_of(now)
     rule0 = 0
     fallthrough = 0
     for preview in preview_rules(

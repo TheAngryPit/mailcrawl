@@ -120,7 +120,7 @@ log "check: python tests"
   python3 -m unittest discover -s tests -v
 ) | tee -a "${PROOF_DIR}/tests.log"
 
-for artifact in review-queue.json review-decide.json review-local.json; do
+for artifact in review-queue.json review-decide.json review-local.json time-decisions.json rules-time.json; do
   if [[ ! -s "${PROOF_DIR}/${artifact}" ]]; then
     fail "missing review artifact ${artifact}"
   fi
@@ -249,7 +249,7 @@ try:
     if body != "This body is fake fixture text.":
         raise SystemExit("cleaned body is not the kept sentence")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 7:
+    if version != 8:
         raise SystemExit(f"user_version {version}")
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table in ("decisions", "sender_decisions", "thread_mutes"):
@@ -461,7 +461,7 @@ stats_out="$(
 )"
 dry_out="$(
   cd "${REPO_ROOT}"
-  python3 -m mailcrawl --json dry-run --account vcl
+  python3 -m mailcrawl --json dry-run --account vcl --now 1700000000
 )"
 echo "${stats_out}" | tee "${PROOF_DIR}/stats.log"
 echo "${dry_out}" | tee "${PROOF_DIR}/dry-run.log"
@@ -529,7 +529,7 @@ try:
         raise SystemExit("message rows")
     if conn.execute("SELECT count(*) FROM labels WHERE gmail_label_id LIKE 'mbox:%'").fetchone()[0]:
         raise SystemExit("provisional labels left")
-    if conn.execute("SELECT count(*) FROM message_labels WHERE gmail_label_id LIKE 'pseudo:%'").fetchone()[0] != 4:
+    if conn.execute("SELECT count(*) FROM message_labels WHERE gmail_label_id LIKE 'pseudo:%'").fetchone()[0] != 3:
         raise SystemExit("pseudo-labels did not survive the gog import")
 finally:
     conn.close()
@@ -573,7 +573,7 @@ conn = sqlite3.connect(path)
 conn.row_factory = sqlite3.Row
 try:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 7:
+    if version != 8:
         raise SystemExit(f"user_version {version}")
     flags = {
         row["subject"]: row["image_only"]
@@ -980,7 +980,7 @@ try:
     ).fetchone()[0]
 finally:
     conn.close()
-code, knn = run(["knn", "--account", "personal", "--thread", target, "--embedder", "fake", "--now", "20"])
+code, knn = run(["knn", "--account", "personal", "--thread", target, "--embedder", "fake", "--now", "1768500000"])
 if code != 0 or knn.get("origin") != "knn" or knn.get("source_detail") != "fake-embedder":
     raise SystemExit(f"knn {knn}")
 if knn.get("next_state") != "reference":
@@ -1010,7 +1010,7 @@ fresh.execute("PRAGMA user_version = 5")
 migrate(fresh)
 version = fresh.execute("PRAGMA user_version").fetchone()[0]
 names = {row[0] for row in fresh.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-if version != USER_VERSION or version != 7:
+if version != USER_VERSION:
     raise SystemExit(f"v5 migration {version}")
 if "vec_classification" in names or "vec_search" in names or "vec_image" in names or "embeddings" in names:
     raise SystemExit(f"v5 tables {sorted(names)}")
@@ -1174,7 +1174,7 @@ finally:
 embedded = run(["embed", "--account", "personal", "--embedder", "fake"])
 if embedded.get("embedded") != 3:
     raise SystemExit(f"image embed {embedded}")
-knn = run(["knn", "--account", "personal", "--thread", target, "--embedder", "fake", "--now", "20"])
+knn = run(["knn", "--account", "personal", "--thread", target, "--embedder", "fake", "--now", "1768500000"])
 if knn.get("origin") != "knn" or knn.get("source_detail") != "fake-embedder" or knn.get("next_state") != "reference":
     raise SystemExit(f"image knn {knn}")
 conn = connect(db_path)
@@ -1286,7 +1286,7 @@ def run(args):
         raise SystemExit(f"{args} {proc.returncode} {proc.stdout} {proc.stderr}")
     return json.loads(proc.stdout)
 
-off = run(["jev", "--account", "personal", "--thread", reply_id, "--client", "fake", "--now", "10"])
+off = run(["jev", "--account", "personal", "--thread", reply_id, "--client", "fake", "--now", "1768500000"])
 if off.get("origin") is not None or off.get("next_state") != "needs_review" or off.get("decision_id") is not None:
     raise SystemExit(f"off jev {off}")
 conn = sqlite3.connect(db_path)
@@ -1303,8 +1303,8 @@ if not plain["hits"] or plain["hits"][0]["subject"] != "Reply note" or any(hit["
 print("off search", plain["hits"][0]["subject"], plain["hits"][0]["source"])
 with open(config, "a", encoding="utf-8") as handle:
     handle.write("\n[inference]\njev-battery = true\nsearch-reranker = true\n")
-first = run(["jev", "--account", "personal", "--thread", reply_id, "--client", "fake", "--now", "10"])
-second = run(["jev", "--account", "personal", "--thread", reply_id, "--client", "fake", "--now", "11"])
+first = run(["jev", "--account", "personal", "--thread", reply_id, "--client", "fake", "--now", "1768500000"])
+second = run(["jev", "--account", "personal", "--thread", reply_id, "--client", "fake", "--now", "1768500001"])
 if first.get("origin") != "model" or first.get("source_detail") != "jev-1.13.0" or first.get("next_state") != "reply":
     raise SystemExit(f"stored jev {first}")
 if second.get("decision_id") != first.get("decision_id"):
@@ -1320,8 +1320,8 @@ finally:
 if stored != 1:
     raise SystemExit(f"decision rows {stored}")
 print("jev", first["origin"], first["source_detail"], first["next_state"], first["decision_id"])
-grey = run(["jev", "--account", "personal", "--thread", grey_id, "--client", "fake", "--now", "10"])
-grey_again = run(["jev", "--account", "personal", "--thread", grey_id, "--client", "fake", "--now", "11"])
+grey = run(["jev", "--account", "personal", "--thread", grey_id, "--client", "fake", "--now", "1768500000"])
+grey_again = run(["jev", "--account", "personal", "--thread", grey_id, "--client", "fake", "--now", "1768500001"])
 if grey.get("origin") != "model" or grey.get("source_detail") != "jev-1.13.0" or grey.get("next_state") != "needs_review":
     raise SystemExit(f"grey {grey}")
 if grey_again.get("decision_id") != grey.get("decision_id"):
@@ -1333,7 +1333,7 @@ if len(ranked["hits"]) != len(plain["hits"]):
 if ranked["hits"][0]["subject"] != "Late note" or ranked["hits"][0]["source"] != "jev":
     raise SystemExit(f"rerank {ranked}")
 print("rerank", [(hit["subject"], hit["source"]) for hit in ranked["hits"]])
-batch = run(["jev", "--account", "personal", "--client", "fake", "--now", "12"])
+batch = run(["jev", "--account", "personal", "--client", "fake", "--now", "1768500002"])
 if (
     batch.get("eligible") != 1
     or batch.get("decided") != 1
@@ -1360,7 +1360,7 @@ finally:
     conn.close()
 if late != ("reference", "jev-1.13.0") or reply_still is None:
     raise SystemExit(f"batch stored {late} {reply_still}")
-again = run(["jev", "--account", "personal", "--client", "fake", "--now", "13"])
+again = run(["jev", "--account", "personal", "--client", "fake", "--now", "1768500003"])
 if again.get("eligible") != 0 or again.get("decided") != 0 or again.get("review") != 0:
     raise SystemExit(f"batch again {again}")
 print("batch", batch["eligible"], batch["decided"], again["eligible"])

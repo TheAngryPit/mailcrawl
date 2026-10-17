@@ -6,6 +6,7 @@ import os
 import tomllib
 from pathlib import Path
 
+from mailcrawl.clock import require_as_of
 from mailcrawl.inference import BoundaryError, enabled_points
 from mailcrawl.paths import UsageError, canonical_alias
 
@@ -93,6 +94,30 @@ def embed_limits(path: Path) -> tuple[int, int]:
     return (
         _optional_count(raw, "batch_size", DEFAULT_BATCH_SIZE),
         _optional_count(raw, "max_tokens", DEFAULT_MAX_TOKENS),
+    )
+
+
+def configured_as_of(path: Path) -> int | None:
+    value = load_config(path).get("as_of")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise UsageError("as_of needs a time")
+    return require_as_of(value)
+
+
+def time_policy(path: Path) -> TimePolicy:
+    from mailcrawl.timefacts import OLD_DAYS, STALE_DAYS, TimePolicy
+
+    document = load_config(path)
+    block = document.get("time")
+    if block is None:
+        return TimePolicy()
+    if not isinstance(block, dict):
+        raise UsageError("time config is not a table")
+    return TimePolicy(
+        stale_days=_optional_days(block, "stale_days", STALE_DAYS),
+        old_days=_optional_days(block, "old_days", OLD_DAYS),
     )
 
 
@@ -185,6 +210,15 @@ def _config_string(value: object, name: str) -> str:
     return value.strip()
 
 
+def _optional_days(raw: dict[str, object], key: str, default: int) -> int:
+    if key not in raw:
+        return default
+    value = raw[key]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise UsageError(f"{key} needs a positive count")
+    return value
+
+
 def _optional_count(raw: dict[str, object], key: str, default: int) -> int:
     if key not in raw:
         return default
@@ -211,6 +245,17 @@ def write_account(path: Path, alias: str, email: str) -> None:
     accounts[canonical] = row
     taxonomy = document.get("taxonomy")
     lines: list[str] = []
+    as_of_value = document.get("as_of")
+    if isinstance(as_of_value, int) and not isinstance(as_of_value, bool) and as_of_value >= 0:
+        lines.append(f"as_of = {as_of_value}")
+        lines.append("")
+    time_block = document.get("time")
+    if isinstance(time_block, dict):
+        lines.append("[time]")
+        for key in ("stale_days", "old_days"):
+            if key in time_block:
+                lines.append(f"{key} = {_optional_days(time_block, key, 0)}")
+        lines.append("")
     if isinstance(taxonomy, str) and taxonomy and '"' not in taxonomy:
         lines.append(f'taxonomy = "{taxonomy}"')
         lines.append("")

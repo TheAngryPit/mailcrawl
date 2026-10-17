@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
-import time
 from pathlib import Path
 
+from mailcrawl.clock import as_of
+from mailcrawl.mbox import stored_date_trusted
 from mailcrawl.paths import UsageError, canonical_alias
 from mailcrawl.schema import FTS_SQL, JEV_SQL, SCHEMA_SQL, TRIGRAM_SQL, USER_VERSION, V2_TABLES_SQL
 from mailcrawl.textnorm import clean_body
@@ -56,6 +57,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         version = 6
     if version == 6:
         _migrate_v6(conn)
+        version = 7
+    if version == 7:
+        _migrate_v7(conn)
         return
     raise UnsupportedSchema(f"user_version {version}")
 
@@ -251,8 +255,47 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
 
 def _migrate_v6(conn: sqlite3.Connection) -> None:
     _execute_statements(conn, JEV_SQL)
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+
+
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    names = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "messages" in names:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
+        if "date_trusted" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN date_trusted INTEGER NOT NULL DEFAULT 1")
+            columns.add("date_trusted")
+        if "is_from_me" in columns and "message_labels" in names:
+            conn.execute(
+                """
+                UPDATE messages
+                SET is_from_me = CASE WHEN EXISTS (
+                  SELECT 1 FROM message_labels
+                  WHERE message_labels.msg_pk = messages.msg_pk
+                    AND message_labels.gmail_label_id = 'SENT'
+                ) THEN 1 ELSE 0 END
+                """
+            )
+        _refresh_date_trusted(conn, columns)
     conn.execute(f"PRAGMA user_version = {USER_VERSION}")
     conn.commit()
+
+
+def _refresh_date_trusted(conn: sqlite3.Connection, columns: set[str]) -> None:
+    if "date_trusted" not in columns or "internal_date" not in columns:
+        return
+    has_raw = "raw_path" in columns
+    query = "SELECT msg_pk, internal_date, raw_path FROM messages" if has_raw else "SELECT msg_pk, internal_date FROM messages"
+    for row in conn.execute(query):
+        msg_pk = int(row[0])
+        stored = row[1]
+        if stored is None or int(stored) == 0 or not has_raw:
+            trust = 0
+        else:
+            decided = stored_date_trusted(row[2], int(stored))
+            trust = 0 if decided is None else decided
+        conn.execute("UPDATE messages SET date_trusted = ? WHERE msg_pk = ?", (trust, msg_pk))
 
 
 def index_message(
@@ -334,7 +377,7 @@ def init_account(data: Path, alias: str, email: str) -> Path:
                 INSERT INTO accounts(alias, email_hash, created_at)
                 VALUES (?, ?, ?)
                 """,
-                (canonical, digest, int(time.time())),
+                (canonical, digest, as_of(None)),
             )
             conn.commit()
         elif row["email_hash"] != digest:

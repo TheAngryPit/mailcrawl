@@ -1,6 +1,6 @@
 """SQLite tables for one account archive."""
 
-USER_VERSION = 7
+USER_VERSION = 8
 
 TABLES = (
     "accounts",
@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS messages (
   lang TEXT,
   size_bytes INTEGER,
   is_from_me INTEGER NOT NULL DEFAULT 0,
+  date_trusted INTEGER NOT NULL DEFAULT 1,
   raw_path TEXT,
   raw_sha256 TEXT NOT NULL,
   raw_json TEXT,

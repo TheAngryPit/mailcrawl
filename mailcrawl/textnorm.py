@@ -40,6 +40,19 @@ def parse_address(value: str | None) -> tuple[str | None, str | None, str | None
     return (name or None), addr, addr.rsplit("@", 1)[1]
 
 
+def chosen_stamp(receipt: int | None, header: int | None, moment: int) -> tuple[int, int]:
+    """Prefer the receipt clock. A header date is untrusted. A future stamp clamps to ``moment``."""
+    if receipt is not None and receipt > 0:
+        stamp, trusted = receipt, 1
+    elif header is not None and header > 0:
+        stamp, trusted = header, 0
+    else:
+        return 0, 0
+    if stamp > moment:
+        stamp = moment
+    return stamp, trusted
+
+
 def parse_date(value: object) -> int | None:
     if isinstance(value, bool):
         return None

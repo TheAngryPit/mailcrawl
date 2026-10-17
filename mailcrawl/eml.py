@@ -28,6 +28,7 @@ def eml_record(
     size_bytes: int | None = None,
     gmail_history_id: str | None = None,
     raw_json: str | None = None,
+    date_trusted: int = 1,
     fallback: dict[str, str | None] | None = None,
 ) -> MessageRec:
     """Build a message record from RFC822 bytes. Header values beat ``fallback``."""
@@ -42,6 +43,7 @@ def eml_record(
         raw_path=raw_path,
         gmail_history_id=gmail_history_id,
         raw_json=raw_json,
+        date_trusted=date_trusted,
         fallback=fallback,
     )
 
@@ -58,6 +60,7 @@ def parsed_record(
     raw_path: str,
     gmail_history_id: str | None = None,
     raw_json: str | None = None,
+    date_trusted: int = 1,
     fallback: dict[str, str | None] | None = None,
 ) -> MessageRec:
     """Build a message record from a parsed message whose raw bytes were hashed while streaming."""
@@ -87,6 +90,7 @@ def parsed_record(
         in_reply_to=headers.get("in-reply-to"),
         references_hdr=headers.get("references"),
         auth_results=headers.get("authentication-results"),
+        date_trusted=date_trusted,
     )
 
 

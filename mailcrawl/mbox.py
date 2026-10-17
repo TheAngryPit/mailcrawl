@@ -24,7 +24,8 @@ from typing import BinaryIO
 from mailcrawl.contract import PSEUDO_LABEL, LabelRec, MessageRec
 from mailcrawl.eml import allow_headers, parsed_record
 from mailcrawl.gognative import ExportInvalid
-from mailcrawl.textnorm import parse_date
+from mailcrawl.clock import as_of
+from mailcrawl.textnorm import chosen_stamp, parse_date
 
 PROVISIONAL = "mbox:"
 RFC822 = "rfc822:"
@@ -33,13 +34,14 @@ RAW_PATH = "mbox:"
 _GMAIL_ID_MAX = 1 << 64
 _SEPARATOR_ID = re.compile(rb"^From (\d+)@\S*")
 _SEPARATOR_REST = re.compile(rb"^From \S+\s+(.*?)\s*$")
+_TAKEOUT_FROM = re.compile(rb"^From \d+@(?:xxx|example\.com)(?:\s|$)")
 _ESCAPED_FROM = re.compile(rb"^>+From ")
 _TAKEOUT_HEADERS = ("x-gm-", "x-gmail-", "x-google-")
 _HEX = re.compile(r"[0-9a-f]+")
 _MESSAGE_ID = re.compile(r"<([^<>\s]+)>")
 _BLANK = b"\r\n"
 _FEED_CHUNK = 1 << 16
-_READ = ("x-gm-msgid", "x-gm-thrid", "x-gmail-message-id", "x-gmail-labels", "date")
+_READ = ("x-gm-msgid", "x-gm-thrid", "x-gmail-message-id", "x-gmail-labels")
 
 SYSTEM_LABELS: dict[str, str] = {
     "inbox": "INBOX",
@@ -105,7 +107,6 @@ class _Takeout:
     gm_thrid: str | None = None
     gmail_message_id: str | None = None
     labels: str | None = None
-    date: str | None = None
 
 
 def gmail_hex(value: str | bytes | None, *, decimal_only: bool) -> str | None:
@@ -230,12 +231,15 @@ class MboxSource:
             thread_root(draft.references_hdr, draft.in_reply_to, own)
         )
         labels = self._labels(takeout.labels)
+        raw_date = parsed.get("date")
+        stamp, trusted = _internal_date(str(raw_date) if raw_date else None, separator)
         return labels, replace(
             draft,
             gmail_message_id=message_id,
             gmail_thread_id=thread_id,
             label_ids=tuple(dict.fromkeys(label.gmail_label_id for label in labels)),
-            internal_date=_internal_date(takeout.date, separator),
+            internal_date=stamp,
+            date_trusted=trusted,
         )
 
     def _labels(self, header: str | None) -> list[LabelRec]:
@@ -342,7 +346,7 @@ class _Entry:
 
     def _end_head(self) -> None:
         assert self._head is not None
-        kept, self._takeout = _strip_takeout(bytes(self._head))
+        kept, self._takeout = _strip_takeout(bytes(self._head), self.separator)
         self._head = None
         header: EmailMessage | None = None
         try:
@@ -377,12 +381,13 @@ def _message_key(takeout: _Takeout, separator: bytes, rfc822_id: str | None) -> 
     return found
 
 
-def _strip_takeout(head: bytes) -> tuple[bytes, _Takeout]:
-    """Drop ``X-Gm-*``, ``X-Gmail-*``, and ``X-Google-*`` from the header block and read Takeout values."""
+def _strip_takeout(head: bytes, separator: bytes) -> tuple[bytes, _Takeout]:
+    """Drop Google headers and read Takeout values from the leading Google block only."""
     kept: list[bytes] = []
     values: dict[str, str] = {}
     capturing: str | None = None
     dropping = False
+    in_block = True
     for line in head.splitlines(keepends=True):
         if line[:1] in (b" ", b"\t"):
             if capturing is not None:
@@ -392,18 +397,23 @@ def _strip_takeout(head: bytes) -> tuple[bytes, _Takeout]:
             continue
         name, colon, rest = line.partition(b":")
         current = name.strip().decode("ascii", "replace").lower() if colon else ""
-        dropping = current.startswith(_TAKEOUT_HEADERS)
-        capturing = current if current in _READ and current not in values else None
+        takeout_header = bool(current) and current.startswith(_TAKEOUT_HEADERS)
+        if in_block and current and not takeout_header:
+            in_block = False
+            capturing = None
+        dropping = takeout_header
+        capturing = current if in_block and current in _READ and current not in values else None
         if capturing is not None:
             values[capturing] = _header_text(rest)
         if not dropping:
             kept.append(line)
+    labels = values.get("x-gmail-labels")
+    accept = labels is not None and _TAKEOUT_FROM.match(separator) is not None
     takeout = _Takeout(
         gm_msgid=values.get("x-gm-msgid"),
-        gm_thrid=values.get("x-gm-thrid"),
+        gm_thrid=values.get("x-gm-thrid") if accept else None,
         gmail_message_id=values.get("x-gmail-message-id"),
-        labels=_decoded(values.get("x-gmail-labels")),
-        date=values.get("date"),
+        labels=_decoded(labels) if accept else None,
     )
     return b"".join(kept), takeout
 
@@ -428,14 +438,98 @@ def _separator_id(separator: bytes) -> str | None:
     return gmail_hex(found.group(1), decimal_only=True)
 
 
-def _internal_date(header: str | None, separator: bytes) -> int:
+def stored_date_trusted(raw_path: object, stored: int) -> int | None:
+    """Trust a stored stamp only when the raw source shows it is the receipt clock."""
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    if raw_path.startswith(RAW_PATH):
+        return _mbox_row_trust(raw_path, stored)
+    return _header_only_trust(raw_path, stored)
+
+
+def _mbox_ref(raw_path: str) -> tuple[Path, int] | None:
+    body = raw_path[len(RAW_PATH) :]
+    path_text, sep, offset_text = body.rpartition("#")
+    if not sep or not offset_text.isdigit() or len(offset_text) > 12:
+        return None
+    return Path(path_text), int(offset_text)
+
+
+def _mbox_row_trust(raw_path: str, stored: int) -> int:
+    ref = _mbox_ref(raw_path)
+    if ref is None:
+        return 0
+    path, offset = ref
+    try:
+        if not path.is_file():
+            return 0
+        separator = _read_mbox_separator(path, offset)
+    except OSError:
+        return 0
     rest = _SEPARATOR_REST.match(separator)
     fallback = rest.group(1).decode("utf-8", "replace") if rest else None
-    for candidate in (header, fallback):
-        parsed = parse_date(candidate) if candidate else None
-        if parsed is not None and parsed >= 0:
-            return parsed
+    receipt = parse_date(fallback) if fallback else None
+    if receipt is not None and receipt > 0 and stored == receipt:
+        return 1
     return 0
+
+
+def _header_only_trust(raw_path: str, stored: int) -> int | None:
+    path = Path(raw_path)
+    try:
+        if not path.is_file():
+            return None
+        header = _date_header(_read_head(path, 0))
+    except OSError:
+        return None
+    stamp = parse_date(header) if header else None
+    if stamp is not None and stamp > 0 and stored == stamp:
+        return 0
+    return None
+
+
+def _read_mbox_separator(path: Path, offset: int) -> bytes:
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        return handle.readline(4096)
+
+
+def _read_head(path: Path, offset: int) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        while size < 65536:
+            line = handle.readline(4096)
+            if not line or line in (b"\n", b"\r\n"):
+                break
+            chunks.append(line)
+            size += len(line)
+    return b"".join(chunks)
+
+
+def _date_header(head: bytes) -> str | None:
+    capturing = False
+    value = ""
+    for line in head.splitlines():
+        if line[:1] in (b" ", b"\t"):
+            if capturing:
+                value += " " + line.decode("utf-8", "replace").strip()
+            continue
+        capturing = False
+        name, colon, rest = line.partition(b":")
+        if colon and name.strip().lower() == b"date":
+            capturing = True
+            value = rest.decode("utf-8", "replace").strip()
+    return value or None
+
+
+def _internal_date(header: str | None, separator: bytes) -> tuple[int, int]:
+    rest = _SEPARATOR_REST.match(separator)
+    fallback = rest.group(1).decode("utf-8", "replace") if rest else None
+    receipt = parse_date(fallback) if fallback else None
+    header_stamp = parse_date(header) if header else None
+    return chosen_stamp(receipt, header_stamp, as_of(None))
 
 
 def _bare_message_id(value: str) -> str:

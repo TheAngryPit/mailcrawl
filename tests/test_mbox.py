@@ -143,7 +143,7 @@ class MboxImportTest(unittest.TestCase):
         self.assertNotIn("mbox:Opened", kinds)
         self.assertNotIn("mbox:Aberto", kinds)
         odd = "rfc822:" + hashlib.sha256(b"mbox-odd@example.com").hexdigest()
-        self.assertEqual(self.labels_of(odd), ["pseudo:opened"])
+        self.assertEqual(self.labels_of(odd), [])
 
     def test_raw_sha256_drops_takeout_parts(self) -> None:
         self.mbox()
