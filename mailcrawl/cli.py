@@ -16,6 +16,7 @@ from mailcrawl.configfile import (
     account_identity,
     embed_limits,
     embedder_name,
+    allow_override,
     inference_config,
     local_llm,
     write_account,
@@ -33,8 +34,11 @@ from mailcrawl.review import (
     decision_document,
     open_readonly,
     parse_agent_decision,
+    parse_scope,
     review_queue,
     review_run,
+    undo_decisions,
+    undo_document,
 )
 from mailcrawl.rules import apply_rules, load_rules
 from mailcrawl.search import search_messages
@@ -189,11 +193,17 @@ def _parser() -> argparse.ArgumentParser:
     review_sub = review.add_subparsers(dest="review_command", required=True)
     queue = review_sub.add_parser("queue")
     queue.add_argument("--account", required=True)
-    queue.add_argument("--limit", type=int)
+    _scope_args(queue)
     run = review_sub.add_parser("run")
     run.add_argument("--account", required=True)
-    run.add_argument("--limit", type=int)
+    run.add_argument("--override", action="store_true")
     run.add_argument("--now", type=int)
+    _scope_args(run)
+    undo = review_sub.add_parser("undo")
+    undo.add_argument("--account", required=True)
+    undo.add_argument("--thread")
+    undo.add_argument("--source-detail")
+    undo.add_argument("--now", type=int)
     decide = sub.add_parser("decide")
     decide.add_argument("--account", required=True)
     decide.add_argument("--thread")
@@ -202,6 +212,7 @@ def _parser() -> argparse.ArgumentParser:
     decide.add_argument("--source-detail")
     decide.add_argument("--reason")
     decide.add_argument("--file")
+    decide.add_argument("--override", action="store_true")
     decide.add_argument("--now", type=int)
     bench = sub.add_parser("bench")
     bench.add_argument("--account", required=True)
@@ -631,13 +642,36 @@ def _init_aliases(args: argparse.Namespace) -> list[str]:
     return found
 
 
+def _scope_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--all", action="store_true")
+    parser.add_argument("--origin")
+    parser.add_argument("--rule")
+    parser.add_argument("--label")
+    parser.add_argument("--state")
+    parser.add_argument("--since", type=int)
+    parser.add_argument("--limit", type=int)
+
+
+def _review_scope(args: argparse.Namespace):
+    return parse_scope(
+        everything=bool(args.all),
+        origin=args.origin,
+        rule=args.rule,
+        label=args.label,
+        state=args.state,
+        since=args.since,
+        limit=args.limit,
+    )
+
+
 def _review(args: argparse.Namespace) -> int:
     alias = canonical_alias(args.account)
-    _max = embed_limits(config_path(args.config))[1]
+    config = config_path(args.config)
+    _max = embed_limits(config)[1]
     if args.review_command == "queue":
         conn = open_readonly(data_dir(args.home) / f"{alias}.db")
         try:
-            items = review_queue(conn, alias, limit=args.limit, max_tokens=_max)
+            items = review_queue(conn, alias, _review_scope(args), max_tokens=_max)
         finally:
             conn.close()
         documents = [item.document() for item in items]
@@ -649,34 +683,51 @@ def _review(args: argparse.Namespace) -> int:
         return 0
     conn = _account_db(args)
     try:
-        rows = review_run(
-            conn,
-            alias,
-            local_llm(config_path(args.config)),
-            limit=args.limit,
-            max_tokens=_max,
-            now=int(time.time()) if args.now is None else args.now,
-        )
-        documents = [
-            decision_document(row, _thread_id(conn, int(row["thread_pk"])), changed)
-            for row, changed in rows
-        ]
+        now = int(time.time()) if args.now is None else args.now
+        if args.review_command == "undo":
+            restored = undo_decisions(
+                conn,
+                thread_id=args.thread,
+                source_detail=args.source_detail,
+                now=now,
+            )
+            documents = [
+                undo_document(thread_id, row, changed) for thread_id, row, changed in restored
+            ]
+        else:
+            override = bool(args.override) or allow_override(config)
+            rows = review_run(
+                conn,
+                alias,
+                local_llm(config),
+                _review_scope(args),
+                inference_config(config),
+                max_tokens=_max,
+                now=now,
+                override=override,
+            )
+            documents = [
+                decision_document(row, _thread_id(conn, int(row["thread_pk"])), changed)
+                for row, changed in rows
+            ]
     finally:
         conn.close()
-    _emit(args, {"decisions": documents, "ok": True}, text=f"decided {len(documents)}")
+    text = f"undone {len(documents)}" if args.review_command == "undo" else f"decided {len(documents)}"
+    _emit(args, {"decisions": documents, "ok": True}, text=text)
     return 0
 
 
 def _decide(args: argparse.Namespace) -> int:
     alias = canonical_alias(args.account)
     now = int(time.time()) if args.now is None else args.now
+    override = bool(args.override) or allow_override(config_path(args.config))
     conn = _account_db(args)
     try:
         if args.file is not None:
             if args.thread or args.state or args.lane or args.source_detail or args.reason:
                 raise UsageError("decide takes flags or a file")
             lines = _decision_lines(args.file)
-            rows = apply_jsonl(conn, lines, now)
+            rows = apply_jsonl(conn, lines, now, override=override)
         else:
             decision = parse_agent_decision(
                 {
@@ -687,7 +738,7 @@ def _decide(args: argparse.Namespace) -> int:
                     "thread_id": args.thread,
                 }
             )
-            rows = [apply_agent_decision(conn, decision, now)]
+            rows = [apply_agent_decision(conn, decision, now, override=override)]
         ids = {int(row["thread_pk"]): _thread_id(conn, int(row["thread_pk"])) for row, _changed in rows}
     finally:
         conn.close()

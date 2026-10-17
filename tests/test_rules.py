@@ -8,7 +8,8 @@ from pathlib import Path
 
 from mailcrawl.cli import main
 from mailcrawl.configfile import account_identity, write_account
-from mailcrawl.rules import RULES_VERSION, apply_rules, load_rules, preview_rules
+from mailcrawl.paths import UsageError
+from mailcrawl.rules import RULES_VERSION, apply_rules, load_rules, preview_rules, supersede_current
 from mailcrawl.store import connect, init_account
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -565,6 +566,53 @@ class RulesEngineTest(unittest.TestCase):
         )
         self.assertEqual(preview[0].rule_id, "6")
         self.assertNotEqual(preview[0].rule_id, "5")
+
+    def test_rules_rerun_leaves_a_human_row_current(self) -> None:
+        human = self._thread("hello there")
+        other = self._thread("hello there")
+        self.conn.execute(
+            """
+            INSERT INTO decisions(
+              thread_pk, next_state, lane, source, origin, source_detail,
+              rule_id, rules_version, evidence, created_at
+            ) VALUES (?, 'read_later', 'imbox', 'human', 'human', 'person', 'human', 'human', '[]', ?)
+            """,
+            (human, NOW - 31 * DAY),
+        )
+        self.conn.commit()
+        apply_rules(self.conn, now=NOW, config=self.config)
+        stayed = self.conn.execute(
+            """
+            SELECT origin, next_state, superseded_by
+            FROM decisions WHERE thread_pk = ? ORDER BY decision_id
+            """,
+            (human,),
+        ).fetchall()
+        self.assertEqual([tuple(row) for row in stayed], [("human", "read_later", None)])
+        other_row = self.conn.execute(
+            """
+            SELECT origin, rule_id FROM decisions
+            WHERE thread_pk = ? AND superseded_by IS NULL
+            """,
+            (other,),
+        ).fetchone()
+        self.assertEqual(tuple(other_row), ("rule", "5"))
+        human_id = int(
+            self.conn.execute(
+                "SELECT decision_id FROM decisions WHERE thread_pk = ?",
+                (human,),
+            ).fetchone()[0]
+        )
+        with self.assertRaises(UsageError) as caught:
+            supersede_current(self.conn, human_id, lambda: 0)
+        self.assertEqual(str(caught.exception), "a human decision stays")
+        self.assertEqual(
+            [tuple(row) for row in self.conn.execute(
+                "SELECT origin, superseded_by FROM decisions WHERE thread_pk = ?",
+                (human,),
+            )],
+            [("human", None)],
+        )
 
     def test_doubtful_line_is_not_a_question(self) -> None:
         thread = self._thread("On the meeting we decided.", from_me=1)
