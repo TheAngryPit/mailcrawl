@@ -1118,13 +1118,18 @@ class FlatEmbedTest(unittest.TestCase):
         )
         many = _gif_frames(200, (5000, 4000))
         budget = _gif_frames(64, (5000, 4000))
+        square = _gif_frames(4, (5000, 5000))
         self.assertEqual(
             image_gate("image/gif", 0, len(many), many),
             (False, "frames 200 above 64"),
         )
         self.assertEqual(
             image_gate("image/gif", 0, len(budget), budget),
-            (False, "frame work 1280000000 above 100000000"),
+            (False, "frame work 1280000000 above 25000000"),
+        )
+        self.assertEqual(
+            image_gate("image/gif", 0, len(square), square),
+            (False, "frame work 100000000 above 25000000"),
         )
         allowed = _gif_frames(64, (32, 32))
         self.assertEqual(image_gate("image/gif", 0, len(allowed), allowed), (True, None))
@@ -1152,7 +1157,11 @@ class FlatEmbedTest(unittest.TestCase):
             )
             self.assertEqual(
                 image_gate("image/gif", 0, len(budget), budget),
-                (False, "frame work 1280000000 above 100000000"),
+                (False, "frame work 1280000000 above 25000000"),
+            )
+            self.assertEqual(
+                image_gate("image/gif", 0, len(square), square),
+                (False, "frame work 100000000 above 25000000"),
             )
             self.assertEqual(loads, [])
             self.assertEqual(
@@ -1195,6 +1204,7 @@ class FlatEmbedTest(unittest.TestCase):
                     "tile.gif": (_gif_later_frame((64, 64), (4000, 4000)), "image/gif"),
                     "many.gif": (_gif_frames(200, (5000, 4000)), "image/gif"),
                     "budget.gif": (_gif_frames(64, (5000, 4000)), "image/gif"),
+                    "square.gif": (_gif_frames(4, (5000, 5000)), "image/gif"),
                     "unknown.webp": (b"not-an-image", "image/webp"),
                     "scan.png": (_solid_png(32, 32), "image/png"),
                 }
@@ -1232,7 +1242,8 @@ class FlatEmbedTest(unittest.TestCase):
                 self.assertIn("side 20000x1000 above 8192", log)
                 self.assertIn("frame 4000x4000 above screen 64x64", log)
                 self.assertIn("frames 200 above 64", log)
-                self.assertIn("frame work 1280000000 above 100000000", log)
+                self.assertIn("frame work 1280000000 above 25000000", log)
+                self.assertIn("frame work 100000000 above 25000000", log)
                 self.assertIn(files["scan.png"][0], embedder.seen)
                 self.assertNotIn(files["huge.png"][0], embedder.seen)
                 self.assertNotIn(files["huge.gif"][0], embedder.seen)
@@ -1243,6 +1254,7 @@ class FlatEmbedTest(unittest.TestCase):
                 self.assertNotIn(files["tile.gif"][0], embedder.seen)
                 self.assertNotIn(files["many.gif"][0], embedder.seen)
                 self.assertNotIn(files["budget.gif"][0], embedder.seen)
+                self.assertNotIn(files["square.gif"][0], embedder.seen)
                 if "bomb.bmp" in files:
                     self.assertIn("decompression bomb", log)
                     self.assertIn(files["scan.bmp"][0], embedder.seen)
