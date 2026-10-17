@@ -24,3 +24,8 @@ def require_as_of(value: int) -> int:
     if stamp < AS_OF_MIN or stamp > AS_OF_MAX:
         raise UsageError("as_of is out of range")
     return stamp
+
+
+def utc_parts(stamp: int) -> tuple[int, int, int]:
+    year, month, day = time.gmtime(int(stamp))[:3]
+    return int(year), int(month), int(day)

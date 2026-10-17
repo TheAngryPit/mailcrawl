@@ -14,7 +14,8 @@ from pathlib import Path, PurePosixPath
 
 from mailcrawl.contract import ExportDocument, LabelRec, MessageRec, infer_kind
 from mailcrawl.eml import eml_record
-from mailcrawl.textnorm import parse_date
+from mailcrawl.clock import as_of
+from mailcrawl.textnorm import chosen_stamp, parse_date
 
 _INDEX_KNOWN = frozenset(
     {
@@ -157,7 +158,7 @@ def _parse_record(line: str, line_no: int, root: Path) -> MessageRec:
     thread_id = thread_value
     where = f"record {message_id} line {line_no}"
     label_ids = _label_ids(item.get("labelIds"), where)
-    internal_date = _internal_date(item, where)
+    internal_date, date_trusted = _internal_date(item, where)
     index_from = _optional_str(item.get("from"), where, "from")
     index_to = _address_list(item.get("to"), where, "to")
     index_cc = _address_list(item.get("cc"), where, "cc")
@@ -181,6 +182,7 @@ def _parse_record(line: str, line_no: int, root: Path) -> MessageRec:
         size_bytes=_size(item.get("sizeEstimate"), where),
         gmail_history_id=history,
         raw_json=_raw_json(unknown),
+        date_trusted=date_trusted,
         fallback={
             "from": index_from,
             "to": index_to,
@@ -223,17 +225,18 @@ def _address_list(value: object, where: str, field: str) -> str | None:
     return ", ".join(value)
 
 
-def _internal_date(item: dict[str, object], where: str) -> int:
+def _internal_date(item: dict[str, object], where: str) -> tuple[int, int]:
+    receipt = None
     if "internalDate" in item and item["internalDate"] is not None:
         value = item["internalDate"]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise _bad(f"{where} field internalDate is not an integer")
         # Gmail and the gog index store unix milliseconds.
-        return value // 1000
-    parsed = parse_date(item.get("date"))
-    if parsed is None:
+        receipt = value // 1000
+    header = parse_date(item.get("date"))
+    if receipt is None and header is None:
         raise _bad(f"{where} is missing internalDate and date")
-    return parsed
+    return chosen_stamp(receipt, header, as_of(None))
 
 
 def _size(value: object, where: str) -> int | None:

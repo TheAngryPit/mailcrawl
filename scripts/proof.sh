@@ -249,7 +249,7 @@ try:
     if body != "This body is fake fixture text.":
         raise SystemExit("cleaned body is not the kept sentence")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 7:
+    if version != 8:
         raise SystemExit(f"user_version {version}")
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table in ("decisions", "sender_decisions", "thread_mutes"):
@@ -573,7 +573,7 @@ conn = sqlite3.connect(path)
 conn.row_factory = sqlite3.Row
 try:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 7:
+    if version != 8:
         raise SystemExit(f"user_version {version}")
     flags = {
         row["subject"]: row["image_only"]
@@ -1010,7 +1010,7 @@ fresh.execute("PRAGMA user_version = 5")
 migrate(fresh)
 version = fresh.execute("PRAGMA user_version").fetchone()[0]
 names = {row[0] for row in fresh.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-if version != USER_VERSION or version != 7:
+if version != USER_VERSION:
     raise SystemExit(f"v5 migration {version}")
 if "vec_classification" in names or "vec_search" in names or "vec_image" in names or "embeddings" in names:
     raise SystemExit(f"v5 tables {sorted(names)}")

@@ -4,6 +4,7 @@ import ast
 import calendar
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -15,8 +16,11 @@ from mailcrawl.inference import invoke
 from mailcrawl.jev import MODEL_ID, FakeJev, jev_decide
 from mailcrawl.paths import UsageError
 from mailcrawl.review import undo_decisions
-from mailcrawl.rules import apply_rules, load_rules
-from mailcrawl.store import connect
+from mailcrawl.contract import CONTRACT_V0
+from mailcrawl.ingest import import_gog_export, import_mbox
+from mailcrawl.rules import apply_rules, bundled_rules_path, load_rules
+from mailcrawl.schema import SCHEMA_SQL, USER_VERSION
+from mailcrawl.store import connect, init_account, migrate
 from mailcrawl.timefacts import TEXT_CAP, TimeFacts, TimePolicy, apply_time, thread_time_facts
 from mailcrawl.vectors import FakeEmbedder, embed_threads, knn_decide
 
@@ -33,7 +37,10 @@ class TimeFactsTest(unittest.TestCase):
         for path in sorted((ROOT / "mailcrawl").glob("*.py")):
             if path.name == "clock.py":
                 continue
-            self.assertFalse(_reads_wall_clock(path.read_text(encoding="utf-8")), path.name)
+            self.assertFalse(
+                _reads_wall_clock(path.read_text(encoding="utf-8"), path.name),
+                path.name,
+            )
         clock = (ROOT / "mailcrawl" / "clock.py").read_text(encoding="utf-8")
         self.assertIn("time.time(", clock)
         self.assertEqual(as_of(AS_OF, 1), AS_OF)
@@ -41,14 +48,36 @@ class TimeFactsTest(unittest.TestCase):
         for sample in (
             "from time import time\n",
             "import time as t\n",
+            "from time import *\n",
             "import datetime\ndatetime.datetime.utcnow()\n",
             "from datetime import datetime\ndatetime.now()\n",
             "from datetime import date\ndate.today()\n",
             "import time\ntime.time()\n",
+            "import time\ntime.time_ns()\n",
+            "import time\ntime.monotonic()\n",
+            "import time\ntime.monotonic_ns()\n",
+            "import time\ntime.gmtime()\n",
+            "import time\ntime.localtime()\n",
+            "import time\ntime.ctime()\n",
+            "import time\ntime.asctime()\n",
+            "import time\ntime.strftime('%Y')\n",
+            "import time\ngetattr(time, 'time')()\n",
+            "__import__('time').time()\n",
+            "import datetime\ndatetime.datetime.fromtimestamp()\n",
+            "import datetime, time\ndatetime.datetime.fromtimestamp(time.time())\n",
+            "import time\ntime.perf_counter()\n",
         ):
             self.assertTrue(_reads_wall_clock(sample), sample)
-        self.assertFalse(_reads_wall_clock("import time\ntime.sleep(1)\n"))
+        self.assertFalse(_reads_wall_clock("import time\ntime.sleep(1)\n", "jev.py"))
+        self.assertTrue(_reads_wall_clock("import time\ntime.sleep(1)\n", "rules.py"))
+        self.assertFalse(_reads_wall_clock("import time\ntime.perf_counter()\n", "bench.py"))
         self.assertFalse(_reads_wall_clock("x = 'time.time()'\n"))
+        self.assertFalse(
+            _reads_wall_clock(
+                "import datetime\ndatetime.datetime.fromtimestamp(1, datetime.timezone.utc)\n",
+                "report.py",
+            )
+        )
 
     def test_date_scan_is_bounded_and_has_no_eval(self) -> None:
         source = (ROOT / "mailcrawl" / "timefacts.py").read_text(encoding="utf-8")
@@ -436,6 +465,313 @@ class TimeFactsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
+    def test_sent_label_is_the_owner_through_each_importer(self) -> None:
+        rules = load_rules(bundled_rules_path())
+        body = "Please reply with the signed contract."
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            conn = connect(init_account(home, "personal", "ada@example.com"))
+            try:
+                self._gog(
+                    conn,
+                    home / "gog",
+                    [
+                        ("m-forged", "thr", ["INBOX"], _stamp(2026, 10, 16), '"Ada" <ada@example.com>', body),
+                        ("m-sent", "thr2", ["SENT"], _stamp(2026, 10, 16), "Mallory <ada@example.com>", "Can you confirm?"),
+                    ],
+                )
+                forged = conn.execute(
+                    "SELECT is_from_me, date_trusted FROM messages WHERE gmail_message_id = 'm-forged'"
+                ).fetchone()
+                sent = conn.execute(
+                    "SELECT is_from_me FROM messages WHERE gmail_message_id = 'm-sent'"
+                ).fetchone()
+                self.assertEqual(int(forged["is_from_me"]), 0)
+                self.assertEqual(int(sent["is_from_me"]), 1)
+                forged_pk = int(
+                    conn.execute("SELECT thread_pk FROM messages WHERE gmail_message_id = 'm-forged'").fetchone()[0]
+                )
+                facts = thread_time_facts(conn, forged_pk, AS_OF)
+                self.assertEqual(facts.last_human, "other")
+                self.assertEqual(apply_time(self._reply_draft(), facts).next_state, "reply")
+                apply_rules(
+                    conn,
+                    now=AS_OF,
+                    config=rules,
+                    owners=frozenset({"ada@example.com"}),
+                    domains=frozenset({"example.com"}),
+                )
+                self.assertEqual(_current(conn, forged_pk)["next_state"], "reply")
+                self.assertEqual(_current(conn, forged_pk)["rule_id"], "5")
+                self._mbox_sent(conn, home / "takeout.mbox")
+                inbox = conn.execute(
+                    "SELECT is_from_me FROM messages WHERE gmail_message_id = '2'"
+                ).fetchone()
+                sent_mbox = conn.execute(
+                    "SELECT is_from_me, internal_date, date_trusted FROM messages WHERE gmail_message_id = '1'"
+                ).fetchone()
+                self.assertEqual(int(inbox["is_from_me"]), 0)
+                self.assertEqual(int(sent_mbox["is_from_me"]), 1)
+                self.assertEqual(int(sent_mbox["date_trusted"]), 1)
+                self.assertEqual(int(sent_mbox["internal_date"]), _stamp(2026, 10, 10))
+                self._native_forged(home / "native")
+                import_gog_export(
+                    conn,
+                    alias="personal",
+                    export_dir=home / "native",
+                    taxonomy_path=None,
+                    account_email="ada@example.com",
+                )
+                native = conn.execute(
+                    "SELECT is_from_me, date_trusted FROM messages WHERE gmail_message_id = 'native-forged'"
+                ).fetchone()
+                self.assertEqual((int(native["is_from_me"]), int(native["date_trusted"])), (0, 1))
+            finally:
+                conn.close()
+
+    def test_forged_date_zero_and_future_only_reach_review(self) -> None:
+        rules = load_rules(bundled_rules_path())
+        body = "Please reply with the signed contract today."
+        cases = (
+            ("old", _stamp(2020, 1, 2), None, "needs_review"),
+            ("zero", 0, None, "needs_review"),
+            ("future", _stamp(2090, 1, 1), None, "reply"),
+            ("receipt", _stamp(2020, 1, 2), _stamp(2026, 10, 16), "reply"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            conn = connect(init_account(home, "personal", "ada@example.com"))
+            try:
+                messages = []
+                for name, header, receipt, _expected in cases:
+                    messages.append(
+                        (f"m-{name}", f"thr-{name}", ["INBOX"], header, "Bob <bob@client.com>", body, receipt)
+                    )
+                self._gog(conn, home / "dates", messages)
+                for name, _header, _receipt, expected in cases:
+                    row = conn.execute(
+                        """
+                        SELECT thread_pk, date_trusted, internal_date
+                        FROM messages WHERE gmail_message_id = ?
+                        """,
+                        (f"m-{name}",),
+                    ).fetchone()
+                    facts = thread_time_facts(conn, int(row["thread_pk"]), AS_OF)
+                    adjusted = apply_time(self._reply_draft(), facts)
+                    self.assertEqual(adjusted.next_state, expected, name)
+                    self.assertNotEqual(adjusted.lane, "paper_trail", name)
+                    if name == "receipt":
+                        self.assertEqual(int(row["date_trusted"]), 1)
+                        self.assertEqual(int(row["internal_date"]), _stamp(2026, 10, 16))
+                    elif name == "future":
+                        self.assertEqual(int(row["date_trusted"]), 0)
+                        self.assertLessEqual(int(row["internal_date"]), as_of(None))
+                    else:
+                        self.assertEqual(int(row["date_trusted"]), 0)
+                apply_rules(
+                    conn,
+                    now=AS_OF,
+                    config=rules,
+                    owners=frozenset({"ada@example.com"}),
+                )
+                for name, _header, _receipt, expected in cases:
+                    thread_pk = int(
+                        conn.execute(
+                            "SELECT thread_pk FROM messages WHERE gmail_message_id = ?",
+                            (f"m-{name}",),
+                        ).fetchone()[0]
+                    )
+                    current = _current(conn, thread_pk)
+                    self.assertEqual(current["next_state"], expected, name)
+                    self.assertNotEqual(current["lane"], "paper_trail", name)
+            finally:
+                conn.close()
+
+    def test_exact_automated_tokens_and_sent_migration(self) -> None:
+        with self._db() as conn:
+            self._message(conn, 1, "ada@example.com", 1, _stamp(2026, 10, 10), "Ask", "what do you think?")
+            self._message(
+                conn,
+                1,
+                "bob@notmixmax.com",
+                0,
+                _stamp(2026, 10, 16),
+                "Reply",
+                "Please reply: I need your approval",
+            )
+            self._message(
+                conn,
+                2,
+                "ana.noreplyfan@client.com",
+                0,
+                _stamp(2026, 10, 16),
+                "Reply",
+                "Please reply: approve?",
+            )
+            mixed = thread_time_facts(conn, 1, AS_OF)
+            fan = thread_time_facts(conn, 2, AS_OF)
+            self.assertEqual(mixed.last_human, "other")
+            self.assertEqual(apply_time(self._reply_draft(), mixed).next_state, "reply")
+            self.assertEqual(fan.last_human, "other")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.db"
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.executescript(SCHEMA_SQL)
+                conn.execute("ALTER TABLE messages DROP COLUMN date_trusted")
+                conn.execute("PRAGMA user_version = 7")
+                conn.execute(
+                    "INSERT INTO accounts(alias, email_hash, created_at) VALUES ('personal', 'abc', 1)"
+                )
+                conn.execute(
+                    "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (1, 't', 2, 0)"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO messages(
+                      account_id, gmail_message_id, thread_pk, internal_date, is_from_me,
+                      raw_sha256, provenance_hash, imported_at
+                    ) VALUES (1, 'forged', 1, ?, 1, 'a', 'a', 1)
+                    """,
+                    (_stamp(2026, 10, 16),),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO messages(
+                      account_id, gmail_message_id, thread_pk, internal_date, is_from_me,
+                      raw_sha256, provenance_hash, imported_at
+                    ) VALUES (1, 'sent', 1, 0, 0, 'b', 'b', 1)
+                    """
+                )
+                sent_pk = int(conn.execute("SELECT msg_pk FROM messages WHERE gmail_message_id = 'sent'").fetchone()[0])
+                conn.execute(
+                    """
+                    INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+                    VALUES (?, 1, 'SENT', 1)
+                    """,
+                    (sent_pk,),
+                )
+                conn.commit()
+                migrate(conn)
+                forged = conn.execute(
+                    "SELECT is_from_me, date_trusted FROM messages WHERE gmail_message_id = 'forged'"
+                ).fetchone()
+                sent = conn.execute(
+                    "SELECT is_from_me, date_trusted FROM messages WHERE gmail_message_id = 'sent'"
+                ).fetchone()
+                self.assertEqual((int(forged["is_from_me"]), int(forged["date_trusted"])), (0, 1))
+                self.assertEqual((int(sent["is_from_me"]), int(sent["date_trusted"])), (1, 0))
+                self.assertEqual(int(conn.execute("PRAGMA user_version").fetchone()[0]), USER_VERSION)
+                conn.execute("PRAGMA user_version = 7")
+                conn.execute("UPDATE messages SET is_from_me = 1 WHERE gmail_message_id = 'forged'")
+                conn.commit()
+                migrate(conn)
+                again = conn.execute(
+                    "SELECT is_from_me, date_trusted FROM messages WHERE gmail_message_id = 'forged'"
+                ).fetchone()
+                self.assertEqual((int(again["is_from_me"]), int(again["date_trusted"])), (0, 1))
+            finally:
+                conn.close()
+
+    def _reply_draft(self) -> DecisionDraft:
+        return DecisionDraft(
+            next_state="reply",
+            lane="imbox",
+            rule_id="5",
+            rules_version="rules-v4",
+            origin="knn",
+            source_detail="x",
+        )
+
+    def _gog(self, conn, directory: Path, messages: list[tuple]) -> None:
+        directory.mkdir()
+        payload = []
+        for item in messages:
+            if len(item) == 6:
+                message_id, thread_id, labels, when, sender, body = item
+                receipt = None
+            else:
+                message_id, thread_id, labels, when, sender, body, receipt = item
+            row = {
+                "example_message_id": message_id,
+                "example_thread_id": thread_id,
+                "example_label_ids": labels,
+                "example_date": when,
+                "example_from": sender,
+                "example_subject": "Contrato",
+                "example_body": body,
+            }
+            if receipt is not None:
+                row["example_internal_date"] = receipt
+            payload.append(row)
+        document = {
+            "schema": CONTRACT_V0,
+            "example_manifest": {"messages": len(payload)},
+            "example_messages": payload,
+        }
+        (directory / "export.json").write_text(json.dumps(document), encoding="utf-8")
+        import_gog_export(
+            conn,
+            alias="personal",
+            export_dir=directory,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+
+    def _mbox_sent(self, conn, path: Path) -> None:
+        path.write_bytes(
+            b"From 1@example.com Sat Oct 10 12:00:00 +0000 2026\n"
+            b"Message-ID: <mbox-owner@example.com>\n"
+            b"From: Mallory <ada@example.com>\n"
+            b"X-Gmail-Labels: Sent\n"
+            b"Date: Thu, 02 Jan 2020 00:00:00 +0000\n"
+            b"Subject: q\n\n"
+            b"Can you confirm?\n"
+            b"\n"
+            b"From 2@example.com Sat Oct 16 12:00:00 +0000 2026\n"
+            b"Message-ID: <mbox-sent@example.com>\n"
+            b"From: Mallory <ada@example.com>\n"
+            b"X-Gmail-Labels: Inbox\n"
+            b"Date: Thu, 02 Jan 2020 00:00:00 +0000\n"
+            b"Subject: q\n\n"
+            b"Please reply with the signed contract.\n"
+        )
+        import_mbox(
+            conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+
+    def _native_forged(self, root: Path) -> None:
+        account = root / "gmail" / "acct_synthetic"
+        messages = account / "messages"
+        messages.mkdir(parents=True)
+        (account / "labels.json").write_text(
+            json.dumps([{"id": "INBOX", "name": "INBOX", "type": "system"}, {"id": "SENT", "name": "SENT", "type": "system"}]),
+            encoding="utf-8",
+        )
+        eml = messages / "forged.eml"
+        eml.write_text(
+            "From: Mallory <ada@example.com>\nTo: Bob <bob@client.com>\n"
+            "Subject: Contrato\nDate: Thu, 01 Jan 2020 00:00:00 +0000\n"
+            "Message-ID: <native-forged@example.com>\n\nPlease reply with the signed contract.\n",
+            encoding="utf-8",
+        )
+        record = {
+            "id": "native-forged",
+            "threadId": "thr-native",
+            "internalDate": _stamp(2026, 10, 16) * 1000,
+            "labelIds": ["INBOX"],
+            "from": "Mallory <ada@example.com>",
+            "date": "Thu, 01 Jan 2020 00:00:00 +0000",
+            "eml": "gmail/acct_synthetic/messages/forged.eml",
+        }
+        (messages / "index.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+
     def test_owner_waiting_needs_a_review_date(self) -> None:
         draft = DecisionDraft(
             next_state="reply",
@@ -532,48 +868,93 @@ def _current(conn, thread_pk: int):
     ).fetchone()
 
 
-def _reads_wall_clock(source: str) -> bool:
+_TIME_ALLOW = {
+    "jev.py": frozenset({"sleep"}),
+    "bench.py": frozenset({"perf_counter", "perf_counter_ns"}),
+}
+_NOW_ATTRS = frozenset({"now", "utcnow", "today"})
+_BARE_TIME = frozenset({"gmtime", "localtime", "ctime", "asctime", "strftime"})
+
+
+def _reads_wall_clock(source: str, name: str = "") -> bool:
     tree = ast.parse(source)
+    allowed = _TIME_ALLOW.get(name, frozenset())
     modules: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                modules[alias.asname or alias.name] = alias.name
-                if alias.name == "time" and alias.asname:
+                bound = alias.asname or alias.name
+                modules[bound] = alias.name
+                if alias.name == "time" and not allowed:
+                    return True
+        elif isinstance(node, ast.ImportFrom) and node.module == "time":
+            if any(alias.name == "*" for alias in node.names):
+                return True
+            for alias in node.names:
+                modules[alias.asname or alias.name] = f"time.{alias.name}"
+                if alias.name not in allowed:
                     return True
         elif isinstance(node, ast.ImportFrom) and node.module:
             for alias in node.names:
                 modules[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-                if node.module == "time" and alias.name == "time":
-                    return True
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and _clock_call(node.func, modules):
+        elif isinstance(node, ast.Call) and _forbidden_call(node, modules, allowed):
             return True
     return False
 
 
-def _clock_call(func: ast.AST, modules: dict[str, str]) -> bool:
-    if isinstance(func, ast.Name):
-        return modules.get(func.id) == "time.time"
+def _forbidden_call(node: ast.Call, modules: dict[str, str], allowed: frozenset[str]) -> bool:
+    func = node.func
+    if isinstance(func, ast.Name) and func.id == "__import__":
+        if node.args and isinstance(node.args[0], ast.Constant) and node.args[0].value == "time":
+            return True
+    if isinstance(func, ast.Name) and modules.get(func.id, "").startswith("time."):
+        used = modules[func.id].split(".", 1)[1]
+        return used not in allowed
+    if isinstance(func, ast.Attribute) and func.attr == "fromtimestamp":
+        if not node.args:
+            return True
+        return _wall_expr(node.args[0], modules)
+    if isinstance(func, ast.Call) and isinstance(func.func, ast.Name) and func.func.id == "getattr":
+        if len(func.args) >= 2 and isinstance(func.args[1], ast.Constant):
+            target = func.args[0]
+            if isinstance(target, ast.Name) and modules.get(target.id) == "time":
+                return str(func.args[1].value) not in allowed
     if not isinstance(func, ast.Attribute):
         return False
-    if func.attr not in {"time", "now", "utcnow", "today"}:
+    if isinstance(func.value, ast.Name) and modules.get(func.value.id) == "time":
+        if func.attr in allowed:
+            return False
+        if func.attr in _BARE_TIME and node.args and not (func.attr == "strftime" and len(node.args) < 2):
+            if func.attr == "strftime":
+                return len(node.args) < 2
+            return len(node.args) == 0
+        return True
+    return _now_family(func, modules)
+
+
+def _now_family(func: ast.Attribute, modules: dict[str, str]) -> bool:
+    if func.attr not in _NOW_ATTRS:
         return False
     if isinstance(func.value, ast.Name):
         origin = modules.get(func.value.id, func.value.id)
-        if func.attr == "time" and origin == "time":
+        if func.attr in _NOW_ATTRS and origin in {"datetime", "datetime.datetime", "date", "datetime.date"}:
             return True
-        if func.attr in {"now", "utcnow", "today"} and origin in {"datetime", "datetime.datetime"}:
-            return True
-        if func.attr == "today" and origin in {"date", "datetime.date"}:
-            return True
-        return False
     if isinstance(func.value, ast.Attribute) and isinstance(func.value.value, ast.Name):
         root = modules.get(func.value.value.id, func.value.value.id)
-        if root == "datetime" and func.value.attr == "datetime" and func.attr in {"now", "utcnow", "today"}:
+        if root == "datetime" and func.value.attr == "datetime" and func.attr in _NOW_ATTRS:
             return True
         if root == "datetime" and func.value.attr == "date" and func.attr == "today":
             return True
+    return False
+
+
+def _wall_expr(node: ast.AST, modules: dict[str, str]) -> bool:
+    if isinstance(node, ast.Call):
+        return _forbidden_call(node, modules, frozenset())
+    if isinstance(node, ast.Name):
+        return modules.get(node.id, "").startswith("time.")
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        return modules.get(node.value.id) == "time"
     return False
 
 
@@ -587,4 +968,5 @@ def thread_time_facts_from(last_human: str, age_days: int):
         found=(),
         past_deadline=False,
         past_meeting=False,
+        date_trusted=True,
     )

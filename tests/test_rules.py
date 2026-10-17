@@ -267,8 +267,8 @@ class RulesEngineTest(unittest.TestCase):
         self.assertEqual(self._current(short_close)["rule_id"], "8")
         self.assertEqual(self._current(short_close)["next_state"], "resolved")
         self.assertEqual(self._current(long_close)["rule_id"], "5")
-        self.assertEqual(self._current(owner)["rule_id"], "6")
-        self.assertEqual(self._current(owner)["next_state"], "waiting")
+        self.assertEqual(self._current(owner)["rule_id"], "5")
+        self.assertEqual(self._current(owner)["next_state"], "reply")
         self.assertEqual(self._current(to_self)["rule_id"], "housekeeping")
         self.assertNotEqual(self._current(to_self)["next_state"], "waiting")
 
@@ -564,8 +564,8 @@ class RulesEngineTest(unittest.TestCase):
         preview = preview_rules(
             self.conn, now=NOW, config=self.config, owners=owners, domains=domains
         )
-        self.assertEqual(preview[0].rule_id, "6")
-        self.assertNotEqual(preview[0].rule_id, "5")
+        self.assertEqual(preview[0].rule_id, "5")
+        self.assertNotEqual(preview[0].rule_id, "6")
 
     def test_rules_uses_the_config_path_unless_the_flag_is_set(self) -> None:
         self._thread("hello there")

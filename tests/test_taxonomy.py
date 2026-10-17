@@ -336,7 +336,7 @@ class DefaultTaxonomyTest(unittest.TestCase):
                 _message(3, []),
                 _message(4, []),
                 _message(5, ["SPAM"]),
-                _message(6, [], sender="Ada <ada@example.com>", body="note"),
+                _message(6, [], sender="Bot <noreply@example.com>", body="note"),
             ],
         )
         override = self.home / "hive.json"

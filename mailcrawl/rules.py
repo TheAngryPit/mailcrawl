@@ -654,10 +654,7 @@ def _load(
         """,
         (thread_pk,),
     ).fetchall()
-    outbound = any(
-        bool(message["is_from_me"]) or _is_owner(message["address_norm"], owners, domains)
-        for message in messages
-    )
+    outbound = any(bool(message["is_from_me"]) for message in messages)
     if outbound:
         kept = [message for message in messages if not _tracking_message(message, config)]
         if kept:
@@ -732,9 +729,7 @@ def _load(
     body = "" if last is None or last["body_text"] is None else str(last["body_text"])
     last_address = None if last is None else last["address_norm"]
     subject = "" if last is None or last["subject"] is None else str(last["subject"])
-    last_from_me = bool(
-        last and (last["is_from_me"] or _is_owner(last_address, owners, domains))
-    )
+    last_from_me = bool(last and last["is_from_me"])
     machine_sender = bool(
         last is not None
         and not last_from_me
@@ -771,10 +766,7 @@ def _load(
     if mute is not None and (mute["until"] is None or int(mute["until"]) >= now):
         muted = True
     to_hdr = "" if last is None or last["to_hdr"] is None else str(last["to_hdr"])
-    replied = any(
-        bool(message["is_from_me"]) or _is_owner(message["address_norm"], owners, domains)
-        for message in messages
-    )
+    replied = any(bool(message["is_from_me"]) for message in messages)
     address = "" if not isinstance(last_address, str) else last_address.strip().lower()
     return _Facts(
         starred=bool(star_labels),
@@ -1125,7 +1117,6 @@ def _labels(items: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ..
 
 
 def _with_time(conn, thread_pk: int, outcome: _Outcome, now: int, rules_version: str, policy) -> _Outcome:
-    # decisions imports rules, so timefacts loads only after this module exists.
     from mailcrawl.decisions import DecisionDraft
     from mailcrawl.timefacts import apply_time, thread_time_facts
 

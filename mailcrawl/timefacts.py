@@ -5,10 +5,9 @@ from __future__ import annotations
 import calendar
 import re
 import sqlite3
-import time
 from dataclasses import dataclass
 
-from mailcrawl.clock import AS_OF_MAX, AS_OF_MIN
+from mailcrawl.clock import AS_OF_MAX, AS_OF_MIN, utc_parts
 from mailcrawl.decisions import DecisionDraft
 from mailcrawl.textnorm import parse_address
 
@@ -94,10 +93,12 @@ class TimeFacts:
     found: tuple[FoundDate, ...]
     past_deadline: bool
     past_meeting: bool
+    date_trusted: bool
 
     def public(self) -> dict[str, object]:
         return {
             "age_days": self.age_days,
+            "date_trusted": self.date_trusted,
             "dates": [{"at": item.at, "kind": item.kind} for item in self.found],
             "first_at": self.first_at,
             "last_at": self.last_at,
@@ -122,7 +123,7 @@ def thread_time_facts(
 ) -> TimeFacts:
     rows = conn.execute(
         """
-        SELECT internal_date, from_hdr, is_from_me, subject, body_text
+        SELECT internal_date, from_hdr, is_from_me, date_trusted, subject, body_text
         FROM messages
         WHERE thread_pk = ?
         ORDER BY internal_date, msg_pk
@@ -131,8 +132,22 @@ def thread_time_facts(
     ).fetchall()
     stamps = [int(row["internal_date"]) for row in rows if row["internal_date"] is not None]
     first_at = min(stamps) if stamps else None
-    last_at = max(stamps) if stamps else None
-    age = None if last_at is None else (moment - last_at) // 86400
+    last_row = None
+    for row in rows:
+        if row["internal_date"] is None:
+            continue
+        if last_row is None or int(row["internal_date"]) >= int(last_row["internal_date"]):
+            last_row = row
+    last_at = None if last_row is None else int(last_row["internal_date"])
+    date_trusted = bool(
+        last_row is not None and int(last_row["date_trusted"] or 0) == 1 and last_at not in (None, 0)
+    )
+    if last_at is None:
+        age = None
+    elif last_at > moment:
+        age = 0
+    else:
+        age = (moment - last_at) // 86400
     last_human = _last_human(rows)
     found: list[FoundDate] = []
     used = 0
@@ -155,6 +170,7 @@ def thread_time_facts(
         found=kept,
         past_deadline=any(item.kind == "deadline" and _before(item.at, moment) for item in kept),
         past_meeting=any(item.kind == "meeting" and _before(item.at, moment) for item in kept),
+        date_trusted=date_trusted,
     )
 
 
@@ -170,9 +186,13 @@ def apply_time(draft: DecisionDraft, facts: TimeFacts, policy: TimePolicy | None
             review_date = facts.as_of
         reasons.append("owner sent last")
     if state == "waiting" and facts.age_days is not None and facts.age_days > chosen.stale_days:
-        state = "resolved"
-        lane = "paper_trail"
-        reasons.append("waiting is stale")
+        if _untrusted_age(facts):
+            state = "needs_review"
+            reasons.append("untrusted date")
+        else:
+            state = "resolved"
+            lane = "paper_trail"
+            reasons.append("waiting is stale")
     if (facts.past_deadline or facts.past_meeting) and state in ("reply", "action"):
         state = "needs_review"
         reasons.append("past date")
@@ -182,9 +202,13 @@ def apply_time(draft: DecisionDraft, facts: TimeFacts, policy: TimePolicy | None
         and lane == "imbox"
         and state in ("reply", "action")
     ):
-        state = "reference"
-        lane = "paper_trail"
-        reasons.append("last activity is old")
+        if _untrusted_age(facts):
+            state = "needs_review"
+            reasons.append("untrusted date")
+        else:
+            state = "reference"
+            lane = "paper_trail"
+            reasons.append("last activity is old")
     if not reasons:
         return draft
     note = {"time": facts.public(), "time_reason": reasons}
@@ -214,14 +238,20 @@ def _last_human(rows) -> str:
     return "none"
 
 
+def _untrusted_age(facts: TimeFacts) -> bool:
+    return (not facts.date_trusted) or facts.last_at == 0
+
+
 def _automated(address: str | None, domain: str | None) -> bool:
     if not address:
         return False
-    local = address.split("@", 1)[0]
-    host = domain or ""
+    local = address.split("@", 1)[0].casefold()
+    host = (domain or "").casefold()
+    labels = host.split(".") if host else []
     for token in _AUTOMATED:
         needle = token[:-1] if token.endswith("@") else token
-        if needle in local or needle in host:
+        needle = needle.casefold()
+        if local == needle or host == needle or needle in labels:
             return True
     return False
 
@@ -248,7 +278,7 @@ def _parts(stamp) -> tuple[int, int, int] | None:
         return None
     if number < AS_OF_MIN or number > AS_OF_MAX:
         return None
-    year, month, day = time.gmtime(number)[:3]
+    year, month, day = utc_parts(number)
     return int(year), int(month), int(day)
 
 

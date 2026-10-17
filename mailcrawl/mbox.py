@@ -24,7 +24,8 @@ from typing import BinaryIO
 from mailcrawl.contract import PSEUDO_LABEL, LabelRec, MessageRec
 from mailcrawl.eml import allow_headers, parsed_record
 from mailcrawl.gognative import ExportInvalid
-from mailcrawl.textnorm import parse_date
+from mailcrawl.clock import as_of
+from mailcrawl.textnorm import chosen_stamp, parse_date
 
 PROVISIONAL = "mbox:"
 RFC822 = "rfc822:"
@@ -230,12 +231,14 @@ class MboxSource:
             thread_root(draft.references_hdr, draft.in_reply_to, own)
         )
         labels = self._labels(takeout.labels)
+        stamp, trusted = _internal_date(takeout.date, separator)
         return labels, replace(
             draft,
             gmail_message_id=message_id,
             gmail_thread_id=thread_id,
             label_ids=tuple(dict.fromkeys(label.gmail_label_id for label in labels)),
-            internal_date=_internal_date(takeout.date, separator),
+            internal_date=stamp,
+            date_trusted=trusted,
         )
 
     def _labels(self, header: str | None) -> list[LabelRec]:
@@ -428,14 +431,12 @@ def _separator_id(separator: bytes) -> str | None:
     return gmail_hex(found.group(1), decimal_only=True)
 
 
-def _internal_date(header: str | None, separator: bytes) -> int:
+def _internal_date(header: str | None, separator: bytes) -> tuple[int, int]:
     rest = _SEPARATOR_REST.match(separator)
     fallback = rest.group(1).decode("utf-8", "replace") if rest else None
-    for candidate in (header, fallback):
-        parsed = parse_date(candidate) if candidate else None
-        if parsed is not None and parsed >= 0:
-            return parsed
-    return 0
+    receipt = parse_date(fallback) if fallback else None
+    header_stamp = parse_date(header) if header else None
+    return chosen_stamp(receipt, header_stamp, as_of(None))
 
 
 def _bare_message_id(value: str) -> str:

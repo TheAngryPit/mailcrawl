@@ -16,7 +16,8 @@ from pathlib import Path
 
 from mailcrawl.extract import PARSER_VERSION
 from mailcrawl.schema import HEADER_ALLOW
-from mailcrawl.textnorm import html_to_text, parse_date
+from mailcrawl.clock import as_of
+from mailcrawl.textnorm import chosen_stamp, html_to_text, parse_date
 
 UNSUPPORTED_SCHEMA = "unsupported_schema"
 CONTRACT_V0 = "mailcrawl.gog-export.v0"
@@ -146,6 +147,7 @@ class MessageRec:
     in_reply_to: str | None
     references_hdr: str | None
     auth_results: str | None
+    date_trusted: int = 1
 
 
 @dataclass(frozen=True)
@@ -252,11 +254,13 @@ def _parse_message(item: object, root: Path | None) -> MessageRec:
         isinstance(label_id, str) and label_id for label_id in label_ids
     ):
         raise ExportRejected()
-    internal_date = parse_date(item["example_date"])
+    header_date = parse_date(item["example_date"])
+    receipt = None
     if "example_internal_date" in item and item["example_internal_date"] is not None:
-        internal_date = parse_date(item["example_internal_date"])
-    if internal_date is None:
+        receipt = parse_date(item["example_internal_date"])
+    if header_date is None and receipt is None:
         raise ExportRejected()
+    internal_date, date_trusted = chosen_stamp(receipt, header_date, as_of(None))
     raw_bytes, raw_path = _read_raw(item.get("example_raw_file"), root)
     headers = _headers(item)
     body = _body(item, raw_bytes)
@@ -293,6 +297,7 @@ def _parse_message(item: object, root: Path | None) -> MessageRec:
         in_reply_to=_optional_str(headers.get("in-reply-to")),
         references_hdr=_optional_str(headers.get("references")),
         auth_results=_optional_str(headers.get("authentication-results")),
+        date_trusted=date_trusted,
     )
 
 

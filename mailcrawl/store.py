@@ -56,6 +56,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         version = 6
     if version == 6:
         _migrate_v6(conn)
+        version = 7
+    if version == 7:
+        _migrate_v7(conn)
         return
     raise UnsupportedSchema(f"user_version {version}")
 
@@ -251,6 +254,36 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
 
 def _migrate_v6(conn: sqlite3.Connection) -> None:
     _execute_statements(conn, JEV_SQL)
+    conn.execute("PRAGMA user_version = 7")
+    conn.commit()
+
+
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    names = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "messages" in names:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
+        if "date_trusted" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN date_trusted INTEGER NOT NULL DEFAULT 1")
+        trusted = "date_trusted"
+        if "internal_date" in columns:
+            trusted = """CASE
+              WHEN internal_date IS NULL OR internal_date = 0 THEN 0
+              ELSE date_trusted
+            END"""
+        if "is_from_me" in columns and "message_labels" in names:
+            conn.execute(
+                f"""
+                UPDATE messages
+                SET is_from_me = CASE WHEN EXISTS (
+                  SELECT 1 FROM message_labels
+                  WHERE message_labels.msg_pk = messages.msg_pk
+                    AND message_labels.gmail_label_id = 'SENT'
+                ) THEN 1 ELSE 0 END,
+                    date_trusted = {trusted}
+                """
+            )
+        elif "internal_date" in columns:
+            conn.execute(f"UPDATE messages SET date_trusted = {trusted}")
     conn.execute(f"PRAGMA user_version = {USER_VERSION}")
     conn.commit()
 

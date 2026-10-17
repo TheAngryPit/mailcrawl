@@ -356,8 +356,8 @@ def _upsert_message(
     never touches a row that came from another source.
     """
     thread_pk = _ensure_thread(conn, account_id, message.gmail_thread_id)
-    sender_id, address = _ensure_sender(conn, account_id, message.from_hdr)
-    is_from_me = 1 if address is not None and address == me else 0
+    sender_id, _address = _ensure_sender(conn, account_id, message.from_hdr)
+    is_from_me = 1 if "SENT" in message.label_ids else 0
     prov = provenance_hash(alias, message.gmail_message_id, message.raw_sha256, version)
     raw_body = message.body_text
     cleaned = clean_body(raw_body)
@@ -367,9 +367,9 @@ def _upsert_message(
           account_id, gmail_message_id, thread_pk, gmail_history_id, internal_date,
           rfc822_message_id, in_reply_to, references_hdr, sender_id,
           from_hdr, to_hdr, cc_hdr, bcc_hdr, reply_to_hdr,
-          subject, snippet, body_text_raw, body_text, size_bytes, is_from_me,
+          subject, snippet, body_text_raw, body_text, size_bytes, is_from_me, date_trusted,
           raw_path, raw_sha256, raw_json, auth_results, provenance_hash, imported_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(account_id, gmail_message_id) DO NOTHING
         RETURNING msg_pk
         """,
@@ -394,6 +394,7 @@ def _upsert_message(
             cleaned,
             message.size_bytes,
             is_from_me,
+            message.date_trusted,
             message.raw_path,
             message.raw_sha256,
             message.raw_json,
@@ -425,6 +426,14 @@ def _upsert_message(
     else:
         return "conflict", kept_sha
     msg_pk = int(existing["msg_pk"])
+    conn.execute(
+        """
+        UPDATE messages
+        SET is_from_me = ?, internal_date = ?, date_trusted = ?
+        WHERE msg_pk = ?
+        """,
+        (is_from_me, message.internal_date, message.date_trusted, msg_pk),
+    )
     _replace_labels(conn, account_id, msg_pk, message, source)
     current = str(existing["gmail_thread_id"])
     incoming = message.gmail_thread_id
