@@ -73,9 +73,12 @@ class TimeFactsTest(unittest.TestCase):
             "from datetime import datetime\nn = datetime.now\n",
             "import importlib\nimportlib.import_module('time')\n",
             "from importlib import import_module\nimport_module('time')\n",
+            "from importlib import import_module as load\nload('time')\n",
             "x = \"SELECT datetime('now')\"\n",
             "x = \"unixepoch('now')\"\n",
             "x = 'CURRENT_TIMESTAMP'\n",
+            "x = 'CURRENT_DATE'\n",
+            "x = 'CURRENT_TIME'\n",
             "x = \"SELECT 'now'\"\n",
         ):
             self.assertTrue(_reads_wall_clock(sample), sample)
@@ -671,7 +674,7 @@ class TimeFactsTest(unittest.TestCase):
                 sent = conn.execute(
                     "SELECT is_from_me, date_trusted FROM messages WHERE gmail_message_id = 'sent'"
                 ).fetchone()
-                self.assertEqual((int(forged["is_from_me"]), int(forged["date_trusted"])), (0, 1))
+                self.assertEqual((int(forged["is_from_me"]), int(forged["date_trusted"])), (0, 0))
                 self.assertEqual((int(sent["is_from_me"]), int(sent["date_trusted"])), (1, 0))
                 self.assertEqual(int(conn.execute("PRAGMA user_version").fetchone()[0]), USER_VERSION)
                 conn.execute("PRAGMA user_version = 7")
@@ -681,7 +684,7 @@ class TimeFactsTest(unittest.TestCase):
                 again = conn.execute(
                     "SELECT is_from_me, date_trusted FROM messages WHERE gmail_message_id = 'forged'"
                 ).fetchone()
-                self.assertEqual((int(again["is_from_me"]), int(again["date_trusted"])), (0, 1))
+                self.assertEqual((int(again["is_from_me"]), int(again["date_trusted"])), (0, 0))
             finally:
                 conn.close()
 
@@ -864,6 +867,155 @@ class TimeFactsTest(unittest.TestCase):
                 finally:
                     conn.close()
 
+    def test_leading_gmail_label_needs_a_takeout_separator(self) -> None:
+        planted = "186cc6acd4b0004d"
+        headers = (
+            "X-Gmail-Labels: Sent\n"
+            "X-GM-THRID: 1760000000000000077\n"
+            "From: Bob <bob@client.com>\n"
+            "To: Ada <ada@example.com>\n"
+            "Subject: Contrato\n"
+            "Date: Wed, 15 Oct 2026 10:00:00 +0000\n"
+        )
+        files = {
+            "plain": (
+                "From bob@client.com Wed Oct 15 10:00:00 2026\n"
+                + headers
+                + "Message-ID: <lead-plain@client.com>\n"
+                "\nPlease reply with the signed contract today.\n"
+            ),
+            "takeout": (
+                "From 1760000000000000001@xxx Wed Oct 15 10:00:00 +0000 2026\n"
+                + headers
+                + "Message-ID: <lead-takeout@client.com>\n"
+                "\nPlease reply with the signed contract today.\n"
+            ),
+            "thrid-only": (
+                "From 1760000000000000008@xxx Wed Oct 15 10:00:00 +0000 2026\n"
+                "X-GM-THRID: 1760000000000000077\n"
+                "From: Bob <bob@client.com>\n"
+                "To: Ada <ada@example.com>\n"
+                "Subject: Contrato\n"
+                "X-Gmail-Labels: Sent\n"
+                "Date: Wed, 15 Oct 2026 10:00:00 +0000\n"
+                "Message-ID: <lead-later@client.com>\n"
+                "\nPlease reply with the signed contract today.\n"
+            ),
+        }
+        for name, text in files.items():
+            with tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                path = home / "x.mbox"
+                path.write_text(text, encoding="utf-8")
+                conn = connect(init_account(home, "personal", "ada@example.com"))
+                try:
+                    import_mbox(
+                        conn,
+                        alias="personal",
+                        mbox_path=path,
+                        labels_path=None,
+                        taxonomy_path=None,
+                        account_email="ada@example.com",
+                    )
+                    row = conn.execute(
+                        """
+                        SELECT messages.is_from_me, threads.gmail_thread_id, messages.msg_pk
+                        FROM messages
+                        JOIN threads ON threads.thread_pk = messages.thread_pk
+                        """
+                    ).fetchone()
+                    labels = [
+                        item[0]
+                        for item in conn.execute(
+                            "SELECT gmail_label_id FROM message_labels WHERE msg_pk = ?",
+                            (row["msg_pk"],),
+                        )
+                    ]
+                    if name == "takeout":
+                        self.assertEqual(int(row["is_from_me"]), 1, name)
+                        self.assertEqual(labels, ["SENT"], name)
+                        self.assertEqual(row["gmail_thread_id"], planted, name)
+                    else:
+                        self.assertEqual(int(row["is_from_me"]), 0, name)
+                        self.assertNotIn("SENT", labels, name)
+                        self.assertEqual(labels, [], name)
+                        self.assertNotEqual(row["gmail_thread_id"], planted, name)
+                finally:
+                    conn.close()
+
+    def test_v7_gog_header_only_date_is_untrusted(self) -> None:
+        header = "Thu, 02 Jan 2020 10:00:00 +0000"
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            export = home / "x"
+            export.mkdir()
+            document = {
+                "schema": CONTRACT_V0,
+                "example_manifest": {"messages": 1},
+                "example_messages": [
+                    {
+                        "example_message_id": "hdr-only",
+                        "example_thread_id": "t1",
+                        "example_label_ids": ["INBOX"],
+                        "example_date": header,
+                        "example_from": "Bob <bob@client.com>",
+                        "example_subject": "Contrato",
+                        "example_body": "Please reply with the signed contract today.",
+                    }
+                ],
+            }
+            (export / "export.json").write_text(json.dumps(document), encoding="utf-8")
+            loaded = json.loads((export / "export.json").read_text(encoding="utf-8"))
+            stamp = parse_date(loaded["example_messages"][0]["example_date"])
+            self.assertIsInstance(stamp, int)
+            self.assertGreater(stamp, 0)
+            path = home / "old.db"
+            conn = sqlite3.connect(path)
+            try:
+                conn.executescript(SCHEMA_SQL)
+                conn.execute("ALTER TABLE messages DROP COLUMN date_trusted")
+                conn.execute("PRAGMA user_version = 7")
+                conn.execute(
+                    "INSERT INTO accounts(alias, email_hash, created_at) VALUES ('personal', 'abc', 1)"
+                )
+                conn.execute(
+                    "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (1, 't1', 2, 0)"
+                )
+                rows = (
+                    ("hdr-only", stamp, None),
+                    ("missing", stamp, str((home / "gone.eml").resolve())),
+                )
+                for message_id, when, raw_path in rows:
+                    conn.execute(
+                        """
+                        INSERT INTO messages(
+                          account_id, gmail_message_id, thread_pk, internal_date, is_from_me,
+                          raw_path, raw_sha256, provenance_hash, imported_at
+                        ) VALUES (1, ?, 1, ?, 0, ?, 'a', 'a', 1)
+                        """,
+                        (message_id, when, raw_path),
+                    )
+                conn.commit()
+                migrate(conn)
+
+                def flags() -> dict[str, tuple[int, int]]:
+                    return {
+                        str(row[0]): (int(row[1]), int(row[2]))
+                        for row in conn.execute(
+                            "SELECT gmail_message_id, internal_date, date_trusted FROM messages ORDER BY msg_pk"
+                        )
+                    }
+
+                got = flags()
+                self.assertEqual(got["hdr-only"], (stamp, 0))
+                self.assertEqual(got["missing"], (stamp, 0))
+                conn.execute("PRAGMA user_version = 7")
+                conn.commit()
+                migrate(conn)
+                self.assertEqual(flags(), got)
+            finally:
+                conn.close()
+
     def test_v7_header_dates_stay_untrusted(self) -> None:
         header = "Thu, 02 Jan 2020 10:00:00 +0000"
         receipt = "Wed Oct 15 10:00:00 +0000 2026"
@@ -961,7 +1113,7 @@ class TimeFactsTest(unittest.TestCase):
                 self.assertEqual(got["receipt"], (0, receipt_stamp, 1))
                 self.assertEqual(got["missing"], (0, header_stamp, 0))
                 self.assertEqual(got["eml-header"], (0, header_stamp, 0))
-                self.assertEqual(got["eml-receipt"], (0, receipt_stamp, 1))
+                self.assertEqual(got["eml-receipt"], (0, receipt_stamp, 0))
                 conn.execute("PRAGMA user_version = 7")
                 conn.commit()
                 migrate(conn)
