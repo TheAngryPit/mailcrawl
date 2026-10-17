@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROOF_DIR="${REPO_ROOT}/proof"
+export PROOF_DIR
 ORIG_HOME="${HOME}"
 # HOME isolation moves the user site. An optional extra already on this interpreter stays visible.
 VEC_SITE=""
@@ -118,6 +119,13 @@ log "check: python tests"
   cd "${REPO_ROOT}"
   python3 -m unittest discover -s tests -v
 ) | tee -a "${PROOF_DIR}/tests.log"
+
+for artifact in review-queue.json review-decide.json review-local.json; do
+  if [[ ! -s "${PROOF_DIR}/${artifact}" ]]; then
+    fail "missing review artifact ${artifact}"
+  fi
+done
+log "check: review harness artifacts"
 
 EXPORT="${REPO_ROOT}/testdata/fixtures/gog-export/v0"
 TAXONOMY="${REPO_ROOT}/testdata/catalogue/taxonomy.synthetic.json"
@@ -1517,6 +1525,7 @@ doc = {
         "phase4_rerank",
         "phase4_batch",
         "bench_fake_pair",
+        "review_harness",
         "fixture_sha256_unchanged",
     ],
 }

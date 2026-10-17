@@ -72,7 +72,7 @@ def inference_config(path: Path) -> dict[str, bool]:
         if key == "embedder":
             _embedder_value(value)
             continue
-        if key in ("batch_size", "max_tokens"):
+        if key in ("batch_size", "max_tokens", "llm"):
             continue
         if not isinstance(key, str) or not isinstance(value, bool):
             raise UsageError("inference flags are booleans")
@@ -90,6 +90,25 @@ def embed_limits(path: Path) -> tuple[int, int]:
         _optional_count(raw, "batch_size", DEFAULT_BATCH_SIZE),
         _optional_count(raw, "max_tokens", DEFAULT_MAX_TOKENS),
     )
+
+
+def local_llm(path: Path) -> tuple[str, str, bool] | None:
+    raw = _inference_table(path)
+    block = raw.get("llm")
+    if block is None or block is False:
+        return None
+    if not isinstance(block, dict):
+        raise UsageError("local llm config is not a table")
+    base_url = block.get("base_url")
+    model = block.get("model")
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise UsageError("local llm needs a base_url")
+    if not isinstance(model, str) or not model.strip():
+        raise UsageError("local llm needs a model")
+    allow_remote = block.get("allow_remote", False)
+    if not isinstance(allow_remote, bool):
+        raise UsageError("allow_remote is a boolean")
+    return base_url.strip(), model.strip(), allow_remote
 
 
 def embedder_name(path: Path) -> str:
@@ -157,6 +176,7 @@ def write_account(path: Path, alias: str, email: str) -> None:
             for key in ("batch_size", "max_tokens")
             if key in inference
         ]
+        llm = inference.get("llm")
         if saved or named or counted:
             lines.append("[inference]")
             if named:
@@ -168,6 +188,8 @@ def write_account(path: Path, alias: str, email: str) -> None:
             for key, value in counted:
                 lines.append(f"{key} = {value}")
             lines.append("")
+        if isinstance(llm, dict):
+            lines.extend(_llm_lines(llm))
     for name in sorted(accounts):
         account = accounts[name]
         if not isinstance(account, dict):
@@ -194,6 +216,21 @@ def write_account(path: Path, alias: str, email: str) -> None:
     os.chmod(path.parent, 0o700)
     path.write_text("\n".join(lines), encoding="utf-8")
     os.chmod(path, 0o600)
+
+
+def _llm_lines(block: dict[str, object]) -> list[str]:
+    lines = ["[inference.llm]"]
+    for key in ("base_url", "model"):
+        value = block.get(key)
+        if not isinstance(value, str):
+            continue
+        if '"' in value or "\n" in value:
+            raise UsageError("local llm config contains a character the config file cannot store")
+        lines.append(f'{key} = "{value}"')
+    if block.get("allow_remote") is True:
+        lines.append("allow_remote = true")
+    lines.append("")
+    return lines
 
 
 def _address_set(value: object) -> frozenset[str]:
