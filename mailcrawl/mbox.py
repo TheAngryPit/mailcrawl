@@ -410,9 +410,9 @@ def _strip_takeout(head: bytes, separator: bytes) -> tuple[bytes, _Takeout]:
     labels = values.get("x-gmail-labels")
     accept = labels is not None and _TAKEOUT_FROM.match(separator) is not None
     takeout = _Takeout(
-        gm_msgid=values.get("x-gm-msgid"),
+        gm_msgid=values.get("x-gm-msgid") if accept else None,
         gm_thrid=values.get("x-gm-thrid") if accept else None,
-        gmail_message_id=values.get("x-gmail-message-id"),
+        gmail_message_id=values.get("x-gmail-message-id") if accept else None,
         labels=_decoded(labels) if accept else None,
     )
     return b"".join(kept), takeout

@@ -74,6 +74,7 @@ class TimeFactsTest(unittest.TestCase):
             "import importlib\nimportlib.import_module('time')\n",
             "from importlib import import_module\nimport_module('time')\n",
             "from importlib import import_module as load\nload('time')\n",
+            "from importlib import import_module\nimport_module('datetime').datetime.now()\n",
             "x = \"SELECT datetime('now')\"\n",
             "x = \"unixepoch('now')\"\n",
             "x = 'CURRENT_TIMESTAMP'\n",
@@ -943,6 +944,40 @@ class TimeFactsTest(unittest.TestCase):
                 finally:
                     conn.close()
 
+    def test_plain_mbox_ignores_a_leading_gmail_message_id(self) -> None:
+        planted = "186cc6acd4b0004d"
+        rfc822 = "rfc822:9b326deee1f214baee80e9e2bff76764e04fdf0760e1c25eac463bc094cba24c"
+        text = (
+            "From bob@client.com Wed Oct 15 10:00:00 2026\n"
+            "X-GM-MSGID: 1760000000000000077\n"
+            "From: Bob <bob@client.com>\n"
+            "To: Ada <ada@example.com>\n"
+            "Subject: Contrato\n"
+            "Date: Wed, 15 Oct 2026 10:00:00 +0000\n"
+            "Message-ID: <plain-msgid@client.com>\n"
+            "\nPlease reply with the signed contract today.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            path = home / "x.mbox"
+            path.write_text(text, encoding="utf-8")
+            conn = connect(init_account(home, "personal", "ada@example.com"))
+            try:
+                import_mbox(
+                    conn,
+                    alias="personal",
+                    mbox_path=path,
+                    labels_path=None,
+                    taxonomy_path=None,
+                    account_email="ada@example.com",
+                )
+                row = conn.execute("SELECT gmail_message_id, is_from_me FROM messages").fetchone()
+                self.assertEqual(row["gmail_message_id"], rfc822)
+                self.assertNotEqual(row["gmail_message_id"], planted)
+                self.assertEqual(int(row["is_from_me"]), 0)
+            finally:
+                conn.close()
+
     def test_v7_gog_header_only_date_is_untrusted(self) -> None:
         header = "Thu, 02 Jan 2020 10:00:00 +0000"
         with tempfile.TemporaryDirectory() as tmp:
@@ -1277,7 +1312,9 @@ def _blocked_attr(node: ast.Attribute, modules: dict[str, str], allowed: frozens
     return isinstance(node.value, ast.Name) and modules.get(node.value.id) == "time" and node.attr not in allowed
 
 
-def _dynamic_time_import(node: ast.Call, modules: dict[str, str]) -> bool:
+def _import_module_name(node: ast.AST, modules: dict[str, str]) -> str | None:
+    if not isinstance(node, ast.Call):
+        return None
     func = node.func
     bound = ""
     if isinstance(func, ast.Name):
@@ -1285,8 +1322,14 @@ def _dynamic_time_import(node: ast.Call, modules: dict[str, str]) -> bool:
     elif isinstance(func, ast.Attribute) and func.attr == "import_module" and isinstance(func.value, ast.Name):
         bound = modules.get(func.value.id, func.value.id)
     if bound not in {"importlib", "import_module", "importlib.import_module"}:
-        return False
-    return bool(node.args) and isinstance(node.args[0], ast.Constant) and node.args[0].value == "time"
+        return None
+    if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+        return None
+    return node.args[0].value
+
+
+def _dynamic_time_import(node: ast.Call, modules: dict[str, str]) -> bool:
+    return _import_module_name(node, modules) == "time"
 
 
 def _forbidden_call(node: ast.Call, modules: dict[str, str], allowed: frozenset[str]) -> bool:
@@ -1333,6 +1376,11 @@ def _now_family(func: ast.Attribute, modules: dict[str, str]) -> bool:
         if root == "datetime" and func.value.attr == "datetime" and func.attr in _NOW_ATTRS:
             return True
         if root == "datetime" and func.value.attr == "date" and func.attr == "today":
+            return True
+    if isinstance(func.value, ast.Attribute) and _import_module_name(func.value.value, modules) == "datetime":
+        if func.value.attr == "datetime" and func.attr in _NOW_ATTRS:
+            return True
+        if func.value.attr == "date" and func.attr == "today":
             return True
     return False
 
