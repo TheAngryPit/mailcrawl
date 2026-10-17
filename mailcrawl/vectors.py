@@ -2,33 +2,41 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
 import math
 import sqlite3
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from mailcrawl.configfile import DEFAULT_BATCH_SIZE, DEFAULT_MAX_TOKENS
-from mailcrawl.decisions import DecisionDraft, current_decision, decide_once
-from mailcrawl.inference import enabled_points, enter_model, invoke
+from mailcrawl.decisions import (
+    DecisionDraft,
+    current_decision,
+    decide_open,
+    eligible_thread_pks,
+    open_for_model,
+)
+from mailcrawl.inference import BoundaryError, enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
-from mailcrawl.threads import embeddable_image
+from mailcrawl.threads import image_gate, opened_limit_reason, pillow_limits
 
 NATIVE_DIM = 768
 CLASSIFICATION_PREFIX = "task: classification | query: "
 SEARCH_QUERY_PREFIX = "task: search result | query: "
 SEARCH_TITLE_PREFIX = "title: "
 LOCAL_VERIFY = (
-    "python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox "
+    "python -m mailcrawl --db ~/MailVault/db-v5-sandbox "
     "embed --account thehive --embedder gemma"
 )
 MLX_MODEL_ID = "mlx-community/embeddinggemma-2-8bit"
 MLX_LOCAL_VERIFY = (
-    "python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox "
+    "python -m mailcrawl --db ~/MailVault/db-v5-sandbox "
     "bench --account thehive --embedders gemma,mlx --sample 32"
 )
 MLX_PROCESSOR_ERROR = (
@@ -88,7 +96,10 @@ def bounded_text_rows(embedder: object, texts: list[str], encode_chunk) -> list[
     for start in range(0, len(clipped), size):
         chunk = clipped[start : start + size]
         batches.append(chunk)
-        rows.extend(encode_chunk(chunk))
+        try:
+            rows.extend(encode_chunk(chunk))
+        finally:
+            _release_batch(embedder)
     embedder.batches = batches
     return rows
 
@@ -98,9 +109,18 @@ def bounded_image_rows(embedder: object, images: list[bytes], encode_one) -> lis
     seen: list[bytes] = []
     for blob in images:
         seen.append(blob)
-        rows.extend(encode_one(blob))
+        try:
+            rows.extend(encode_one(blob))
+        finally:
+            _release_batch(embedder)
     embedder.image_batches = seen
     return rows
+
+
+def _release_batch(embedder: object) -> None:
+    release = getattr(embedder, "release_batch", None)
+    if callable(release):
+        release()
 
 
 class FakeEmbedder:
@@ -158,12 +178,7 @@ class GemmaEmbedder:
         model.max_seq_length = _max_tokens(self)
 
         def encode_chunk(chunk: list[str]) -> list[list[float]]:
-            raw = model.encode(
-                list(chunk),
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            )
+            raw = _encode_guarded(model, list(chunk), _device_name(self), image=False)
             return _rows(self.model_id, raw)
 
         return bounded_text_rows(self, texts, encode_chunk)
@@ -179,16 +194,22 @@ class GemmaEmbedder:
             with tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / f"0{_image_suffix(blob)}"
                 path.write_bytes(blob)
-                raw = model.encode(
+                raw = _encode_guarded(
+                    model,
                     [{"image": str(path)}],
-                    normalize_embeddings=True,
-                    convert_to_numpy=True,
-                    show_progress_bar=False,
-                    processing_kwargs=IMAGE_PROCESSING,
+                    _device_name(self),
+                    image=True,
                 )
             return _rows(self.model_id, raw)
 
         return bounded_image_rows(self, images, encode_one)
+
+    def release_batch(self) -> None:
+        enter_model()
+        torch = sys.modules.get("torch")
+        if torch is None:
+            return
+        _empty_device_cache(torch, _device_name(self))
 
     def _gemma(self):
         enter_model()
@@ -209,7 +230,7 @@ class GemmaEmbedder:
                 "torch is not installed. "
                 f"local-verify: {LOCAL_VERIFY}"
             ) from exc
-        model = _load_gemma(SentenceTransformer, torch)
+        model = _load_gemma(SentenceTransformer, torch, _device_name(self))
         if getattr(model, "default_prompt_name", None) is not None:
             model.default_prompt_name = None
         self._loaded = model
@@ -252,15 +273,23 @@ class MlxEmbedder:
             self.image_batches = []
             return []
         model, processor, mx = self._vision_runtime()
-        from PIL import Image
 
         def encode_one(blob: bytes) -> list[list[float]]:
-            picture = Image.open(io.BytesIO(blob))
-            picture.load()
-            inputs = processor(images=[picture], return_tensors="np")
-            embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
-            mx.eval(embeddings)
-            return _rows(self.model_id, embeddings.tolist())
+            with pillow_limits() as image_mod:
+                if image_mod is None:
+                    raise ImportError("Pillow is not installed")
+                picture = image_mod.open(io.BytesIO(blob))
+                try:
+                    reason = opened_limit_reason(picture)
+                    if reason:
+                        raise RuntimeError(reason)
+                    picture.load()
+                    inputs = processor(images=[picture], return_tensors="np")
+                    embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
+                    mx.eval(embeddings)
+                    return _rows(self.model_id, embeddings.tolist())
+                finally:
+                    picture.close()
 
         return bounded_image_rows(self, images, encode_one)
 
@@ -362,10 +391,10 @@ def require_vec(conn: sqlite3.Connection) -> None:
     create_vec_tables(conn)
 
 
-def _load_gemma(sentence_transformer, torch):
+def _load_gemma(sentence_transformer, torch, requested: str = "auto"):
+    device = _resolve_device(torch, requested)
     dtypes = []
-    mps = getattr(getattr(torch, "backends", None), "mps", None)
-    if bool(torch.cuda.is_available()) or (mps is not None and bool(mps.is_available())):
+    if device in ("cuda", "mps"):
         dtypes.append(torch.bfloat16)
     dtypes.append(torch.float32)
     last: Exception | None = None
@@ -373,6 +402,7 @@ def _load_gemma(sentence_transformer, torch):
         try:
             return sentence_transformer(
                 "google/embeddinggemma-2",
+                device=device,
                 config_kwargs=GEMMA_CONFIG,
                 model_kwargs={"torch_dtype": dtype},
             )
@@ -381,6 +411,78 @@ def _load_gemma(sentence_transformer, torch):
     raise UsageError(
         f"could not load google/embeddinggemma-2 in bfloat16 or float32: {last}"
     )
+
+
+def _device_name(embedder: object) -> str:
+    value = getattr(embedder, "device", "auto")
+    if value in ("auto", "mps", "cuda", "cpu"):
+        return str(value)
+    return "auto"
+
+
+def _resolve_device(torch, requested: str) -> str:
+    cuda = bool(getattr(getattr(torch, "cuda", None), "is_available", lambda: False)())
+    mps = getattr(getattr(torch, "backends", None), "mps", None)
+    has_mps = mps is not None and bool(mps.is_available())
+    if requested == "cpu":
+        return "cpu"
+    if requested == "cuda":
+        if not cuda:
+            raise UsageError("cuda is not available")
+        return "cuda"
+    if requested == "mps":
+        if not has_mps:
+            raise UsageError("mps is not available")
+        return "mps"
+    if requested != "auto":
+        raise UsageError("device is auto, mps, cuda, or cpu")
+    if cuda:
+        return "cuda"
+    if has_mps:
+        return "mps"
+    return "cpu"
+
+
+def _encode_guarded(model, payload, device: str, *, image: bool):
+    enter_model()
+    torch = _optional_torch()
+    scope = torch.inference_mode() if torch is not None else contextlib.nullcontext()
+    limits = pillow_limits() if image else contextlib.nullcontext()
+    with scope, limits:
+        kwargs = {
+            "normalize_embeddings": True,
+            "convert_to_numpy": True,
+            "show_progress_bar": False,
+        }
+        if image:
+            kwargs["processing_kwargs"] = IMAGE_PROCESSING
+        raw = model.encode(payload, **kwargs)
+        copied = [row for row in raw]
+    del raw
+    if torch is not None:
+        _empty_device_cache(torch, device)
+    return copied
+
+
+def _optional_torch():
+    enter_model()
+    try:
+        import torch
+    except ImportError:
+        return None
+    return torch
+
+
+def _empty_device_cache(torch, requested: str) -> None:
+    device = _resolve_device(torch, requested)
+    if device == "mps":
+        empty = getattr(getattr(torch, "mps", None), "empty_cache", None)
+        if callable(empty):
+            empty()
+    elif device == "cuda":
+        empty = getattr(getattr(torch, "cuda", None), "empty_cache", None)
+        if callable(empty):
+            empty()
 
 
 def create_vec_tables(conn: sqlite3.Connection) -> None:
@@ -445,8 +547,13 @@ def embed_threads(conn: sqlite3.Connection, embedder: Embedder, config: dict[str
     if not grouped:
         return 0
     require_vec(conn)
-    _embed_group(conn, embedder, config, grouped)
-    return len(grouped)
+    written = 0
+    for row in grouped:
+        if _vectors_stored(conn, row[0]):
+            continue
+        if _embed_group(conn, embedder, config, [row]):
+            written += 1
+    return written
 
 
 def nearest_threads(
@@ -498,17 +605,20 @@ def ordered_hits(
 def knn_decide(
     conn: sqlite3.Connection,
     thread_pk: int,
-    embedder: Embedder,
+    embedder: Embedder | None,
     config: dict[str, bool] | None,
     now: int,
 ) -> sqlite3.Row | None:
-    if "embeddings" not in enabled_points(config):
+    if "embeddings" not in enabled_points(config) or embedder is None:
         return None
+    stored = current_decision(conn, thread_pk)
+    if not open_for_model(stored):
+        return stored
     require_vec(conn)
     _ensure_classification(conn, thread_pk, embedder, config)
     blob = _stored_embedding(conn, "classification", thread_pk)
     if blob is None:
-        return None
+        return stored
     count = conn.execute(f"SELECT count(*) FROM {_TABLE['classification']}").fetchone()[0]
     neighbours = nearest_threads(conn, "classification", blob, max(int(count), 1))
     ranked: list[tuple[float, sqlite3.Row]] = []
@@ -520,7 +630,7 @@ def knn_decide(
             continue
         ranked.append((distance, decision))
     if not ranked:
-        return None
+        return stored
     ranked.sort(key=lambda item: item[0])
     distance, neighbour = ranked[0]
 
@@ -543,7 +653,25 @@ def knn_decide(
             muted=int(neighbour["muted"] or 0),
         )
 
-    return decide_once(conn, thread_pk, now, produce)
+    return decide_open(conn, thread_pk, now, produce)
+
+
+def knn_account(
+    conn: sqlite3.Connection,
+    embedder: Embedder | None,
+    config: dict[str, bool] | None,
+    now: int,
+) -> tuple[int, int, int]:
+    eligible = eligible_thread_pks(conn)
+    decided = 0
+    review = 0
+    for thread_pk in eligible:
+        decision = knn_decide(conn, thread_pk, embedder, config, now)
+        if decision is None or decision["next_state"] == "needs_review":
+            review += 1
+        else:
+            decided += 1
+    return len(eligible), decided, review
 
 
 def _hash_vector(text: str, dim: int) -> list[float]:
@@ -627,12 +755,19 @@ def _ensure_classification(
     embedder: Embedder,
     config: dict[str, bool] | None,
 ) -> None:
-    if _stored_embedding(conn, "classification", thread_pk) is not None:
+    if _vectors_stored(conn, thread_pk):
         return
     rows = [row for row in _threads(conn) if row[0] == thread_pk]
     if not rows:
         return
     _embed_group(conn, embedder, config, rows)
+
+
+def _vectors_stored(conn: sqlite3.Connection, thread_pk: int) -> bool:
+    return (
+        _stored_embedding(conn, "classification", thread_pk) is not None
+        and _stored_embedding(conn, "search", thread_pk) is not None
+    )
 
 
 @dataclass(frozen=True)
@@ -647,46 +782,52 @@ def _embed_group(
     embedder: Embedder,
     config: dict[str, bool] | None,
     grouped: list[tuple[int, str, str]],
-) -> None:
-    thread_ids = {row[0] for row in grouped}
-    images = _kept_images(conn, thread_ids)
-    texts: list[str] = []
-    for _thread_pk, subject, body in grouped:
-        texts.append(classification_text(body))
-        texts.append(search_document(subject, body))
-    blobs = [item.blob for item in images]
-
-    result = invoke(
-        "embeddings",
-        lambda: (
-            embedder.embed(texts),
-            embedder.embed_images(blobs) if blobs else [],
-        ),
-        config,
-    )
-    if result is None:
-        return
-    text_vectors, image_vectors = result
-    if len(text_vectors) != len(texts) or len(image_vectors) != len(blobs):
-        raise ValueError("embedder returned the wrong number of vectors")
-    for index, (thread_pk, _subject, _body) in enumerate(grouped):
-        _upsert(conn, "classification", thread_pk, text_vectors[2 * index], CLASSIFICATION_PREFIX)
-        _upsert(conn, "search", thread_pk, text_vectors[2 * index + 1], SEARCH_TITLE_PREFIX)
-    by_thread: dict[int, list[list[float]]] = {}
-    for item, vector in zip(images, image_vectors):
-        _upsert_image(conn, item.thread_pk, item.att_pk, vector)
-        by_thread.setdefault(item.thread_pk, []).append(vector)
+) -> bool:
+    wrote = False
     image_only = {
         int(row[0])
         for row in conn.execute("SELECT thread_pk FROM threads WHERE image_only = 1")
     }
-    for thread_pk, vectors in by_thread.items():
-        if thread_pk not in image_only:
+    for thread_pk, subject, body in grouped:
+        texts = [classification_text(body), search_document(subject, body)]
+        try:
+            text_vectors = invoke("embeddings", lambda texts=texts: embedder.embed(texts), config)
+        except (UsageError, BoundaryError):
+            raise
+        except Exception as exc:
+            _log_skip(f"thread {thread_pk}", exc)
             continue
-        mean = _mean(vectors)
-        _upsert(conn, "classification", thread_pk, mean, "")
-        _upsert(conn, "search", thread_pk, mean, "")
-    conn.commit()
+        if text_vectors is None:
+            continue
+        if len(text_vectors) != 2:
+            _log_skip(f"thread {thread_pk}", "embedder returned the wrong number of vectors")
+            continue
+        _upsert(conn, "classification", thread_pk, text_vectors[0], CLASSIFICATION_PREFIX)
+        _upsert(conn, "search", thread_pk, text_vectors[1], SEARCH_TITLE_PREFIX)
+        image_vectors: list[list[float]] = []
+        for item in _kept_images(conn, {thread_pk}):
+            try:
+                got = invoke(
+                    "embeddings",
+                    lambda blob=item.blob: embedder.embed_images([blob]),
+                    config,
+                )
+            except (UsageError, BoundaryError):
+                raise
+            except Exception as exc:
+                _log_skip(f"image {item.att_pk}", exc)
+                continue
+            if not got:
+                continue
+            _upsert_image(conn, item.thread_pk, item.att_pk, got[0])
+            image_vectors.append(got[0])
+        if thread_pk in image_only and image_vectors:
+            mean = _mean(image_vectors)
+            _upsert(conn, "classification", thread_pk, mean, "")
+            _upsert(conn, "search", thread_pk, mean, "")
+        conn.commit()
+        wrote = True
+    return wrote
 
 
 def _kept_images(conn: sqlite3.Connection, thread_ids: set[int]) -> list[_KeptImage]:
@@ -706,13 +847,27 @@ def _kept_images(conn: sqlite3.Connection, thread_ids: set[int]) -> list[_KeptIm
     for thread_pk, att_pk, mime, inline, size, stored in rows:
         if int(thread_pk) not in thread_ids or not stored:
             continue
-        if not embeddable_image(mime, int(inline or 0), None if size is None else int(size)):
-            continue
         path = Path(str(stored))
         if not path.is_file():
             continue
-        found.append(_KeptImage(int(thread_pk), int(att_pk), path.read_bytes()))
+        blob = path.read_bytes()
+        keep, reason = image_gate(
+            mime,
+            int(inline or 0),
+            None if size is None else int(size),
+            blob,
+        )
+        if not keep:
+            if reason:
+                _log_skip(f"image {int(att_pk)}", reason)
+            continue
+        found.append(_KeptImage(int(thread_pk), int(att_pk), blob))
     return found
+
+
+def _log_skip(item: str, reason: object) -> None:
+    text = str(reason).splitlines()[0][:200]
+    sys.stderr.write(f"skipped {item}: {text}\n")
 
 
 def _upsert_image(

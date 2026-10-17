@@ -5,11 +5,13 @@ import json
 import os
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
+import zlib
 from pathlib import Path
 
 import mailcrawl.bench as bench_module
@@ -37,9 +39,17 @@ from mailcrawl.vectors import (
     open_embedder,
 )
 
-_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAMBAQAY3Y20AAAAAElFTkSuQmCC"
-)
+def _solid_png(width: int, height: int) -> bytes:
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    raw = b"".join(b"\x00" + (b"\x10\x20\x30" * width) for _ in range(height))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+
+_PNG = _solid_png(32, 32)
 
 
 def _mbox() -> str:

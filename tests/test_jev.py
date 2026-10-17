@@ -13,6 +13,7 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
 
+from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import BoundaryError, scan_source
 from mailcrawl.jev import (
     BATTERY,
@@ -25,6 +26,7 @@ from mailcrawl.jev import (
     jev_decide,
     open_client,
     request_body,
+    score_grey_band,
 )
 from mailcrawl.paths import UsageError
 from mailcrawl.search import search_messages
@@ -209,6 +211,166 @@ class JevBatteryTest(unittest.TestCase):
                 before = client.calls
                 self.assertIsNone(jev_decide(conn, ids["reply"], client, flags, 13))
                 self.assertEqual(client.calls, before)
+            finally:
+                conn.close()
+
+    def test_rule_needs_review_is_eligible_and_a_human_row_stays(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                flags = {"jev-battery": True}
+                client = CountingJev()
+                rule = decide_once(
+                    conn,
+                    ids["reply"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="needs_review",
+                        lane="imbox",
+                        rule_id="else",
+                        rules_version="rules-v4",
+                        origin="rule",
+                        source_detail="else",
+                    ),
+                )
+                human = decide_once(
+                    conn,
+                    ids["bulk"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="needs_review",
+                        lane="imbox",
+                        rule_id="else",
+                        rules_version="rules-v4",
+                        origin="human",
+                        source_detail="review",
+                    ),
+                )
+                settled = decide_once(
+                    conn,
+                    ids["bill"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="reference",
+                        lane="paper_trail",
+                        rule_id="3",
+                        rules_version="rules-v4",
+                        origin="rule",
+                        source_detail="3",
+                    ),
+                )
+                self.assertIsNone(jev_decide(conn, ids["reply"], client, None, 11))
+                stayed = conn.execute(
+                    "SELECT origin, next_state FROM decisions WHERE decision_id = ?",
+                    (rule["decision_id"],),
+                ).fetchone()
+                self.assertEqual((stayed[0], stayed[1]), ("rule", "needs_review"))
+                replaced = jev_decide(conn, ids["reply"], client, flags, 12)
+                self.assertEqual(replaced["origin"], "model")
+                self.assertEqual(replaced["next_state"], "reply")
+                self.assertNotEqual(int(replaced["decision_id"]), int(rule["decision_id"]))
+                old = conn.execute(
+                    "SELECT superseded_by FROM decisions WHERE decision_id = ?",
+                    (rule["decision_id"],),
+                ).fetchone()
+                self.assertEqual(int(old[0]), int(replaced["decision_id"]))
+                kept_human = jev_decide(conn, ids["bulk"], client, flags, 13)
+                self.assertEqual(int(kept_human["decision_id"]), int(human["decision_id"]))
+                self.assertEqual(kept_human["origin"], "human")
+                kept_rule = jev_decide(conn, ids["bill"], client, flags, 14)
+                self.assertEqual(int(kept_rule["decision_id"]), int(settled["decision_id"]))
+                self.assertEqual((kept_rule["origin"], kept_rule["next_state"]), ("rule", "reference"))
+                self.assertEqual(client.calls, 1)
+                passed = score_grey_band(conn, client, flags, 15)
+                self.assertGreaterEqual(passed.eligible, 1)
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT origin FROM decisions WHERE decision_id = ?",
+                        (human["decision_id"],),
+                    ).fetchone()[0],
+                    "human",
+                )
+            finally:
+                conn.close()
+
+    def test_model_and_knn_rows_stay_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                flags = {"jev-battery": True}
+                client = CountingJev()
+                model = decide_once(
+                    conn,
+                    ids["reply"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="needs_review",
+                        lane="imbox",
+                        rule_id="harness",
+                        rules_version="harness",
+                        origin="model",
+                        source_detail="harness-fixture",
+                    ),
+                )
+                knn = decide_once(
+                    conn,
+                    ids["bulk"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="noise",
+                        lane="feed",
+                        rule_id="3",
+                        rules_version="rules-v4",
+                        origin="knn",
+                        source_detail="fake-embedder",
+                    ),
+                )
+                stayed_model = jev_decide(conn, ids["reply"], client, flags, 11)
+                stayed_knn = jev_decide(conn, ids["bulk"], client, flags, 11)
+                self.assertEqual(client.calls, 0)
+                self.assertEqual(int(stayed_model["decision_id"]), int(model["decision_id"]))
+                self.assertEqual(
+                    (stayed_model["origin"], stayed_model["rule_id"], stayed_model["next_state"]),
+                    ("model", "harness", "needs_review"),
+                )
+                self.assertEqual(int(stayed_knn["decision_id"]), int(knn["decision_id"]))
+                self.assertEqual((stayed_knn["origin"], stayed_knn["rule_id"]), ("knn", "3"))
+                passed = score_grey_band(conn, client, flags, 12)
+                self.assertEqual(passed.eligible, 3)
+                self.assertEqual(passed.decided + passed.review, 3)
+                self.assertEqual(client.calls, 3)
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT count(*) FROM decisions WHERE thread_pk = ?",
+                        (ids["reply"],),
+                    ).fetchone()[0],
+                    1,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT count(*) FROM decisions WHERE thread_pk = ?",
+                        (ids["bulk"],),
+                    ).fetchone()[0],
+                    1,
+                )
+                current_model = conn.execute(
+                    """
+                    SELECT origin, rule_id FROM decisions
+                    WHERE thread_pk = ? AND superseded_by IS NULL
+                    """,
+                    (ids["reply"],),
+                ).fetchone()
+                current_knn = conn.execute(
+                    """
+                    SELECT origin, rule_id FROM decisions
+                    WHERE thread_pk = ? AND superseded_by IS NULL
+                    """,
+                    (ids["bulk"],),
+                ).fetchone()
+                self.assertEqual((current_model[0], current_model[1]), ("model", "harness"))
+                self.assertEqual((current_knn[0], current_knn[1]), ("knn", "3"))
             finally:
                 conn.close()
 

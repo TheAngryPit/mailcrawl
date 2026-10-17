@@ -18,7 +18,9 @@ from mailcrawl.configfile import (
     embedder_name,
     allow_override,
     inference_config,
+    inference_device,
     local_llm,
+    rules_path,
     write_account,
 )
 from mailcrawl.contract import ExportRejected, ManifestMismatch
@@ -43,7 +45,7 @@ from mailcrawl.review import (
 from mailcrawl.rules import apply_rules, load_rules
 from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
-from mailcrawl.vectors import embed_threads, knn_decide, open_embedder
+from mailcrawl.vectors import embed_threads, knn_account, knn_decide, open_embedder
 from mailcrawl.taxonomy import (
     active_categories,
     backfill_categories,
@@ -153,7 +155,7 @@ def _parser() -> argparse.ArgumentParser:
 
     rules = sub.add_parser("rules")
     rules.add_argument("--account", required=True)
-    rules.add_argument("--rules", required=True)
+    rules.add_argument("--rules")
     rules.add_argument("--now", type=int)
 
     counts = sub.add_parser("stats")
@@ -179,7 +181,7 @@ def _parser() -> argparse.ArgumentParser:
 
     knn = sub.add_parser("knn")
     knn.add_argument("--account", required=True)
-    knn.add_argument("--thread", required=True)
+    knn.add_argument("--thread")
     knn.add_argument("--embedder")
     knn.add_argument("--now", type=int)
 
@@ -344,7 +346,10 @@ def _rules(args: argparse.Namespace) -> int:
     db_path = data_dir(args.home) / f"{alias}.db"
     if not db_path.is_file():
         raise UsageError("account is not initialized")
-    config = load_rules(Path(args.rules))
+    rules_file = _rules_file(args)
+    if not rules_file.is_file():
+        raise UsageError("rules file is missing")
+    config = load_rules(rules_file)
     now = int(time.time()) if args.now is None else args.now
     owners, domains, security_senders, test_recipients = _identity(args)
     conn = connect(db_path)
@@ -490,11 +495,21 @@ def _embedder(args: argparse.Namespace) -> str:
     return embedder_name(config_path(args.config))
 
 
+def _rules_file(args: argparse.Namespace) -> Path:
+    if args.rules:
+        return Path(args.rules)
+    configured = rules_path(config_path(args.config))
+    if configured is None:
+        raise UsageError("rules needs --rules or a rules path in config")
+    return configured
+
+
 def _open_embedder(args: argparse.Namespace):
     embedder = open_embedder(_embedder(args))
     batch_size, max_tokens = embed_limits(config_path(args.config))
     embedder.batch_size = batch_size
     embedder.max_tokens = max_tokens
+    embedder.device = inference_device(config_path(args.config))
     return embedder
 
 
@@ -520,26 +535,42 @@ def _knn(args: argparse.Namespace) -> int:
         embedder = _open_embedder(args)
     now = int(time.time()) if args.now is None else args.now
     conn = _account_db(args)
+    decision = None
+    counted = None
     try:
-        row = conn.execute(
-            "SELECT thread_pk FROM threads WHERE gmail_thread_id = ?",
-            (args.thread,),
-        ).fetchone()
-        if row is None:
-            raise UsageError("unknown thread")
-        decision = None
-        if embedder is not None:
+        if args.thread:
+            row = conn.execute(
+                "SELECT thread_pk FROM threads WHERE gmail_thread_id = ?",
+                (args.thread,),
+            ).fetchone()
+            if row is None:
+                raise UsageError("unknown thread")
             decision = knn_decide(conn, int(row["thread_pk"]), embedder, flags, now)
+        else:
+            counted = knn_account(conn, embedder, flags, now)
     finally:
         conn.close()
+    if args.thread:
+        _emit(
+            args,
+            {
+                "next_state": None if decision is None else decision["next_state"],
+                "ok": True,
+                "origin": None if decision is None else decision["origin"],
+                "source_detail": None if decision is None else decision["source_detail"],
+                "thread": args.thread,
+            },
+        )
+        return 0
+    eligible, decided, review = counted
     _emit(
         args,
         {
-            "next_state": None if decision is None else decision["next_state"],
+            "account": canonical_alias(args.account),
+            "decided": decided,
+            "eligible": eligible,
             "ok": True,
-            "origin": None if decision is None else decision["origin"],
-            "source_detail": None if decision is None else decision["source_detail"],
-            "thread": args.thread,
+            "review": review,
         },
     )
     return 0

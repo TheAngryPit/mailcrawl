@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from typing import Protocol
 
-from mailcrawl.decisions import DecisionDraft, decide_once
+from mailcrawl.decisions import DecisionDraft, decide_open, eligible_thread_pks
 from mailcrawl.inference import enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
 
@@ -161,7 +161,7 @@ def jev_decide(
     _refuse_alias(client.model_id)
     if _image_only(conn, thread_pk):
         return None
-    return decide_once(
+    return decide_open(
         conn,
         thread_pk,
         now,
@@ -182,22 +182,11 @@ def score_grey_band(
     config: dict[str, bool] | None,
     now: int,
 ) -> GreyPass:
-    rows = conn.execute(
-        """
-        SELECT thread_pk FROM threads
-        WHERE image_only = 0
-          AND NOT EXISTS (
-            SELECT 1 FROM decisions
-            WHERE decisions.thread_pk = threads.thread_pk
-              AND decisions.superseded_by IS NULL
-          )
-        ORDER BY thread_pk
-        """
-    ).fetchall()
+    rows = eligible_thread_pks(conn, include_image_only=False)
     decided = 0
     review = 0
-    for row in rows:
-        decision = jev_decide(conn, int(row[0]), client, config, now)
+    for thread_pk in rows:
+        decision = jev_decide(conn, thread_pk, client, config, now)
         if decision is None or decision["next_state"] == "needs_review":
             review += 1
         else:

@@ -19,7 +19,7 @@ from mailcrawl.configfile import DEFAULT_BATCH_SIZE, DEFAULT_MAX_TOKENS
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.inference import invoke
 from mailcrawl.paths import UsageError
-from mailcrawl.threads import embeddable_image
+from mailcrawl.threads import image_gate
 from mailcrawl.vectors import (
     classification_text,
     open_embedder,
@@ -30,7 +30,7 @@ from mailcrawl.vectors import (
 
 _ON = {"embeddings": True}
 LABEL_TRUTH_VERIFY = (
-    "python -m mailcrawl --json --db ~/MailVault/db-v4-sandbox "
+    "python -m mailcrawl --json --db ~/MailVault/db-v5-sandbox "
     "bench --account thehive --embedders gemma,mlx --sample 64 "
     "--truth labels --taxonomy ~/MailVault/taxonomy.thehive.json"
 )
@@ -332,12 +332,19 @@ def _threads_with_images(conn: sqlite3.Connection) -> set[int]:
     ).fetchall()
     found: set[int] = set()
     for thread_pk, mime, inline, size, stored in rows:
-        if not stored:
+        path = Path(str(stored)) if stored else None
+        if path is None or not path.is_file():
             continue
-        if not embeddable_image(mime, int(inline or 0), None if size is None else int(size)):
+        blob = path.read_bytes()
+        keep, _reason = image_gate(
+            mime,
+            int(inline or 0),
+            None if size is None else int(size),
+            blob,
+        )
+        if not keep:
             continue
-        if Path(str(stored)).is_file():
-            found.add(int(thread_pk))
+        found.add(int(thread_pk))
     return found
 
 

@@ -64,15 +64,19 @@ DEFAULT_BATCH_SIZE = 1
 DEFAULT_MAX_TOKENS = 2048
 
 
+DEVICES = ("auto", "mps", "cuda", "cpu")
+
+
 def inference_config(path: Path) -> dict[str, bool]:
     raw = _inference_table(path)
     embed_limits(path)
+    inference_device(path)
     flags: dict[str, bool] = {}
     for key, value in raw.items():
         if key == "embedder":
             _embedder_value(value)
             continue
-        if key in ("batch_size", "max_tokens", "llm"):
+        if key in ("batch_size", "max_tokens", "llm", "device"):
             continue
         if not isinstance(key, str) or not isinstance(value, bool):
             raise UsageError("inference flags are booleans")
@@ -124,6 +128,20 @@ def local_llm(path: Path) -> tuple[str, str, bool] | None:
     return base_url.strip(), model.strip(), allow_remote
 
 
+def inference_device(path: Path) -> str:
+    raw = _inference_table(path)
+    if "device" not in raw:
+        return "auto"
+    return _device_value(raw["device"])
+
+
+def rules_path(path: Path) -> Path | None:
+    document = load_config(path)
+    if "rules" not in document:
+        return None
+    return Path(_rules_value(document.get("rules"))).expanduser()
+
+
 def embedder_name(path: Path) -> str:
     raw = _inference_table(path)
     if "embedder" not in raw:
@@ -142,8 +160,28 @@ def _inference_table(path: Path) -> dict[str, object]:
 
 
 def _embedder_value(value: object) -> str:
+    return _config_string(value, "embedder")
+
+
+def _rules_value(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise UsageError("embedder is not a name")
+        raise UsageError("rules is not a path")
+    if '"' in value or "\n" in value:
+        raise UsageError("rules contains a character the config file cannot store")
+    return value.strip()
+
+
+def _device_value(value: object) -> str:
+    if not isinstance(value, str) or value not in DEVICES:
+        raise UsageError("device is auto, mps, cuda, or cpu")
+    return value
+
+
+def _config_string(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise UsageError(f"{name} is not a name")
+    if '"' in value or "\n" in value:
+        raise UsageError(f"{name} contains a character the config file cannot store")
     return value.strip()
 
 
@@ -176,6 +214,10 @@ def write_account(path: Path, alias: str, email: str) -> None:
     if isinstance(taxonomy, str) and taxonomy and '"' not in taxonomy:
         lines.append(f'taxonomy = "{taxonomy}"')
         lines.append("")
+    configured_rules = document.get("rules")
+    if isinstance(configured_rules, str) and configured_rules:
+        lines.append(f'rules = "{_rules_value(configured_rules)}"')
+        lines.append("")
     inference = document.get("inference")
     if isinstance(inference, dict):
         saved = [
@@ -189,13 +231,14 @@ def write_account(path: Path, alias: str, email: str) -> None:
             for key in ("batch_size", "max_tokens")
             if key in inference
         ]
+        device = _device_value(inference["device"]) if "device" in inference else None
         llm = inference.get("llm")
-        if saved or named or counted:
+        if saved or named or counted or device:
             lines.append("[inference]")
             if named:
-                if '"' in named or "\n" in named:
-                    raise UsageError("embedder contains a character the config file cannot store")
                 lines.append(f'embedder = "{named}"')
+            if device:
+                lines.append(f'device = "{device}"')
             for key, value in sorted(saved):
                 lines.append(f"{key} = {'true' if value else 'false'}")
             for key, value in counted:

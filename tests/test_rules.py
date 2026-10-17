@@ -567,6 +567,107 @@ class RulesEngineTest(unittest.TestCase):
         self.assertEqual(preview[0].rule_id, "6")
         self.assertNotEqual(preview[0].rule_id, "5")
 
+    def test_rules_uses_the_config_path_unless_the_flag_is_set(self) -> None:
+        self._thread("hello there")
+        self.conn.commit()
+        config = Path(self.tmp.name) / "rules-config.toml"
+        config.write_text(f'rules = "{RULES}"\n', encoding="utf-8")
+        code = main(
+            [
+                "--json",
+                "--home",
+                self.tmp.name,
+                "--config",
+                str(config),
+                "rules",
+                "--account",
+                "vcl",
+                "--now",
+                str(NOW),
+            ]
+        )
+        self.assertEqual(code, 0)
+        stored = self.conn.execute(
+            "SELECT origin, rule_id FROM decisions WHERE superseded_by IS NULL"
+        ).fetchone()
+        self.assertEqual((stored[0], stored[1]), ("rule", "5"))
+        write_account(config, "vcl", "ada@example.com")
+        self.assertIn(f'rules = "{RULES}"', config.read_text(encoding="utf-8"))
+        missing = self.tmp.name + "/missing-rules.json"
+        overridden = main(
+            [
+                "--json",
+                "--home",
+                self.tmp.name,
+                "--config",
+                str(config),
+                "rules",
+                "--account",
+                "vcl",
+                "--rules",
+                missing,
+                "--now",
+                str(NOW),
+            ]
+        )
+        self.assertEqual(overridden, 2)
+        bare = Path(self.tmp.name) / "bare.toml"
+        bare.write_text("\n", encoding="utf-8")
+        absent = main(
+            [
+                "--json",
+                "--home",
+                self.tmp.name,
+                "--config",
+                str(bare),
+                "rules",
+                "--account",
+                "vcl",
+                "--now",
+                str(NOW),
+            ]
+        )
+        self.assertEqual(absent, 2)
+
+    def test_configured_rules_path_expands_a_tilde(self) -> None:
+        self._thread("hello there")
+        self.conn.commit()
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        rules = home / "rules-v0.json"
+        rules.write_bytes(RULES.read_bytes())
+        config = Path(self.tmp.name) / "tilde.toml"
+        config.write_text('rules = "~/rules-v0.json"\n', encoding="utf-8")
+        saved = os.environ.get("HOME")
+        os.environ["HOME"] = str(home)
+        try:
+            code = main(
+                [
+                    "--json",
+                    "--home",
+                    self.tmp.name,
+                    "--config",
+                    str(config),
+                    "rules",
+                    "--account",
+                    "vcl",
+                    "--now",
+                    str(NOW),
+                ]
+            )
+        finally:
+            if saved is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = saved
+        self.assertEqual(code, 0)
+        stored = self.conn.execute(
+            "SELECT origin, rule_id FROM decisions WHERE superseded_by IS NULL"
+        ).fetchone()
+        self.assertEqual((stored[0], stored[1]), ("rule", "5"))
+        write_account(config, "vcl", "ada@example.com")
+        self.assertIn('rules = "~/rules-v0.json"', config.read_text(encoding="utf-8"))
+
     def test_rules_rerun_leaves_a_human_row_current(self) -> None:
         human = self._thread("hello there")
         other = self._thread("hello there")
