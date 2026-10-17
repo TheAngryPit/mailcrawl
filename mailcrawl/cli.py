@@ -33,6 +33,7 @@ from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
 from mailcrawl.inference import enabled_points
 from mailcrawl.jev import jev_decide, open_client, score_grey_band
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
+from mailcrawl.reevaluate import TIME_DETAIL, reevaluate_time
 from mailcrawl.report import dry_run, stats
 from mailcrawl.review import (
     apply_agent_decision,
@@ -46,9 +47,10 @@ from mailcrawl.review import (
     undo_decisions,
     undo_document,
 )
-from mailcrawl.rules import TIME_DETAIL, apply_rules, load_rules, reevaluate_time
+from mailcrawl.rules import apply_rules, load_rules
 from mailcrawl.search import search_messages
-from mailcrawl.store import UnsupportedSchema, connect, init_account, takeout_status
+from mailcrawl.store import UnsupportedSchema, connect, init_account
+from mailcrawl.takeout_repair import takeout_status
 from mailcrawl.vectors import embed_threads, knn_account, knn_decide, open_embedder
 from mailcrawl.taxonomy import (
     active_categories,
@@ -273,7 +275,7 @@ def _import(args: argparse.Namespace) -> int:
     if catalogue is not None:
         load_taxonomy(catalogue)
     db_path = data_dir(args.home) / f"{alias}.db"
-    conn = connect(db_path, label_map=takeout_label_map(cfg, alias))
+    conn = connect(db_path)
     try:
         result: ImportResult
         if args.import_command == "gog-export":
@@ -351,7 +353,7 @@ def _search(args: argparse.Namespace) -> int:
     jev = None
     if "search-reranker" in enabled_points(flags):
         jev = open_client(args.jev_client)
-    conn = connect(db_path, label_map=takeout_label_map(config_path(args.config), alias))
+    conn = connect(db_path)
     try:
         hits = search_messages(
             conn,
@@ -389,7 +391,7 @@ def _rules(args: argparse.Namespace) -> int:
     config = load_rules(rules_file)
     now = _as_of(args)
     owners, domains, security_senders, test_recipients = _identity(args)
-    conn = connect(db_path, label_map=takeout_label_map(config_path(args.config), alias))
+    conn = connect(db_path)
     try:
         if args.reevaluate:
             if not args.csv:
@@ -735,7 +737,7 @@ def _account_db(args: argparse.Namespace) -> sqlite3.Connection:
     db_path = data_dir(args.home) / f"{alias}.db"
     if not db_path.is_file():
         raise UsageError("account is not initialized")
-    return connect(db_path, label_map=takeout_label_map(config_path(args.config), alias))
+    return connect(db_path)
 
 
 def _write_reevaluate(path: Path, rows: list[dict[str, str]]) -> None:

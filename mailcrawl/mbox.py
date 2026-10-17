@@ -24,7 +24,7 @@ from mailcrawl.contract import PSEUDO_LABEL, LabelRec, MessageRec
 from mailcrawl.eml import allow_headers, parsed_record
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.clock import as_of
-from mailcrawl.takeout_labels import label_key, system_id
+from mailcrawl.takeout_labels import resolved_label, system_id
 from mailcrawl.textnorm import chosen_stamp, parse_date
 
 PROVISIONAL = "mbox:"
@@ -205,7 +205,7 @@ class MboxSource:
     def _labels(self, header: str | None) -> list[LabelRec]:
         found: list[LabelRec] = []
         for name in label_names(header):
-            label_id = self._label_map.get(label_key(name)) or system_label(name)
+            label_id = resolved_label(name, self._label_map)
             if label_id is not None:
                 found.append(LabelRec(label_id, label_id, "system"))
             elif name.casefold() in PSEUDO_LABELS:
@@ -441,54 +441,12 @@ def _open_mbox_row(raw_path: object) -> tuple[Path, bytes, bytes] | None:
     return path, separator, head
 
 
-def stored_date_trusted(raw_path: object, stored: int) -> int | None:
-    """Trust a stored stamp only when the raw source shows it is the receipt clock."""
-    if not isinstance(raw_path, str) or not raw_path:
-        return None
-    if raw_path.startswith(RAW_PATH):
-        return _mbox_row_trust(raw_path, stored)
-    return _header_only_trust(raw_path, stored)
-
-
 def _mbox_ref(raw_path: str) -> tuple[Path, int] | None:
     body = raw_path[len(RAW_PATH) :]
     path_text, sep, offset_text = body.rpartition("#")
     if not sep or not offset_text.isdigit() or len(offset_text) > 12:
         return None
     return Path(path_text), int(offset_text)
-
-
-def _mbox_row_trust(raw_path: str, stored: int) -> int:
-    ref = _mbox_ref(raw_path)
-    if ref is None:
-        return 0
-    path, offset = ref
-    try:
-        if not path.is_file():
-            return 0
-        separator = _read_mbox_separator(path, offset)
-    except OSError:
-        return 0
-    rest = _SEPARATOR_REST.match(separator)
-    fallback = rest.group(1).decode("utf-8", "replace") if rest else None
-    receipt = parse_date(fallback) if fallback else None
-    if receipt is not None and receipt > 0 and stored == receipt:
-        return 1
-    return 0
-
-
-def _header_only_trust(raw_path: str, stored: int) -> int | None:
-    path = Path(raw_path)
-    try:
-        if not path.is_file():
-            return None
-        header = _date_header(_read_head(path, 0))
-    except OSError:
-        return None
-    stamp = parse_date(header) if header else None
-    if stamp is not None and stamp > 0 and stored == stamp:
-        return 0
-    return None
 
 
 def _read_mbox_separator(path: Path, offset: int) -> bytes:
@@ -509,22 +467,6 @@ def _read_head(path: Path, offset: int) -> bytes:
             chunks.append(line)
             size += len(line)
     return b"".join(chunks)
-
-
-def _date_header(head: bytes) -> str | None:
-    capturing = False
-    value = ""
-    for line in head.splitlines():
-        if line[:1] in (b" ", b"\t"):
-            if capturing:
-                value += " " + line.decode("utf-8", "replace").strip()
-            continue
-        capturing = False
-        name, colon, rest = line.partition(b":")
-        if colon and name.strip().lower() == b"date":
-            capturing = True
-            value = rest.decode("utf-8", "replace").strip()
-    return value or None
 
 
 def _internal_date(header: str | None, separator: bytes) -> tuple[int, int]:

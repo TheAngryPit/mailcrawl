@@ -23,7 +23,9 @@ from mailcrawl.gognative import load_labels, load_native
 from mailcrawl.mbox import PROVISIONAL, RAW_PATH, MboxSource, Refused
 from mailcrawl.paths import UsageError
 from mailcrawl.taxonomy import axis_of, generic_category, load_taxonomy
-from mailcrawl.store import _checked_label_map, index_message, repair_takeout
+from mailcrawl.store import index_message
+from mailcrawl.takeout_labels import checked_label_map
+from mailcrawl.takeout_repair import repair_takeout
 from mailcrawl.textnorm import clean_body, parse_address, subject_norm
 from mailcrawl.threads import embeddable_image, mark_image_only
 from mailcrawl.version import mailcrawl_version, provenance_hash
@@ -94,7 +96,7 @@ def import_mbox(
     label_map: dict[str, str] | None = None,
 ) -> ImportResult:
     account_id = _account_id(conn, alias)
-    mapping = _checked_label_map(label_map)
+    mapping = checked_label_map(label_map)
     seed = load_labels(labels_path) if labels_path is not None else ()
     known = {
         row["name"]: LabelRec(row["gmail_label_id"], row["name"], row["kind"])

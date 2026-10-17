@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import unicodedata
 
+from mailcrawl.paths import UsageError
+
 LABEL_SOURCES = (
     "https://support.google.com/mail/answer/90559",
     "https://support.google.com/mail/answer/7190",
@@ -403,6 +405,26 @@ LABELS.update({label_id.casefold(): label_id for label_id in set(LABELS.values()
 def label_key(name: str) -> str:
     folded = unicodedata.normalize("NFC", name).casefold()
     return " ".join(folded.replace(":", " ").split())
+
+
+def checked_label_map(label_map: dict[str, str] | None) -> dict[str, str]:
+    if not label_map:
+        return {}
+    allowed = set(LABELS.values())
+    cleaned: dict[str, str] = {}
+    for name, label_id in label_map.items():
+        if not isinstance(name, str) or not isinstance(label_id, str) or label_id not in allowed:
+            raise UsageError("takeout label_map needs a known system id")
+        cleaned[label_key(name)] = label_id
+    return cleaned
+
+
+def resolved_label(name: str, mapping: dict[str, str]) -> str | None:
+    """Config wins, then a known system name. A Sent guess is never returned."""
+    override = mapping.get(label_key(name))
+    if override is not None:
+        return override
+    return system_id(name)
 
 
 def system_id(name: str) -> str | None:

@@ -83,7 +83,7 @@ def decide_once(
     stored = current_decision(conn, thread_pk)
     if stored is not None:
         return stored
-    _store_draft(conn, thread_pk, produce(), now)
+    insert_draft(conn, thread_pk, produce(), now)
     conn.commit()
     return _stored(conn, thread_pk)
 
@@ -101,12 +101,12 @@ def decide_open(
     if draft is None:
         return stored
     if stored is None:
-        _store_draft(conn, thread_pk, draft, now)
+        insert_draft(conn, thread_pk, draft, now)
     else:
         supersede_current(
             conn,
             int(stored["decision_id"]),
-            lambda: _store_draft(conn, thread_pk, draft, now),
+            lambda: insert_draft(conn, thread_pk, draft, now),
         )
     conn.commit()
     return _stored(conn, thread_pk)
@@ -119,7 +119,7 @@ def _stored(conn: sqlite3.Connection, thread_pk: int) -> sqlite3.Row:
     return stored
 
 
-def _store_draft(
+def insert_draft(
     conn: sqlite3.Connection,
     thread_pk: int,
     draft: DecisionDraft,

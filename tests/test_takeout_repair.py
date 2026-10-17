@@ -17,7 +17,8 @@ from mailcrawl.mbox import gmail_hex
 from mailcrawl.paths import UsageError
 from mailcrawl.rules import apply_rules, bundled_rules_path, load_rules
 from mailcrawl.schema import SCHEMA_SQL, USER_VERSION
-from mailcrawl.store import connect, init_account, migrate, repair_takeout
+from mailcrawl.store import connect, init_account, migrate
+from mailcrawl.takeout_repair import repair_takeout
 from mailcrawl.takeout_labels import LABEL_SOURCES, system_id
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -807,8 +808,16 @@ class SentPoisonTest(unittest.TestCase):
         )
         self.conn.close()
         path.write_text(path.read_text(encoding="utf-8").replace(first, second), encoding="utf-8")
-        again = connect(init_account(self.home, "personal", "ada@example.com"), label_map=mapping)
+        again = connect(self.home / "personal.db")
         try:
+            stamp = int(
+                again.execute(
+                    "SELECT internal_date FROM messages WHERE gmail_message_id = ?",
+                    (gmail_hex("1601", decimal_only=True),),
+                ).fetchone()[0]
+            )
+            self.assertEqual(stamp, calendar.timegm((2020, 1, 2, 10, 0, 0)))
+            repair_takeout(again, mapping)
             stamp = int(
                 again.execute(
                     "SELECT internal_date FROM messages WHERE gmail_message_id = ?",
