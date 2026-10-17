@@ -48,7 +48,7 @@ from mailcrawl.review import (
 )
 from mailcrawl.rules import TIME_DETAIL, apply_rules, load_rules, reevaluate_time
 from mailcrawl.search import search_messages
-from mailcrawl.store import UnsupportedSchema, connect, init_account
+from mailcrawl.store import UnsupportedSchema, connect, init_account, takeout_status
 from mailcrawl.vectors import embed_threads, knn_account, knn_decide, open_embedder
 from mailcrawl.taxonomy import (
     active_categories,
@@ -72,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
             return _init(args)
         if args.command == "import":
             return _import(args)
+        if args.command == "takeout":
+            return _takeout(args)
         if args.command == "search":
             return _search(args)
         if args.command == "rules":
@@ -140,6 +142,11 @@ def _parser() -> argparse.ArgumentParser:
     mbox.add_argument("--account", "--alias", dest="account", required=True)
     mbox.add_argument("--labels")
     mbox.add_argument("--taxonomy")
+
+    takeout = sub.add_parser("takeout")
+    takeout_sub = takeout.add_subparsers(dest="takeout_command", required=True)
+    status = takeout_sub.add_parser("status")
+    status.add_argument("--account", required=True)
 
     search = sub.add_parser("search")
     search.add_argument("query")
@@ -306,8 +313,26 @@ def _import(args: argparse.Namespace) -> int:
             "n_seen": result.n_seen,
             "ok": True,
             "takeout_sent": result.takeout_sent,
+            "takeout_unmapped": list(result.takeout_unmapped),
             "taxonomy_warnings": len(absent),
         },
+    )
+    return 0
+
+
+def _takeout(args: argparse.Namespace) -> int:
+    if args.takeout_command != "status":
+        raise UsageError("unknown takeout command")
+    alias = canonical_alias(args.account)
+    conn = _account_db(args)
+    try:
+        sent, unmapped = takeout_status(conn, takeout_label_map(config_path(args.config), alias))
+    finally:
+        conn.close()
+    _emit(
+        args,
+        {"ok": True, "takeout_sent": sent, "takeout_unmapped": list(unmapped)},
+        text=sent or "none",
     )
     return 0
 

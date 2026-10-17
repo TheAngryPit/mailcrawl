@@ -23,7 +23,7 @@ from mailcrawl.gognative import load_labels, load_native
 from mailcrawl.mbox import PROVISIONAL, RAW_PATH, MboxSource, Refused
 from mailcrawl.paths import UsageError
 from mailcrawl.taxonomy import axis_of, generic_category, load_taxonomy
-from mailcrawl.store import index_message, repair_takeout
+from mailcrawl.store import _checked_label_map, index_message, repair_takeout
 from mailcrawl.textnorm import clean_body, parse_address, subject_norm
 from mailcrawl.threads import embeddable_image, mark_image_only
 from mailcrawl.version import mailcrawl_version, provenance_hash
@@ -42,6 +42,7 @@ class ImportResult:
         n_refused: int = 0,
         n_reconciled: int = 0,
         takeout_sent: str = "",
+        takeout_unmapped: tuple[str, ...] = (),
     ) -> None:
         self.n_seen = n_seen
         self.n_new = n_new
@@ -50,6 +51,7 @@ class ImportResult:
         self.n_refused = n_refused
         self.n_reconciled = n_reconciled
         self.takeout_sent = takeout_sent
+        self.takeout_unmapped = takeout_unmapped
 
 
 def load_catalogue_entries(path: Path | None, alias: str) -> dict[str, dict[str, str]]:
@@ -92,6 +94,7 @@ def import_mbox(
     label_map: dict[str, str] | None = None,
 ) -> ImportResult:
     account_id = _account_id(conn, alias)
+    mapping = _checked_label_map(label_map)
     seed = load_labels(labels_path) if labels_path is not None else ()
     known = {
         row["name"]: LabelRec(row["gmail_label_id"], row["name"], row["kind"])
@@ -105,6 +108,7 @@ def import_mbox(
         mbox_path,
         known,
         seed,
+        label_map=mapping,
         stored=lambda key: conn.execute(
             "SELECT 1 FROM messages WHERE account_id = ? AND gmail_message_id = ?",
             (account_id, key),
@@ -122,7 +126,7 @@ def import_mbox(
         catalogue=load_catalogue_entries(taxonomy_path, alias),
         account_email=account_email,
     )
-    result.takeout_sent = repair_takeout(conn, label_map)
+    result.takeout_sent, result.takeout_unmapped = repair_takeout(conn, label_map)
     conn.commit()
     return result
 

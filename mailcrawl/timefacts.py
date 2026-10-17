@@ -37,24 +37,25 @@ _ATE = re.compile(
 if "marco" not in MONTHS:
     MONTHS["marco"] = MONTHS.get("março", 3)
 _MONTH_ALT = "|".join(re.escape(name) for name in sorted(MONTHS, key=len, reverse=True))
+_LATIN_FLAGS = re.IGNORECASE | re.ASCII
 _DMY = re.compile(
-    rf"(?<!\d)(\d{{1,2}})\s+({_MONTH_ALT})\s+(\d{{4}})(?!\d)",
-    re.IGNORECASE,
+    rf"(?<![0-9])([0-9]{{1,2}})\s+({_MONTH_ALT})\s+([0-9]{{4}})(?![0-9])",
+    _LATIN_FLAGS,
 )
 _MDY = re.compile(
-    rf"(?<!\d)({_MONTH_ALT})\s+(\d{{1,2}}),?\s+(\d{{4}})(?!\d)",
-    re.IGNORECASE,
+    rf"(?<![0-9])({_MONTH_ALT})\s+([0-9]{{1,2}}),?\s+([0-9]{{4}})(?![0-9])",
+    _LATIN_FLAGS,
 )
 _DE_MONTH = re.compile(
-    rf"(?<!\d)(\d{{1,2}})\s+de\s+({_MONTH_ALT})\s+de\s+(\d{{4}})(?!\d)",
-    re.IGNORECASE,
+    rf"(?<![0-9])([0-9]{{1,2}})\s+de\s+({_MONTH_ALT})\s+de\s+([0-9]{{4}})(?![0-9])",
+    _LATIN_FLAGS,
 )
 _DOTTED = re.compile(
-    rf"(?<!\d)(\d{{1,2}})\.\s*({_MONTH_ALT})\s+(\d{{4}})(?!\d)",
-    re.IGNORECASE,
+    rf"(?<![0-9])([0-9]{{1,2}})\.\s*({_MONTH_ALT})\s+([0-9]{{4}})(?![0-9])",
+    _LATIN_FLAGS,
 )
-_YMD_HAN = re.compile(r"(?<!\d)(\d{4})年(\d{1,2})月(\d{1,2})日")
-_YMD_KO = re.compile(r"(?<!\d)(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일")
+_YMD_HAN = re.compile(r"(?<![0-9])([0-9]{4})年([0-9]{1,2})月([0-9]{1,2})日", re.ASCII)
+_YMD_KO = re.compile(r"(?<![0-9])([0-9]{4})년\s*([0-9]{1,2})월\s*([0-9]{1,2})일", re.ASCII)
 
 
 def _cue_pattern(kind: str, *, cjk: bool, latin: bool) -> re.Pattern[str]:

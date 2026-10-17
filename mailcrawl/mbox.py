@@ -24,7 +24,7 @@ from mailcrawl.contract import PSEUDO_LABEL, LabelRec, MessageRec
 from mailcrawl.eml import allow_headers, parsed_record
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.clock import as_of
-from mailcrawl.takeout_labels import system_id
+from mailcrawl.takeout_labels import label_key, system_id
 from mailcrawl.textnorm import chosen_stamp, parse_date
 
 PROVISIONAL = "mbox:"
@@ -131,6 +131,7 @@ class MboxSource:
         known: dict[str, LabelRec],
         seed: tuple[LabelRec, ...] = (),
         stored: Callable[[str], bool] = lambda key: False,
+        label_map: dict[str, str] | None = None,
     ) -> None:
         if not path.is_file():
             raise ExportInvalid("missing_file", "mbox file is missing", 1)
@@ -138,6 +139,7 @@ class MboxSource:
         self._stored = stored
         self._known = dict(known)
         self._seed = seed
+        self._label_map = {} if label_map is None else label_map
         self._digest = hashlib.sha256()
         self._done = False
 
@@ -203,7 +205,7 @@ class MboxSource:
     def _labels(self, header: str | None) -> list[LabelRec]:
         found: list[LabelRec] = []
         for name in label_names(header):
-            label_id = system_label(name)
+            label_id = self._label_map.get(label_key(name)) or system_label(name)
             if label_id is not None:
                 found.append(LabelRec(label_id, label_id, "system"))
             elif name.casefold() in PSEUDO_LABELS:

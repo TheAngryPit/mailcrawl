@@ -6,6 +6,9 @@ https://support.google.com/mail/answer/90559
 Unread, Spam, and Trash come from the status list and the
 in:anywhere sentence on https://support.google.com/mail/answer/7190
 Category tab names come from https://support.google.com/mail/answer/3094499
+Recibidos is the inbox link named on the es page of answer 90559.
+Notificaciones, Benachrichtigungen, التحديثات, and Актуализации
+are the updates names in that page's category sentence.
 A trailing punctuation mark that the help list used as a sentence
 mark is not part of the name. A parenthetical English gloss is not
 part of the name. Snoozed is not a system id here.
@@ -22,7 +25,6 @@ LABEL_SOURCES = (
 )
 
 MIN_SENT_SUPPORT = 20
-SENT_OWNER_RATIO = 95
 
 LABELS: dict[str, str] = {
     'categoria fóruns': 'CATEGORY_FORUMS',
@@ -132,6 +134,10 @@ LABELS: dict[str, str] = {
     '社群網路': 'CATEGORY_SOCIAL',
     '소셜': 'CATEGORY_SOCIAL',
     'actualizaciones': 'CATEGORY_UPDATES',
+    'актуализации': 'CATEGORY_UPDATES',
+    'benachrichtigungen': 'CATEGORY_UPDATES',
+    'notificaciones': 'CATEGORY_UPDATES',
+    'التحديثات': 'CATEGORY_UPDATES',
     'actualizări': 'CATEGORY_UPDATES',
     'aggiornamenti': 'CATEGORY_UPDATES',
     'aktualizace': 'CATEGORY_UPDATES',
@@ -251,6 +257,7 @@ LABELS: dict[str, str] = {
     'postilaatikko': 'INBOX',
     'postkast': 'INBOX',
     'prejeto': 'INBOX',
+    'recibidos': 'INBOX',
     'pristigla pošta': 'INBOX',
     "safata d'entrada": 'INBOX',
     'εισερχόμενα': 'INBOX',
@@ -409,18 +416,21 @@ def system_id(name: str) -> str | None:
     return LABELS.get(collapsed)
 
 
-def sent_candidates(counts: dict[str, tuple[int, int]]) -> tuple[str, ...]:
-    """Names whose messages are almost all from the account address.
+def sent_candidates(counts: dict[str, tuple[int, int]], *, sent_known: bool) -> tuple[str, ...]:
+    """Names that might mean Sent. The caller reports them and does not apply them.
 
     ``counts`` maps a label name to ``(messages, messages whose From address
-    hashes to the account)``. The address is only a vote for the name.
+    hashes to the account)``. One message from any other address excludes the
+    name. ``sent_known`` means this account already has SENT from the table
+    or from ``label_map``.
     """
+    if sent_known:
+        return ()
     found: list[str] = []
     for name in sorted(counts):
         total, owned = counts[name]
-        if total < MIN_SENT_SUPPORT:
+        if total < MIN_SENT_SUPPORT or owned != total:
             continue
-        if owned * 100 >= total * SENT_OWNER_RATIO:
-            found.append(name)
+        found.append(name)
     return tuple(found)
 

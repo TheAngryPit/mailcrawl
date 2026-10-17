@@ -2,6 +2,7 @@
 
 import calendar
 import csv
+import hashlib
 import json
 import os
 import sqlite3
@@ -196,16 +197,17 @@ class TakeoutRepairTest(unittest.TestCase):
             taxonomy_path=None,
             account_email="ada@example.com",
         )
-        self.assertEqual(found.takeout_sent, "Postausgang")
-        self.assertEqual(self._cursor("takeout_sent"), "Postausgang")
-        self.assertIsNone(self._cursor("owner_flag"))
-        self.assertEqual(self._labels(1819), ["SENT"])
-        self.assertEqual(self._row(1819)["is_from_me"], 1)
-        self.assertEqual(self._row(1800)["is_from_me"], 1)
-        again = repair_takeout(self.conn)
+        self.assertEqual(found.takeout_sent, "")
+        self.assertIn("Postausgang", found.takeout_unmapped)
+        self.assertIsNone(self._cursor("takeout_sent"))
+        self.assertEqual(self._cursor("owner_flag"), "kept")
+        self.assertEqual(self._labels(1819), ["mbox:Postausgang"])
+        self.assertEqual(self._row(1819)["is_from_me"], 0)
+        self.assertEqual(self._row(1800)["is_from_me"], 0)
+        again_sent, _again_unmapped = repair_takeout(self.conn)
         self.conn.commit()
-        self.assertEqual(again, "")
-        self.assertEqual(self._cursor("takeout_sent"), "Postausgang")
+        self.assertEqual(again_sent, "")
+        self.assertIsNone(self._cursor("takeout_sent"))
 
         short = connect(init_account(self.home, "vcl", "ada@example.com"))
         try:
@@ -378,7 +380,15 @@ class TakeoutRepairTest(unittest.TestCase):
             self.assertEqual(got[0]["sent-old"], (1, RECEIPT_STAMP, 1))
             self.assertEqual(got[0]["club-old"], (1, RECEIPT_STAMP, 1))
             self.assertEqual(got[1], [(1, "SENT"), (2, "mbox:Club")])
-            self.assertEqual(got[2], [(2, "owner_flag", "kept")])
+            digest = hashlib.sha256(b"").hexdigest()
+            self.assertEqual(
+                got[2],
+                [
+                    (1, "takeout_label_map", digest),
+                    (2, "owner_flag", "kept"),
+                    (2, "takeout_label_map", digest),
+                ],
+            )
             self.assertEqual(got[3], USER_VERSION)
             conn.execute("PRAGMA user_version = 8")
             conn.commit()

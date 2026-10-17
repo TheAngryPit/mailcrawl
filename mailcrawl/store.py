@@ -287,21 +287,24 @@ def repair_takeout(
     label_map: dict[str, str] | None = None,
     *,
     rewrite_unprovable: bool = False,
-) -> str:
-    """Remap Takeout system labels, then trust separator dates. Returns the sent-label note."""
+) -> tuple[str, tuple[str, ...]]:
+    """Remap configured Takeout labels. A Sent guess is reported and not applied."""
     names = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     if "messages" not in names:
-        return ""
+        return "", ()
     columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
     mapping = _checked_label_map(label_map)
-    note = ""
+    digest = _map_digest(mapping)
+    if not rewrite_unprovable and _map_is_current(conn, digest):
+        return _takeout_report(conn, mapping)
     if "labels" in names and "message_labels" in names and "raw_path" in columns:
         _remap_takeout_labels(conn, mapping, override_only=False)
-        note = _discover_sent(conn, mapping)
+        _record_sent_note(conn, mapping)
     if "is_from_me" in columns and "message_labels" in names:
         _settle_owner(conn)
     _refresh_dates(conn, columns, rewrite_unprovable=rewrite_unprovable)
-    return note
+    _store_map_digest(conn, digest)
+    return _takeout_report(conn, mapping)
 
 
 def _checked_label_map(label_map: dict[str, str] | None) -> dict[str, str]:
@@ -404,20 +407,79 @@ def _ensure_system_label(conn: sqlite3.Connection, account_id: int, label_id: st
     return True
 
 
-def _discover_sent(conn: sqlite3.Connection, mapping: dict[str, str]) -> str:
+def _map_digest(mapping: dict[str, str]) -> str:
+    body = "\n".join(f"{key}={mapping[key]}" for key in sorted(mapping))
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _map_is_current(conn: sqlite3.Connection, digest: str) -> bool:
+    if not _has_table(conn, "accounts"):
+        return False
+    accounts = [int(row[0]) for row in conn.execute("SELECT account_id FROM accounts")]
+    if not accounts:
+        return False
+    for account_id in accounts:
+        row = conn.execute(
+            "SELECT value FROM cursors WHERE account_id = ? AND stream = 'takeout_label_map'",
+            (account_id,),
+        ).fetchone()
+        if row is None or str(row[0]) != digest:
+            return False
+    return True
+
+
+def _store_map_digest(conn: sqlite3.Connection, digest: str) -> None:
+    if not _has_table(conn, "accounts"):
+        return
+    for row in conn.execute("SELECT account_id FROM accounts"):
+        _cursor(conn, int(row[0]), "takeout_label_map", digest)
+
+
+def _record_sent_note(conn: sqlite3.Connection, mapping: dict[str, str]) -> None:
+    forced = sorted(name for name, label_id in mapping.items() if label_id == "SENT")
+    if forced:
+        _write_takeout_note(conn, "override:" + "|".join(forced))
+        return
+    notes = _sent_notes(conn, mapping)
+    accounts = [int(row[0]) for row in conn.execute("SELECT account_id FROM accounts")]
+    for account_id in accounts:
+        note = notes.get(account_id, "")
+        if note:
+            _cursor(conn, account_id, "takeout_sent", note)
+        else:
+            conn.execute(
+                "DELETE FROM cursors WHERE account_id = ? AND stream = 'takeout_sent'",
+                (account_id,),
+            )
+
+
+def _sent_notes(conn: sqlite3.Connection, mapping: dict[str, str]) -> dict[int, str]:
     forced = sorted(name for name, label_id in mapping.items() if label_id == "SENT")
     if forced:
         note = "override:" + "|".join(forced)
-        _write_takeout_note(conn, note)
-        return note
+        return {int(row[0]): note for row in conn.execute("SELECT account_id FROM accounts")}
     hashes = {
         int(row[0]): str(row[1])
         for row in conn.execute("SELECT account_id, email_hash FROM accounts")
     }
+    sent_known = {
+        int(row[0])
+        for row in conn.execute(
+            "SELECT DISTINCT account_id FROM message_labels WHERE gmail_label_id = 'SENT'"
+        )
+    }
     counts: dict[int, dict[str, list[int]]] = {}
     rows = conn.execute(
         """
-        SELECT message_labels.account_id, labels.name, messages.from_hdr, messages.raw_path
+        SELECT message_labels.account_id, labels.name, messages.from_hdr
         FROM message_labels
         JOIN labels
           ON labels.account_id = message_labels.account_id
@@ -427,8 +489,6 @@ def _discover_sent(conn: sqlite3.Connection, mapping: dict[str, str]) -> str:
         """
     ).fetchall()
     for row in rows:
-        if not takeout_block(row["raw_path"]):
-            continue
         name = str(row["name"])
         if system_label(name) is not None or label_key(name) in mapping:
             continue
@@ -439,18 +499,51 @@ def _discover_sent(conn: sqlite3.Connection, mapping: dict[str, str]) -> str:
         digest = _from_hash(row["from_hdr"])
         if digest is not None and digest == hashes.get(account_id):
             pair[1] += 1
-    notes: list[str] = []
-    for account_id, buckets in sorted(counts.items()):
-        found = sent_candidates({name: (pair[0], pair[1]) for name, pair in buckets.items()})
+    notes: dict[int, str] = {}
+    for account_id, buckets in counts.items():
+        found = sent_candidates(
+            {name: (pair[0], pair[1]) for name, pair in buckets.items()},
+            sent_known=account_id in sent_known,
+        )
         if len(found) == 1:
-            _remap_takeout_labels(conn, {label_key(found[0]): "SENT"}, override_only=True)
-            notes.append(found[0])
-            _cursor(conn, account_id, "takeout_sent", found[0])
+            notes[account_id] = "proposed:" + found[0]
         elif len(found) > 1:
-            note = "ambiguous:" + "|".join(found)
-            notes.append(note)
-            _cursor(conn, account_id, "takeout_sent", note)
-    return "|".join(notes)
+            notes[account_id] = "ambiguous:" + "|".join(found)
+    return notes
+
+
+def _takeout_report(conn: sqlite3.Connection, mapping: dict[str, str]) -> tuple[str, tuple[str, ...]]:
+    if not _has_table(conn, "accounts") or not _has_table(conn, "labels"):
+        return "", ()
+    notes = _sent_notes(conn, mapping)
+    ordered: list[str] = []
+    for account_id in sorted(notes):
+        note = notes[account_id]
+        if note not in ordered:
+            ordered.append(note)
+    sent = "|".join(ordered)
+    unmapped: set[str] = set()
+    rows = conn.execute(
+        """
+        SELECT labels.name
+        FROM labels
+        WHERE labels.gmail_label_id LIKE 'mbox:%'
+        """
+    ).fetchall()
+    for row in rows:
+        name = str(row[0])
+        if system_label(name) is not None or label_key(name) in mapping:
+            continue
+        unmapped.add(name)
+    return sent, tuple(sorted(unmapped))
+
+
+def takeout_status(
+    conn: sqlite3.Connection,
+    label_map: dict[str, str] | None = None,
+) -> tuple[str, tuple[str, ...]]:
+    """Report a Sent proposal and unmapped Takeout names without reading mbox files."""
+    return _takeout_report(conn, _checked_label_map(label_map))
 
 
 def _write_takeout_note(conn: sqlite3.Connection, note: str) -> None:
