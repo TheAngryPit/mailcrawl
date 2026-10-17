@@ -23,6 +23,10 @@ jobs:
         shell: bash
         run: sudo apt-get update && sudo apt-get install -y poppler-utils
 
+      - name: Install Pillow
+        shell: bash
+        run: python3 -m pip install --user pillow || python3 -m pip install --user --break-system-packages pillow
+
       - name: Make check without sqlite-vec
         shell: bash
         run: make check

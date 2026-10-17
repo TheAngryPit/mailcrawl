@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import io
 import sqlite3
 import struct
+import warnings
+from contextlib import contextmanager
 
 TEXT_LIMIT = 200
 INLINE_IMAGE_FLOOR = 20 * 1024
 MIN_IMAGE_SIDE = 32
+MAX_IMAGE_SIDE = 8192
+MAX_IMAGE_PIXELS = 25_000_000
 TRACKING_PIXELS = frozenset({(1, 1)})
 RASTER_IMAGES = frozenset(
     {
@@ -71,7 +76,62 @@ def dimension_skip_reason(width: int | None, height: int | None) -> str | None:
         return f"tracking pixel {width}x{height}"
     if width < MIN_IMAGE_SIDE or height < MIN_IMAGE_SIDE:
         return f"side {width}x{height} below {MIN_IMAGE_SIDE}"
+    if width > MAX_IMAGE_SIDE or height > MAX_IMAGE_SIDE:
+        return f"side {width}x{height} above {MAX_IMAGE_SIDE}"
+    if width * height > MAX_IMAGE_PIXELS:
+        return f"pixels {width}x{height} above {MAX_IMAGE_PIXELS}"
     return None
+
+
+def image_gate(
+    mime_type: str | None,
+    is_inline: int,
+    size_bytes: int | None,
+    blob: bytes,
+) -> tuple[bool, str | None]:
+    width, height, probe = _image_dimensions(blob)
+    if not embeddable_image(mime_type, is_inline, size_bytes, width, height):
+        return False, dimension_skip_reason(width, height)
+    if width is None or height is None:
+        return False, probe or "image size is unknown"
+    return True, None
+
+
+def _image_dimensions(blob: bytes) -> tuple[int | None, int | None, str | None]:
+    parsed = image_size(blob)
+    if parsed is not None:
+        return parsed[0], parsed[1], None
+    size, reason = _pil_header_size(blob)
+    if size is None:
+        return None, None, reason or "image size is unknown"
+    return size[0], size[1], None
+
+
+def _pil_header_size(blob: bytes) -> tuple[tuple[int, int] | None, str | None]:
+    with pillow_limits() as image_mod:
+        if image_mod is None:
+            return None, "image size is unknown"
+        try:
+            with image_mod.open(io.BytesIO(blob)) as picture:
+                return (int(picture.size[0]), int(picture.size[1])), None
+        except (image_mod.DecompressionBombError, image_mod.DecompressionBombWarning) as exc:
+            text = str(exc).splitlines()[0][:200] if str(exc) else "decompression bomb"
+            return None, text or "decompression bomb"
+        except Exception:
+            return None, "image size is unknown"
+
+
+@contextmanager
+def pillow_limits():
+    try:
+        from PIL import Image
+    except ImportError:
+        yield None
+        return
+    Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        yield Image
 
 
 def image_size(blob: bytes) -> tuple[int, int] | None:

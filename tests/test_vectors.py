@@ -10,6 +10,7 @@ import tempfile
 import types
 import unittest
 import zlib
+from unittest.mock import patch
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -27,7 +28,7 @@ from mailcrawl.inference import BoundaryError, enter_model, invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.store import connect, index_message, init_account
 from mailcrawl.ingest import import_mbox
-from mailcrawl.threads import dimension_skip_reason, embeddable_image, image_size
+from mailcrawl.threads import dimension_skip_reason, embeddable_image, image_gate, image_size
 from mailcrawl.vectors import (
     LOCAL_VERIFY,
     CLASSIFICATION_PREFIX,
@@ -1061,3 +1062,243 @@ class FlatEmbedTest(unittest.TestCase):
                 )
             finally:
                 conn.close()
+
+    def test_oversized_and_unknown_images_are_skipped_before_decode(self) -> None:
+        huge_png = _png_header(12000, 12000)
+        huge_gif = b"GIF89a" + struct.pack("<HH", 12000, 12000)
+        wide_png = _png_header(5000, 6000)
+        unknown = b"not-an-image"
+        small = _solid_png(32, 32)
+        self.assertEqual(len(huge_png), 33)
+        self.assertEqual(image_size(huge_png), (12000, 12000))
+        self.assertEqual(image_size(huge_gif), (12000, 12000))
+        self.assertEqual(
+            image_gate("image/png", 0, len(huge_png), huge_png),
+            (False, "side 12000x12000 above 8192"),
+        )
+        self.assertEqual(
+            image_gate("image/gif", 0, len(huge_gif), huge_gif),
+            (False, "side 12000x12000 above 8192"),
+        )
+        self.assertEqual(
+            image_gate("image/png", 0, len(wide_png), wide_png),
+            (False, "pixels 5000x6000 above 25000000"),
+        )
+        self.assertEqual(
+            image_gate("image/webp", 0, len(unknown), unknown),
+            (False, "image size is unknown"),
+        )
+        self.assertEqual(image_gate("image/png", 0, len(small), small), (True, None))
+        self.assertIsNone(dimension_skip_reason(8192, 3051))
+        self.assertEqual(
+            dimension_skip_reason(8192, 3052),
+            "pixels 8192x3052 above 25000000",
+        )
+        if importlib.util.find_spec("PIL") is not None:
+            with patch("PIL.Image.open", side_effect=AssertionError("decoded")) as opened:
+                self.assertEqual(
+                    image_gate("image/png", 0, len(huge_png), huge_png),
+                    (False, "side 12000x12000 above 8192"),
+                )
+                self.assertEqual(
+                    image_gate("image/gif", 0, len(huge_gif), huge_gif),
+                    (False, "side 12000x12000 above 8192"),
+                )
+            self.assertEqual(opened.call_count, 0)
+            bmp = _bmp_header(32, 32)
+            bomb = _bmp_header(6000, 5000)
+            self.assertIsNone(image_size(bmp))
+            self.assertIsNone(image_size(bomb))
+            loads = {"count": 0}
+            real_open = __import__("PIL.Image", fromlist=["Image"]).open
+
+            def open_spy(handle, *args, **kwargs):
+                picture = real_open(handle, *args, **kwargs)
+                real_load = picture.load
+
+                def load_spy(*load_args, **load_kwargs):
+                    loads["count"] += 1
+                    return real_load(*load_args, **load_kwargs)
+
+                picture.load = load_spy
+                return picture
+
+            with patch("PIL.Image.open", open_spy):
+                self.assertEqual(image_gate("image/webp", 0, len(bmp), bmp), (True, None))
+                kept, reason = image_gate("image/tiff", 0, len(bomb), bomb)
+            self.assertEqual(kept, False)
+            self.assertIn("decompression bomb", reason)
+            self.assertEqual(loads["count"], 0)
+
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
+    def test_embed_skips_a_bomb_and_keeps_a_normal_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                root = Path(tmp)
+                files = {
+                    "huge.png": (_png_header(12000, 12000), "image/png"),
+                    "huge.gif": (b"GIF89a" + struct.pack("<HH", 12000, 12000), "image/gif"),
+                    "wide.png": (_png_header(5000, 6000), "image/png"),
+                    "unknown.webp": (b"not-an-image", "image/webp"),
+                    "scan.png": (_solid_png(32, 32), "image/png"),
+                }
+                if importlib.util.find_spec("PIL") is not None:
+                    files["scan.bmp"] = (_bmp_header(32, 32), "image/webp")
+                    files["bomb.bmp"] = (_bmp_header(6000, 5000), "image/tiff")
+                for name, (blob, mime) in files.items():
+                    path = root / name
+                    path.write_bytes(blob)
+                    conn.execute(
+                        """
+                        INSERT INTO attachments(
+                          msg_pk, mime_type, size_bytes, is_inline, stored_path, extract_status
+                        ) VALUES (?, ?, ?, 0, ?, 'skipped')
+                        """,
+                        (ids["alpha-msg"], mime, path.stat().st_size, str(path)),
+                    )
+                conn.commit()
+
+                class RecordImages(FakeEmbedder):
+                    def __init__(self) -> None:
+                        self.seen: list[bytes] = []
+
+                    def embed_images(self, images: list[bytes]) -> list[list[float]]:
+                        self.seen.extend(images)
+                        return super().embed_images(images)
+
+                embedder = RecordImages()
+                err = StringIO()
+                with redirect_stderr(err):
+                    self.assertEqual(embed_threads(conn, embedder, {"embeddings": True}), 5)
+                log = err.getvalue()
+                self.assertIn("side 12000x12000 above 8192", log)
+                self.assertIn("pixels 5000x6000 above 25000000", log)
+                self.assertIn("image size is unknown", log)
+                self.assertIn(files["scan.png"][0], embedder.seen)
+                self.assertNotIn(files["huge.png"][0], embedder.seen)
+                self.assertNotIn(files["huge.gif"][0], embedder.seen)
+                self.assertNotIn(files["wide.png"][0], embedder.seen)
+                self.assertNotIn(files["unknown.webp"][0], embedder.seen)
+                if "bomb.bmp" in files:
+                    self.assertIn("decompression bomb", log)
+                    self.assertIn(files["scan.bmp"][0], embedder.seen)
+                    self.assertNotIn(files["bomb.bmp"][0], embedder.seen)
+                self.assertEqual(
+                    conn.execute("SELECT count(*) FROM vec_image").fetchone()[0],
+                    2 if "scan.bmp" in files else 1,
+                )
+            finally:
+                conn.close()
+
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
+    def test_knn_leaves_a_model_row_and_a_knn_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                flags = {"embeddings": True}
+                embedder = FakeEmbedder()
+                self.assertEqual(embed_threads(conn, embedder, flags), 5)
+                decide_once(
+                    conn,
+                    ids["near"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="reference",
+                        lane="paper_trail",
+                        rule_id="3",
+                        rules_version="rules-v4",
+                        origin="human",
+                        source_detail="review",
+                    ),
+                )
+                model = decide_once(
+                    conn,
+                    ids["target"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="needs_review",
+                        lane="imbox",
+                        rule_id="harness",
+                        rules_version="harness",
+                        origin="model",
+                        source_detail="harness-fixture",
+                    ),
+                )
+                knn = decide_once(
+                    conn,
+                    ids["far"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="reference",
+                        lane="paper_trail",
+                        rule_id="3",
+                        rules_version="rules-v4",
+                        origin="knn",
+                        source_detail="fake-embedder",
+                    ),
+                )
+                stayed_model = knn_decide(conn, ids["target"], embedder, flags, 20)
+                stayed_knn = knn_decide(conn, ids["far"], embedder, flags, 20)
+                eligible, decided, review = knn_account(conn, embedder, flags, 30)
+                self.assertEqual(int(stayed_model["decision_id"]), int(model["decision_id"]))
+                self.assertEqual(
+                    (stayed_model["origin"], stayed_model["rule_id"], stayed_model["next_state"]),
+                    ("model", "harness", "needs_review"),
+                )
+                self.assertEqual(int(stayed_knn["decision_id"]), int(knn["decision_id"]))
+                self.assertEqual((stayed_knn["origin"], stayed_knn["rule_id"]), ("knn", "3"))
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT count(*) FROM decisions WHERE thread_pk = ?",
+                        (ids["target"],),
+                    ).fetchone()[0],
+                    1,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT count(*) FROM decisions WHERE thread_pk = ?",
+                        (ids["far"],),
+                    ).fetchone()[0],
+                    1,
+                )
+                self.assertEqual(eligible, 2)
+                self.assertEqual(decided + review, 2)
+                model_row = conn.execute(
+                    """
+                    SELECT origin, rule_id FROM decisions
+                    WHERE thread_pk = ? AND superseded_by IS NULL
+                    """,
+                    (ids["target"],),
+                ).fetchone()
+                knn_row = conn.execute(
+                    """
+                    SELECT origin, rule_id FROM decisions
+                    WHERE thread_pk = ? AND superseded_by IS NULL
+                    """,
+                    (ids["far"],),
+                ).fetchone()
+                self.assertEqual((model_row[0], model_row[1]), ("model", "harness"))
+                self.assertEqual((knn_row[0], knn_row[1]), ("knn", "3"))
+            finally:
+                conn.close()
+
+
+def _png_header(width: int, height: int) -> bytes:
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+
+
+def _bmp_header(width: int, height: int) -> bytes:
+    row = ((min(width, 4) * 3 + 3) // 4) * 4
+    pixels = b"\x00" * row
+    offset = 54
+    header = b"BM" + struct.pack("<IHHI", offset + len(pixels), 0, 0, offset)
+    dib = struct.pack("<IiiHHIIiiII", 40, width, height, 1, 24, 0, len(pixels), 0, 0, 0, 0)
+    return header + dib + pixels

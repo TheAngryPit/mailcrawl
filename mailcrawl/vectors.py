@@ -24,19 +24,19 @@ from mailcrawl.decisions import (
 )
 from mailcrawl.inference import BoundaryError, enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
-from mailcrawl.threads import dimension_skip_reason, embeddable_image, image_size
+from mailcrawl.threads import image_gate, pillow_limits
 
 NATIVE_DIM = 768
 CLASSIFICATION_PREFIX = "task: classification | query: "
 SEARCH_QUERY_PREFIX = "task: search result | query: "
 SEARCH_TITLE_PREFIX = "title: "
 LOCAL_VERIFY = (
-    "python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox "
+    "python -m mailcrawl --db ~/MailVault/db-v5-sandbox "
     "embed --account thehive --embedder gemma"
 )
 MLX_MODEL_ID = "mlx-community/embeddinggemma-2-8bit"
 MLX_LOCAL_VERIFY = (
-    "python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox "
+    "python -m mailcrawl --db ~/MailVault/db-v5-sandbox "
     "bench --account thehive --embedders gemma,mlx --sample 32"
 )
 MLX_PROCESSOR_ERROR = (
@@ -273,15 +273,20 @@ class MlxEmbedder:
             self.image_batches = []
             return []
         model, processor, mx = self._vision_runtime()
-        from PIL import Image
 
         def encode_one(blob: bytes) -> list[list[float]]:
-            picture = Image.open(io.BytesIO(blob))
-            picture.load()
-            inputs = processor(images=[picture], return_tensors="np")
-            embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
-            mx.eval(embeddings)
-            return _rows(self.model_id, embeddings.tolist())
+            with pillow_limits() as image_mod:
+                if image_mod is None:
+                    raise ImportError("Pillow is not installed")
+                picture = image_mod.open(io.BytesIO(blob))
+                try:
+                    picture.load()
+                    inputs = processor(images=[picture], return_tensors="np")
+                    embeddings = model(**{key: mx.array(value) for key, value in inputs.items()}).text_embeds
+                    mx.eval(embeddings)
+                    return _rows(self.model_id, embeddings.tolist())
+                finally:
+                    picture.close()
 
         return bounded_image_rows(self, images, encode_one)
 
@@ -439,7 +444,8 @@ def _encode_guarded(model, payload, device: str, *, image: bool):
     enter_model()
     torch = _optional_torch()
     scope = torch.inference_mode() if torch is not None else contextlib.nullcontext()
-    with scope:
+    limits = pillow_limits() if image else contextlib.nullcontext()
+    with scope, limits:
         kwargs = {
             "normalize_embeddings": True,
             "convert_to_numpy": True,
@@ -842,15 +848,13 @@ def _kept_images(conn: sqlite3.Connection, thread_ids: set[int]) -> list[_KeptIm
         if not path.is_file():
             continue
         blob = path.read_bytes()
-        width, height = image_size(blob) or (None, None)
-        if not embeddable_image(
+        keep, reason = image_gate(
             mime,
             int(inline or 0),
             None if size is None else int(size),
-            width,
-            height,
-        ):
-            reason = dimension_skip_reason(width, height)
+            blob,
+        )
+        if not keep:
             if reason:
                 _log_skip(f"image {int(att_pk)}", reason)
             continue

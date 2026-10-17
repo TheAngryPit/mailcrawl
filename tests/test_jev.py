@@ -294,6 +294,86 @@ class JevBatteryTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_model_and_knn_rows_stay_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                flags = {"jev-battery": True}
+                client = CountingJev()
+                model = decide_once(
+                    conn,
+                    ids["reply"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="needs_review",
+                        lane="imbox",
+                        rule_id="harness",
+                        rules_version="harness",
+                        origin="model",
+                        source_detail="harness-fixture",
+                    ),
+                )
+                knn = decide_once(
+                    conn,
+                    ids["bulk"],
+                    10,
+                    lambda: DecisionDraft(
+                        next_state="noise",
+                        lane="feed",
+                        rule_id="3",
+                        rules_version="rules-v4",
+                        origin="knn",
+                        source_detail="fake-embedder",
+                    ),
+                )
+                stayed_model = jev_decide(conn, ids["reply"], client, flags, 11)
+                stayed_knn = jev_decide(conn, ids["bulk"], client, flags, 11)
+                self.assertEqual(client.calls, 0)
+                self.assertEqual(int(stayed_model["decision_id"]), int(model["decision_id"]))
+                self.assertEqual(
+                    (stayed_model["origin"], stayed_model["rule_id"], stayed_model["next_state"]),
+                    ("model", "harness", "needs_review"),
+                )
+                self.assertEqual(int(stayed_knn["decision_id"]), int(knn["decision_id"]))
+                self.assertEqual((stayed_knn["origin"], stayed_knn["rule_id"]), ("knn", "3"))
+                passed = score_grey_band(conn, client, flags, 12)
+                self.assertEqual(passed.eligible, 3)
+                self.assertEqual(passed.decided + passed.review, 3)
+                self.assertEqual(client.calls, 3)
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT count(*) FROM decisions WHERE thread_pk = ?",
+                        (ids["reply"],),
+                    ).fetchone()[0],
+                    1,
+                )
+                self.assertEqual(
+                    conn.execute(
+                        "SELECT count(*) FROM decisions WHERE thread_pk = ?",
+                        (ids["bulk"],),
+                    ).fetchone()[0],
+                    1,
+                )
+                current_model = conn.execute(
+                    """
+                    SELECT origin, rule_id FROM decisions
+                    WHERE thread_pk = ? AND superseded_by IS NULL
+                    """,
+                    (ids["reply"],),
+                ).fetchone()
+                current_knn = conn.execute(
+                    """
+                    SELECT origin, rule_id FROM decisions
+                    WHERE thread_pk = ? AND superseded_by IS NULL
+                    """,
+                    (ids["bulk"],),
+                ).fetchone()
+                self.assertEqual((current_model[0], current_model[1]), ("model", "harness"))
+                self.assertEqual((current_knn[0], current_knn[1]), ("knn", "3"))
+            finally:
+                conn.close()
+
     def test_pin_request_and_missing_key(self) -> None:
         body = request_body("synthetic", BATTERY)
         self.assertEqual(body["model"], "jev-1.13.0")

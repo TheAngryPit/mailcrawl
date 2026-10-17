@@ -139,7 +139,7 @@ def rules_path(path: Path) -> Path | None:
     document = load_config(path)
     if "rules" not in document:
         return None
-    return Path(_rules_value(document.get("rules")))
+    return Path(_rules_value(document.get("rules"))).expanduser()
 
 
 def embedder_name(path: Path) -> str:
