@@ -526,7 +526,12 @@ def _classify(
             0,
             ({"type": "rule", "name": "handoff"},),
         )
-    if _short_closing(facts.body, config) and not protected and not _inbox_noise(facts):
+    if (
+        facts.last_from_me
+        and _short_closing(facts.body, config)
+        and not protected
+        and not _inbox_noise(facts)
+    ):
         return _outcome("resolved", "8", "imbox", None, None, 0, ({"type": "rule", "name": "8"},))
     if (
         facts.human
@@ -554,7 +559,8 @@ def _classify(
     if not facts.last_from_me and not facts.listish and not facts.promotions and _task(facts.body, config):
         return _outcome("action", "7", "imbox", None, None, 0, ({"type": "rule", "name": "7"},))
     if (
-        _closing(facts.body, config)
+        facts.last_from_me
+        and _closing(facts.body, config)
         and not _question(facts.body, config)
         and not _task(facts.body, config)
         and not _inbox_noise(facts)

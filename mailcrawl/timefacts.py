@@ -118,8 +118,6 @@ def thread_time_facts(
     conn: sqlite3.Connection,
     thread_pk: int,
     moment: int,
-    _owners: frozenset[str] = frozenset(),
-    _domains: frozenset[str] = frozenset(),
 ) -> TimeFacts:
     rows = conn.execute(
         """
