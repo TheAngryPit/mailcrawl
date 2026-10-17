@@ -25,6 +25,7 @@ from mailcrawl.rules import apply_rules, bundled_rules_path, load_rules
 from mailcrawl.schema import SCHEMA_SQL, USER_VERSION
 from mailcrawl.store import connect, init_account, migrate
 from mailcrawl.textnorm import parse_date
+from mailcrawl.time_cues import CUES, MONTHS
 from mailcrawl.timefacts import TEXT_CAP, TimeFacts, TimePolicy, apply_time, thread_time_facts
 from mailcrawl.vectors import FakeEmbedder, embed_threads, knn_decide
 
@@ -107,6 +108,37 @@ class TimeFactsTest(unittest.TestCase):
             facts = thread_time_facts(conn, 1, AS_OF)
         self.assertEqual(facts.found, ())
         self.assertLess(len(late[:TEXT_CAP]), len(late))
+
+    def test_non_latin_months_match_cldr_and_hindi_keeps_marks(self) -> None:
+        import unicodedata
+
+        source = json.loads((ROOT / "testdata" / "fixtures" / "cldr-months.json").read_text(encoding="utf-8"))
+        expected: dict[str, int] = {}
+        for names in source.values():
+            for index, name in enumerate(names, start=1):
+                folded = " ".join(unicodedata.normalize("NFC", name).casefold().split())
+                key = unicodedata.normalize("NFC", folded)
+                if key[:1].isdigit():
+                    continue
+                if all(ord(char) < 128 for char in key):
+                    continue
+                expected[key] = index
+        for key, month in expected.items():
+            self.assertEqual(MONTHS.get(key), month, key)
+        for key, month in MONTHS.items():
+            if all(ord(char) < 128 for char in key):
+                continue
+            self.assertEqual(unicodedata.normalize("NFC", key), key, key)
+            self.assertEqual(expected.get(key), month, key)
+        self.assertEqual(CUES.get("बैठक"), "meeting")
+        self.assertNotIn("बठक", CUES)
+
+    def test_cited_help_names_include_the_review_gaps(self) -> None:
+        from mailcrawl.takeout_labels import system_id
+
+        self.assertEqual(system_id("Recibidos"), "INBOX")
+        self.assertEqual(system_id("Notificaciones"), "CATEGORY_UPDATES")
+        self.assertEqual(system_id("Benachrichtigungen"), "CATEGORY_UPDATES")
 
     def test_multilingual_cues_and_the_new_patterns_finish(self) -> None:
         cases = (
@@ -391,6 +423,15 @@ class TimeFactsTest(unittest.TestCase):
             digits = thread_time_facts(conn, 2, AS_OF)
             self.assertEqual(digits.found, ())
             self.assertEqual(apply_time(draft, digits).next_state, "reply")
+            for thread_pk, body in (
+                (4, "plazo ١٥ de marzo de ٢٠٢٥"),
+                (5, "deadline १५ marzo २०२५"),
+                (6, "plazo １５ de marzo de ２０２５"),
+                (7, "期限 ２０२５年３月１５日"),
+            ):
+                self._message(conn, thread_pk, "other@example.com", 0, _stamp(2026, 10, 16), "Digits", body)
+                facts = thread_time_facts(conn, thread_pk, AS_OF)
+                self.assertEqual(facts.found, (), body)
             self._message(
                 conn,
                 3,

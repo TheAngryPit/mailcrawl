@@ -14,7 +14,7 @@ from pathlib import Path
 from mailcrawl.ingest import import_mbox
 from mailcrawl.mbox import gmail_hex
 from mailcrawl.paths import UsageError
-from mailcrawl.rules import bundled_rules_path
+from mailcrawl.rules import apply_rules, bundled_rules_path, load_rules
 from mailcrawl.schema import SCHEMA_SQL, USER_VERSION
 from mailcrawl.store import connect, init_account, migrate, repair_takeout
 from mailcrawl.takeout_labels import LABEL_SOURCES, system_id
@@ -633,3 +633,199 @@ class TimeReevaluateTest(unittest.TestCase):
         finally:
             conn.close()
         return (str(row[0]), str(row[1]), str(row[2]))
+
+
+RECENT = "Thu Oct 15 10:00:00 +0000 2026"
+RECENT_HEADER = "Thu, 15 Oct 2026 10:00:00 +0000"
+
+
+def _recent(number: int, labels: str, sender: str, body: str, thrid: int | None = None) -> str:
+    thread = f"X-GM-THRID: {thrid}\n" if thrid is not None else ""
+    return (
+        f"From {number}@example.com {RECENT}\n"
+        f"{thread}"
+        f"X-Gmail-Labels: {labels}\n"
+        f"From: {sender}\n"
+        "To: Bao Fixture <bao@example.com>\n"
+        "Subject: synthetic\n"
+        f"Date: {RECENT_HEADER}\n"
+        f"Message-ID: <m{number}@example.com>\n"
+        "\n"
+        f"{body}\n"
+        "\n"
+    )
+
+
+class SentPoisonTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        self.conn = connect(init_account(self.home, "personal", "ada@example.com"))
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def test_known_sent_keeps_forged_spam_as_mail(self) -> None:
+        parts = [_recent(3000, "Đã gửi", "Ada Fixture <ada@example.com>", "note")]
+        for number in range(3001, 3026):
+            parts.append(_recent(number, "Thư rác", "Ada Fixture <ada@example.com>", "spam"))
+        parts.append(
+            _recent(3026, "Thư rác", "Cam Fixture <cam@example.com>", "Can you send the file?", 3025)
+        )
+        path = self.home / "vi.mbox"
+        path.write_text("".join(parts), encoding="utf-8")
+        result = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual(result.takeout_sent, "")
+        self.assertIn("Thư rác", result.takeout_unmapped)
+        self.assertEqual(self._labels(3000), ["SENT"])
+        self.assertEqual(self._mine(3000), 1)
+        self.assertEqual(self._labels(3001), ["mbox:Thư rác"])
+        self.assertEqual(self._mine(3001), 0)
+        self.assertEqual(self._labels(3026), ["mbox:Thư rác"])
+        self.assertEqual(self._mine(3026), 0)
+        apply_rules(self.conn, now=AS_OF, config=load_rules(RULES))
+        decision = self.conn.execute(
+            """
+            SELECT rule_id, next_state FROM decisions
+            JOIN messages ON messages.thread_pk = decisions.thread_pk
+            WHERE messages.gmail_message_id = ? AND superseded_by IS NULL
+            """,
+            (gmail_hex("3026", decimal_only=True),),
+        ).fetchone()
+        self.assertEqual((decision[0], decision[1]), ("5", "reply"))
+        status = run_mailcrawl(
+            self.home,
+            "--json",
+            "--home",
+            str(self.home),
+            "takeout",
+            "status",
+            "--account",
+            "personal",
+        )
+        self.assertEqual(status.returncode, 0, status.stderr)
+        reported = json.loads(status.stdout)
+        self.assertEqual(reported["takeout_sent"], "")
+        self.assertIn("Thư rác", reported["takeout_unmapped"])
+
+    def test_a_mixed_user_label_is_not_proposed_or_applied(self) -> None:
+        parts = [
+            _recent(number, "Clientes", "Ada Fixture <ada@example.com>", "note")
+            for number in range(4000, 4019)
+        ]
+        parts.append(_recent(4019, "Clientes", "Bao Fixture <bao@example.com>", "note"))
+        path = self.home / "clientes.mbox"
+        path.write_text("".join(parts), encoding="utf-8")
+        result = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual(result.takeout_sent, "")
+        self.assertIn("Clientes", result.takeout_unmapped)
+        self.assertEqual(self._labels(4000), ["mbox:Clientes"])
+        self.assertEqual(self._mine(4019), 0)
+        mapped = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+            label_map={"Clientes": "SENT"},
+        )
+        self.assertEqual(mapped.takeout_sent, "override:clientes")
+        self.assertEqual(self._labels(4019), ["SENT"])
+        self.assertEqual(self._mine(4019), 1)
+
+    def test_an_all_owner_unknown_label_is_only_proposed(self) -> None:
+        parts = [
+            _recent(number, "Postausgang", "Ada Fixture <ada@example.com>", "note")
+            for number in range(4100, 4120)
+        ]
+        path = self.home / "out.mbox"
+        path.write_text("".join(parts), encoding="utf-8")
+        result = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual(result.takeout_sent, "proposed:Postausgang")
+        self.assertEqual(self._labels(4100), ["mbox:Postausgang"])
+        self.assertEqual(self._mine(4100), 0)
+        self.assertIn("Postausgang", result.takeout_unmapped)
+
+    def test_same_label_map_does_not_reread_the_mbox(self) -> None:
+        first = "Thu Jan 02 10:00:00 +0000 2020"
+        second = "Thu Feb 02 10:00:00 +0000 2020"
+        path = self.home / "once.mbox"
+        path.write_text(
+            f"From 1601@example.com {first}\n"
+            "X-Gmail-Labels: FooSent\n"
+            "From: Bao Fixture <bao@example.com>\n"
+            "To: Ada Fixture <ada@example.com>\n"
+            "Subject: synthetic\n"
+            f"Date: {HEADER}\n"
+            "Message-ID: <once@example.com>\n"
+            "\n"
+            "note\n",
+            encoding="utf-8",
+        )
+        mapping = {"FooSent": "SENT"}
+        import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+            label_map=mapping,
+        )
+        self.conn.close()
+        path.write_text(path.read_text(encoding="utf-8").replace(first, second), encoding="utf-8")
+        again = connect(init_account(self.home, "personal", "ada@example.com"), label_map=mapping)
+        try:
+            stamp = int(
+                again.execute(
+                    "SELECT internal_date FROM messages WHERE gmail_message_id = ?",
+                    (gmail_hex("1601", decimal_only=True),),
+                ).fetchone()[0]
+            )
+            self.assertEqual(stamp, calendar.timegm((2020, 1, 2, 10, 0, 0)))
+        finally:
+            again.close()
+        self.conn = connect(self.home / "personal.db")
+
+    def _labels(self, number: int) -> list[str]:
+        return [
+            row[0]
+            for row in self.conn.execute(
+                """
+                SELECT gmail_label_id FROM message_labels
+                JOIN messages ON messages.msg_pk = message_labels.msg_pk
+                WHERE gmail_message_id = ? ORDER BY gmail_label_id
+                """,
+                (gmail_hex(str(number), decimal_only=True),),
+            )
+        ]
+
+    def _mine(self, number: int) -> int:
+        row = self.conn.execute(
+            "SELECT is_from_me FROM messages WHERE gmail_message_id = ?",
+            (gmail_hex(str(number), decimal_only=True),),
+        ).fetchone()
+        return int(row[0])
