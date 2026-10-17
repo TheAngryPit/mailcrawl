@@ -645,7 +645,7 @@ def _recompute_threads(conn: sqlite3.Connection, account_id: int) -> None:
         thread_pk = int(thread["thread_pk"])
         latest = conn.execute(
             """
-            SELECT subject, is_from_me FROM messages
+            SELECT subject FROM messages
             WHERE thread_pk = ?
             ORDER BY internal_date DESC, msg_pk DESC
             LIMIT 1
@@ -658,7 +658,6 @@ def _recompute_threads(conn: sqlite3.Connection, account_id: int) -> None:
               msg_count = (SELECT count(*) FROM messages WHERE thread_pk = ?),
               first_msg_at = (SELECT min(internal_date) FROM messages WHERE thread_pk = ?),
               last_msg_at = (SELECT max(internal_date) FROM messages WHERE thread_pk = ?),
-              last_msg_from_me = ?,
               subject_norm = ?
             WHERE thread_pk = ?
             """,
@@ -666,7 +665,6 @@ def _recompute_threads(conn: sqlite3.Connection, account_id: int) -> None:
                 thread_pk,
                 thread_pk,
                 thread_pk,
-                None if latest is None else latest["is_from_me"],
                 None if latest is None else subject_norm(latest["subject"]),
                 thread_pk,
             ),

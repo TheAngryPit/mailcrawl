@@ -398,16 +398,28 @@ def _separator_id(separator: bytes) -> str | None:
     return gmail_hex(found.group(1), decimal_only=True)
 
 
-def takeout_block(raw_path: object) -> bool:
-    """True when this row's separator and leading block would be accepted at import."""
+@dataclass(frozen=True)
+class MboxFacts:
+    kind: str
+    inbound: bool
+
+
+def mbox_facts(raw_path: object) -> MboxFacts:
+    """``takeout`` when the separator would be accepted, ``plain`` when the file is not, ``unread`` when it cannot be opened."""
     opened = _open_mbox_row(raw_path)
     if opened is None:
-        return False
+        return MboxFacts("unread", False)
     _path, separator, head = opened
     if head.startswith(separator):
         head = head[len(separator) :]
     _kept, takeout = _strip_takeout(head, separator)
-    return takeout.labels is not None
+    kind = "takeout" if takeout.labels is not None else "plain"
+    return MboxFacts(kind, _arrived_from_outside(head))
+
+
+def takeout_block(raw_path: object) -> bool:
+    """True when this row's separator and leading block would be accepted at import."""
+    return mbox_facts(raw_path).kind == "takeout"
 
 
 def stored_receipt(raw_path: object) -> tuple[int, int] | None:
@@ -453,6 +465,50 @@ def _read_mbox_separator(path: Path, offset: int) -> bytes:
     with path.open("rb") as handle:
         handle.seek(offset)
         return handle.readline(4096)
+
+
+_FROM_HOST = re.compile(rb"(?i)\bfrom\s+(\S+)")
+
+
+def _arrived_from_outside(head: bytes) -> bool:
+    if _header_values(head, "delivered-to"):
+        return True
+    for value in _header_values(head, "authentication-results"):
+        folded = value.lower()
+        if b"spf=" in folded or b"dkim=" in folded or b"dmarc=" in folded:
+            return True
+    for value in _header_values(head, "received"):
+        found = _FROM_HOST.search(value)
+        if found is not None and not _google_hop(found.group(1)):
+            return True
+    return False
+
+
+def _google_hop(host: bytes) -> bool:
+    token = host.strip(b"[]()").lower().rstrip(b".")
+    return token in (b"google.com", b"gmail.com") or token.endswith(
+        (b".google.com", b".gmail.com")
+    )
+
+
+def _header_values(head: bytes, name: str) -> list[bytes]:
+    wanted = name.encode()
+    values: list[bytes] = []
+    current: bytearray | None = None
+    for line in head.splitlines():
+        if line[:1] in (b" ", b"\t"):
+            if current is not None:
+                current += b" " + line.strip()
+            continue
+        if current is not None:
+            values.append(bytes(current))
+            current = None
+        key, sep, rest = line.partition(b":")
+        if sep and key.strip().lower() == wanted:
+            current = bytearray(rest.strip())
+    if current is not None:
+        values.append(bytes(current))
+    return values
 
 
 def _read_head(path: Path, offset: int) -> bytes:

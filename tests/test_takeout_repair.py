@@ -506,8 +506,17 @@ class TakeoutRepairTest(unittest.TestCase):
             self.assertTrue(note is None or not str(note[0]).startswith("proposed:"))
             granted = repair_takeout(conn, {"Outbox": "SENT"})
             conn.commit()
-            self.assertEqual(granted.sent, "")
+            self.assertEqual(granted.sent, "override:outbox")
             self.assertEqual(granted.skipped, ())
+            self.assertEqual(
+                [
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT gmail_label_id FROM message_labels ORDER BY gmail_label_id"
+                    )
+                ],
+                ["SENT"],
+            )
             self.assertEqual(
                 [int(row[0]) for row in conn.execute("SELECT is_from_me FROM messages ORDER BY msg_pk")],
                 [0] * 22 + [1],
@@ -1351,6 +1360,28 @@ class SentPoisonTest(unittest.TestCase):
         for number in (7301, 7302, 7303):
             self.assertEqual(self._labels(number), ["mbox:Caixa"], number)
             self.assertEqual(self._mine(number), 0, number)
+
+    def test_a_restored_user_label_keeps_the_receipt_time(self) -> None:
+        path = self.home / "both.mbox"
+        path.write_text(
+            _recent(7400, "Enviado,Caixa", "Ada Fixture <ada@example.com>", "both"),
+            encoding="utf-8",
+        )
+        import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+            label_map={"Caixa": "SENT"},
+        )
+        self.assertEqual(self._labels(7400), ["SENT"])
+        repair_takeout(self.conn, {})
+        self.conn.commit()
+        self.assertEqual(self._labels(7400), ["SENT", "mbox:Caixa"])
+        self.assertEqual(self._mine(7400), 1)
+        self.assertEqual(self._observed(7400, "mbox:Caixa"), calendar.timegm((2026, 10, 15, 10, 0, 0)))
 
     def _observed(self, number: int, label_id: str) -> int:
         row = self.conn.execute(

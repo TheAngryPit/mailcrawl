@@ -83,7 +83,6 @@ CREATE TABLE IF NOT EXISTS threads (
   first_msg_at INTEGER,
   last_msg_at INTEGER,
   msg_count INTEGER NOT NULL DEFAULT 0,
-  last_msg_from_me INTEGER,
   has_human_participant INTEGER,
   subject_norm TEXT,
   image_only INTEGER NOT NULL DEFAULT 0,

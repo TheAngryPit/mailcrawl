@@ -6,7 +6,7 @@ import hashlib
 import sqlite3
 from dataclasses import dataclass
 
-from mailcrawl.mbox import stored_receipt, takeout_block
+from mailcrawl.mbox import MboxFacts, mbox_facts, stored_receipt
 from mailcrawl.takeout_labels import checked_label_map, label_key, resolved_label, sent_candidates
 from mailcrawl.textnorm import parse_address
 
@@ -64,14 +64,17 @@ def repair_takeout(
     digest = _map_digest(mapping)
     current = not rewrite_unprovable and _map_is_current(conn, digest)
     notes: dict[int, str] | None = None
+    view = _TakeoutRows()
+    _drop_thread_cache(conn)
     if scope.can_remap():
         _ensure_override_table(conn)
+        _drop_plain_mbox_labels(conn, view)
         _revert_sent_grants(conn, mapping)
     if scope.can_remap() and not current:
-        _remap_takeout_labels(conn, mapping)
+        _remap_takeout_labels(conn, mapping, view)
     if scope.can_remap():
-        _grant_sent(conn, mapping, owners or frozenset())
-        notes = _sent_notes(conn, mapping)
+        _grant_sent(conn, mapping, owners or frozenset(), view)
+        notes = _sent_notes(conn, mapping, view)
         _write_notes(conn, notes)
     if scope.can_settle():
         _settle_owner(conn)
@@ -79,7 +82,7 @@ def repair_takeout(
         _refresh_dates(conn, scope, rewrite_unprovable=rewrite_unprovable)
     if not current:
         _store_map_digest(conn, digest)
-    return _takeout_report(conn, mapping, notes, owners or frozenset())
+    return _takeout_report(conn, mapping, notes, owners or frozenset(), view)
 
 
 def takeout_status(
@@ -89,10 +92,56 @@ def takeout_status(
     owners: frozenset[str] | None = None,
 ) -> TakeoutReport:
     """Report a Sent proposal and unmapped Takeout names without reading mbox files."""
-    return _takeout_report(conn, checked_label_map(label_map), None, owners or frozenset())
+    return _takeout_report(conn, checked_label_map(label_map), None, owners or frozenset(), _TakeoutRows())
 
 
-def _remap_takeout_labels(conn: sqlite3.Connection, mapping: dict[str, str]) -> None:
+class _TakeoutRows:
+    def __init__(self) -> None:
+        self._facts: dict[str, MboxFacts] = {}
+
+    def facts(self, raw_path: object) -> MboxFacts:
+        key = raw_path if isinstance(raw_path, str) else ""
+        found = self._facts.get(key)
+        if found is None:
+            found = mbox_facts(raw_path)
+            self._facts[key] = found
+        return found
+
+    def accepted(self, raw_path: object) -> bool:
+        return self.facts(raw_path).kind == "takeout"
+
+
+def _drop_thread_cache(conn: sqlite3.Connection) -> None:
+    if not _has_table(conn, "threads"):
+        return
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(threads)")}
+    if "last_msg_from_me" not in columns:
+        return
+    conn.execute("ALTER TABLE threads DROP COLUMN last_msg_from_me")
+
+
+def _drop_plain_mbox_labels(conn: sqlite3.Connection, view: _TakeoutRows) -> None:
+    rows = conn.execute(
+        """
+        SELECT message_labels.msg_pk, message_labels.gmail_label_id, messages.raw_path
+        FROM message_labels
+        JOIN messages ON messages.msg_pk = message_labels.msg_pk
+        WHERE message_labels.gmail_label_id LIKE 'mbox:%'
+        """
+    ).fetchall()
+    for row in rows:
+        if view.facts(row["raw_path"]).kind != "plain":
+            continue
+        conn.execute(
+            "DELETE FROM message_labels WHERE msg_pk = ? AND gmail_label_id = ?",
+            (int(row["msg_pk"]), str(row["gmail_label_id"])),
+        )
+    _drop_orphan_mbox_labels(conn)
+
+
+def _remap_takeout_labels(
+    conn: sqlite3.Connection, mapping: dict[str, str], view: _TakeoutRows
+) -> None:
     rows = conn.execute(
         """
         SELECT message_labels.msg_pk, message_labels.account_id, message_labels.gmail_label_id,
@@ -108,7 +157,7 @@ def _remap_takeout_labels(conn: sqlite3.Connection, mapping: dict[str, str]) -> 
     planned: list[tuple[int, int, str, str]] = []
     for row in rows:
         raw_path = row["raw_path"]
-        if not takeout_block(raw_path):
+        if not view.accepted(raw_path):
             continue
         name = str(row["name"])
         target = resolved_label(name, mapping)
@@ -253,6 +302,7 @@ def _grant_sent(
     conn: sqlite3.Connection,
     mapping: dict[str, str],
     owners: frozenset[str],
+    view: _TakeoutRows,
 ) -> None:
     keys = _sent_keys(mapping)
     if not keys or not _has_table(conn, "accounts"):
@@ -264,7 +314,7 @@ def _grant_sent(
     rows = conn.execute(
         """
         SELECT message_labels.msg_pk, message_labels.account_id,
-               message_labels.gmail_label_id, labels.name, messages.from_hdr
+               message_labels.gmail_label_id, labels.name, messages.from_hdr, messages.raw_path
         FROM message_labels
         JOIN labels
           ON labels.account_id = message_labels.account_id
@@ -274,23 +324,17 @@ def _grant_sent(
         """
     ).fetchall()
     for row in rows:
+        if not view.accepted(row["raw_path"]):
+            continue
         name = str(row["name"])
         key = label_key(name)
         if key not in keys:
             continue
         msg_pk = int(row["msg_pk"])
-        recorded = conn.execute(
-            """
-            SELECT 1 FROM takeout_label_override
-            WHERE msg_pk = ? AND label_key = ?
-            """,
-            (msg_pk, key),
-        ).fetchone()
-        if recorded is not None:
-            continue
         account_id = int(row["account_id"])
         digest = _from_hash(row["from_hdr"])
-        if digest is None or digest not in hashes.get(account_id, frozenset()):
+        allowed = hashes.get(account_id, frozenset())
+        if digest is None or digest not in allowed or view.facts(row["raw_path"]).inbound:
             continue
         if not _ensure_system_label(conn, account_id, "SENT"):
             continue
@@ -315,6 +359,10 @@ def _grant_sent(
             INSERT INTO takeout_label_override(
               msg_pk, label_key, previous_id, applied_id, replaced
             ) VALUES (?, ?, ?, 'SENT', ?)
+            ON CONFLICT(msg_pk, label_key) DO UPDATE SET
+              previous_id = excluded.previous_id,
+              applied_id = excluded.applied_id,
+              replaced = excluded.replaced
             """,
             (msg_pk, key, current, replaced),
         )
@@ -367,12 +415,17 @@ def _message_has_label(conn: sqlite3.Connection, msg_pk: int, label_id: str) -> 
 def _insert_message_label(
     conn: sqlite3.Connection, msg_pk: int, account_id: int, label_id: str
 ) -> None:
+    stamp = conn.execute(
+        "SELECT internal_date FROM messages WHERE msg_pk = ?",
+        (msg_pk,),
+    ).fetchone()
+    observed = 0 if stamp is None or stamp[0] is None else int(stamp[0])
     conn.execute(
         """
         INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
-        VALUES (?, ?, ?, 0)
+        VALUES (?, ?, ?, ?)
         """,
-        (msg_pk, account_id, label_id),
+        (msg_pk, account_id, label_id, observed),
     )
 
 
@@ -450,7 +503,9 @@ def _write_notes(conn: sqlite3.Connection, notes: dict[int, str]) -> None:
             )
 
 
-def _sent_notes(conn: sqlite3.Connection, mapping: dict[str, str]) -> dict[int, str]:
+def _sent_notes(
+    conn: sqlite3.Connection, mapping: dict[str, str], view: _TakeoutRows
+) -> dict[int, str]:
     if not _has_table(conn, "accounts"):
         return {}
     forced = sorted(name for name, label_id in mapping.items() if label_id == "SENT")
@@ -470,7 +525,7 @@ def _sent_notes(conn: sqlite3.Connection, mapping: dict[str, str]) -> dict[int, 
     counts: dict[int, dict[str, list[int]]] = {}
     rows = conn.execute(
         """
-        SELECT message_labels.account_id, labels.name, messages.from_hdr
+        SELECT message_labels.account_id, labels.name, messages.from_hdr, messages.raw_path
         FROM message_labels
         JOIN labels
           ON labels.account_id = message_labels.account_id
@@ -480,6 +535,8 @@ def _sent_notes(conn: sqlite3.Connection, mapping: dict[str, str]) -> dict[int, 
         """
     ).fetchall()
     for row in rows:
+        if not view.accepted(row["raw_path"]):
+            continue
         name = str(row["name"])
         if resolved_label(name, mapping) is not None:
             continue
@@ -508,11 +565,12 @@ def _takeout_report(
     mapping: dict[str, str],
     notes: dict[int, str] | None,
     owners: frozenset[str],
+    view: _TakeoutRows,
 ) -> TakeoutReport:
     if not _has_table(conn, "accounts") or not _has_table(conn, "labels"):
         return TakeoutReport()
     if notes is None:
-        notes = _sent_notes(conn, mapping)
+        notes = _sent_notes(conn, mapping, view)
     ordered: list[str] = []
     for account_id in sorted(notes):
         note = notes[account_id]
@@ -521,14 +579,20 @@ def _takeout_report(
     unmapped: set[str] = set()
     rows = conn.execute(
         """
-        SELECT labels.name
+        SELECT labels.name, messages.raw_path
         FROM labels
+        JOIN message_labels
+          ON message_labels.account_id = labels.account_id
+         AND message_labels.gmail_label_id = labels.gmail_label_id
+        JOIN messages ON messages.msg_pk = message_labels.msg_pk
         WHERE labels.gmail_label_id LIKE 'mbox:%'
         """
     ).fetchall()
     sent_names = _sent_keys(mapping)
     for row in rows:
-        name = str(row[0])
+        if not view.accepted(row["raw_path"]):
+            continue
+        name = str(row["name"])
         if label_key(name) in sent_names:
             continue
         if resolved_label(name, mapping) is not None:
@@ -537,8 +601,8 @@ def _takeout_report(
     return TakeoutReport(
         sent="|".join(ordered),
         unmapped=tuple(sorted(unmapped)),
-        skipped=_skipped(conn, mapping, owners),
-        warnings=_proposal_warnings(conn, notes),
+        skipped=_skipped(conn, mapping, owners, view),
+        warnings=_proposal_warnings(conn, notes, view),
     )
 
 
@@ -546,6 +610,7 @@ def _skipped(
     conn: sqlite3.Connection,
     mapping: dict[str, str],
     owners: frozenset[str],
+    view: _TakeoutRows,
 ) -> tuple[tuple[str, int], ...]:
     keys = _sent_keys(mapping)
     if not keys or not _has_table(conn, "message_labels") or not _has_table(conn, "accounts"):
@@ -557,7 +622,7 @@ def _skipped(
     counts: dict[str, int] = {}
     rows = conn.execute(
         """
-        SELECT message_labels.account_id, labels.name, messages.from_hdr
+        SELECT message_labels.account_id, labels.name, messages.from_hdr, messages.raw_path
         FROM message_labels
         JOIN labels
           ON labels.account_id = message_labels.account_id
@@ -567,18 +632,23 @@ def _skipped(
         """
     ).fetchall()
     for row in rows:
+        if not view.accepted(row["raw_path"]):
+            continue
         name = str(row["name"])
         if label_key(name) not in keys:
             continue
         digest = _from_hash(row["from_hdr"])
         allowed = hashes.get(int(row["account_id"]), frozenset())
-        if digest is not None and digest in allowed:
+        owned = digest is not None and digest in allowed
+        if owned and not view.facts(row["raw_path"]).inbound:
             continue
         counts[name] = counts.get(name, 0) + 1
     return tuple(sorted(counts.items()))
 
 
-def _proposal_warnings(conn: sqlite3.Connection, notes: dict[int, str]) -> tuple[str, ...]:
+def _proposal_warnings(
+    conn: sqlite3.Connection, notes: dict[int, str], view: _TakeoutRows
+) -> tuple[str, ...]:
     names: set[str] = set()
     for note in notes.values():
         if note.startswith("proposed:"):
@@ -587,27 +657,27 @@ def _proposal_warnings(conn: sqlite3.Connection, notes: dict[int, str]) -> tuple
             names.update(part for part in note.removeprefix("ambiguous:").split("|") if part)
     if not names or not _has_table(conn, "message_labels"):
         return ()
-    warned = [name for name in sorted(names) if not _inbox_overlap(conn, name)]
+    warned = [name for name in sorted(names) if not _inbox_overlap(conn, name, view)]
     return tuple(warned)
 
 
-def _inbox_overlap(conn: sqlite3.Connection, name: str) -> bool:
-    row = conn.execute(
+def _inbox_overlap(conn: sqlite3.Connection, name: str, view: _TakeoutRows) -> bool:
+    rows = conn.execute(
         """
-        SELECT 1
+        SELECT messages.raw_path
         FROM message_labels
         JOIN labels
           ON labels.account_id = message_labels.account_id
          AND labels.gmail_label_id = message_labels.gmail_label_id
+        JOIN messages ON messages.msg_pk = message_labels.msg_pk
         JOIN message_labels AS inbox
           ON inbox.msg_pk = message_labels.msg_pk
          AND inbox.gmail_label_id = 'INBOX'
         WHERE labels.name = ? AND message_labels.gmail_label_id LIKE 'mbox:%'
-        LIMIT 1
         """,
         (name,),
-    ).fetchone()
-    return row is not None
+    ).fetchall()
+    return any(view.accepted(row["raw_path"]) for row in rows)
 
 
 def _from_hash(header: object) -> str | None:
