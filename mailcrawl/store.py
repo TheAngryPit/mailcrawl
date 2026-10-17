@@ -290,15 +290,11 @@ def _refresh_date_trusted(conn: sqlite3.Connection, columns: set[str]) -> None:
     for row in conn.execute(query):
         msg_pk = int(row[0])
         stored = row[1]
-        if stored is None or int(stored) == 0:
+        if stored is None or int(stored) == 0 or not has_raw:
             trust = 0
-        elif not has_raw:
-            continue
         else:
             decided = stored_date_trusted(row[2], int(stored))
-            if decided is None:
-                continue
-            trust = decided
+            trust = 0 if decided is None else decided
         conn.execute("UPDATE messages SET date_trusted = ? WHERE msg_pk = ?", (trust, msg_pk))
 
 

@@ -34,6 +34,7 @@ RAW_PATH = "mbox:"
 _GMAIL_ID_MAX = 1 << 64
 _SEPARATOR_ID = re.compile(rb"^From (\d+)@\S*")
 _SEPARATOR_REST = re.compile(rb"^From \S+\s+(.*?)\s*$")
+_TAKEOUT_FROM = re.compile(rb"^From \d+@(?:xxx|example\.com)(?:\s|$)")
 _ESCAPED_FROM = re.compile(rb"^>+From ")
 _TAKEOUT_HEADERS = ("x-gm-", "x-gmail-", "x-google-")
 _HEX = re.compile(r"[0-9a-f]+")
@@ -345,7 +346,7 @@ class _Entry:
 
     def _end_head(self) -> None:
         assert self._head is not None
-        kept, self._takeout = _strip_takeout(bytes(self._head))
+        kept, self._takeout = _strip_takeout(bytes(self._head), self.separator)
         self._head = None
         header: EmailMessage | None = None
         try:
@@ -380,7 +381,7 @@ def _message_key(takeout: _Takeout, separator: bytes, rfc822_id: str | None) -> 
     return found
 
 
-def _strip_takeout(head: bytes) -> tuple[bytes, _Takeout]:
+def _strip_takeout(head: bytes, separator: bytes) -> tuple[bytes, _Takeout]:
     """Drop Google headers and read Takeout values from the leading Google block only."""
     kept: list[bytes] = []
     values: dict[str, str] = {}
@@ -406,11 +407,13 @@ def _strip_takeout(head: bytes) -> tuple[bytes, _Takeout]:
             values[capturing] = _header_text(rest)
         if not dropping:
             kept.append(line)
+    labels = values.get("x-gmail-labels")
+    accept = labels is not None and _TAKEOUT_FROM.match(separator) is not None
     takeout = _Takeout(
         gm_msgid=values.get("x-gm-msgid"),
-        gm_thrid=values.get("x-gm-thrid"),
+        gm_thrid=values.get("x-gm-thrid") if accept else None,
         gmail_message_id=values.get("x-gmail-message-id"),
-        labels=_decoded(values.get("x-gmail-labels")),
+        labels=_decoded(labels) if accept else None,
     )
     return b"".join(kept), takeout
 

@@ -71,7 +71,7 @@ class PseudoLabelRulesTest(unittest.TestCase):
         plain.write_text(without_pseudo_names(TAKEOUT.read_text(encoding="utf-8")), encoding="utf-8")
         links, report, decisions, counts = self.run_rules("personal", TAKEOUT, poison=True)
         base_links, base_report, base_decisions, base_counts = self.run_rules("vcl", plain)
-        self.assertEqual((links, base_links), (4, 0))
+        self.assertEqual((links, base_links), (3, 0))
         self.assertEqual(report, base_report)
         self.assertEqual(decisions, base_decisions)
         self.assertEqual(counts, base_counts)

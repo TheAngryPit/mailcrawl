@@ -1234,7 +1234,7 @@ _TIME_ALLOW = {
 _NOW_ATTRS = frozenset({"now", "utcnow", "today"})
 _BARE_TIME = frozenset({"gmtime", "localtime", "ctime", "asctime", "strftime"})
 _SQL_CLOCK = re.compile(
-    r"current_timestamp|unixepoch\s*\(\s*['\"]now['\"]|datetime\s*\(\s*['\"]now['\"]|['\"]now['\"]",
+    r"current_timestamp|current_date|current_time|unixepoch\s*\(\s*['\"]now['\"]|datetime\s*\(\s*['\"]now['\"]|['\"]now['\"]",
     re.IGNORECASE,
 )
 
