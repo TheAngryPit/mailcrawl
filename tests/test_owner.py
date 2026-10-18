@@ -363,6 +363,28 @@ class OwnerAliasTest(unittest.TestCase):
             self.assertIn("=?", auth[f"gog {body}"], body)
             self.assertNotIn("dkim=pass", auth[f"gog {body}"], body)
 
+    def test_a_raw_byte_in_authentication_results_does_not_roll_back_the_import(self) -> None:
+        self._init()
+        mbox = self.home / "takeout.mbox"
+        mbox.write_bytes(_binary_mbox(_CLEAN_AND_LOWER))
+        imported = self._json(["import", "mbox", str(mbox), "--alias", "vcl"])
+        self.assertEqual(imported["n_new"], 6)
+        stored = self._rows()
+        for fixture_id in ("clean-1", "clean-2", "clean-3", "clean-4", "clean-5", "lower-ff"):
+            self.assertIn(fixture_id, stored, fixture_id)
+        self.assertEqual(stored["lower-ff"], (1, "alias"))
+        self.assertIn("\ufffd", self._auth()["lower-ff"])
+        first = self.home / "first.mbox"
+        first.write_bytes(
+            _binary_mbox((("first-ff", _FIRST_FF, "Other <Other@Example.com>"),), start=400)
+        )
+        again = self._json(["import", "mbox", str(first), "--alias", "vcl"])
+        self.assertEqual(again["n_new"], 1)
+        self.assertEqual(self._rows()["first-ff"], (0, None))
+        kept = self._auth()["first-ff"]
+        kept.encode("utf-8")
+        self.assertIn("\ufffd", kept)
+
     def test_from_me_warns_when_the_wal_file_is_not_empty(self) -> None:
         db = init_account(self.home, "vcl", "ada@example.com")
         Path(f"{db}-wal").write_bytes(b"")
@@ -562,6 +584,57 @@ _AUTH_EXPECT = tuple((body, mine, origin) for body, _auth, mine, origin in _AUTH
 _ENCODED = tuple(
     (body, auth) for body, auth, mine, _origin in _AUTH_FIXTURES if mine == 0 and body.startswith("encoded")
 )
+
+
+_CLEAN_AND_LOWER = (
+    ("clean-1", None, "Bao <bao@example.com>"),
+    ("clean-2", None, "Bao <bao@example.com>"),
+    ("clean-3", None, "Bao <bao@example.com>"),
+    ("clean-4", None, "Bao <bao@example.com>"),
+    ("clean-5", None, "Bao <bao@example.com>"),
+    (
+        "lower-ff",
+        b"Authentication-Results: mx.google.com;\n"
+        b"       dkim=pass header.d=example.com;\n"
+        b"       dmarc=pass (p=NONE sp=NONE) header.from=example.com\n"
+        b"Authentication-Results: evil.example; dmarc=fail \xff",
+        "Other <Other@Example.com>",
+    ),
+)
+_FIRST_FF = (
+    b"Authentication-Results: mx.google.com;\n"
+    b"       dkim=pass header.d=example.com;\n"
+    b"       dmarc=pass (p=NONE \xff sp=NONE) header.from=example.com"
+)
+
+
+def _binary_mbox(rows: tuple[tuple[str, bytes | None, str], ...], start: int = 300) -> bytes:
+    messages = [
+        _binary_message(str(start + index), auth, sender, body)
+        for index, (body, auth, sender) in enumerate(rows)
+    ]
+    return b"\n".join(messages) + b"\n"
+
+
+def _binary_message(number: str, auth: bytes | None, sender: str, body: str) -> bytes:
+    ident = f"1700000000000000{number}".encode()
+    lines = [
+        b"From " + ident + b"@xxx Tue Nov 14 00:00:00 +0000 2023",
+        b"X-GM-THRID: " + ident,
+        b"X-GM-MSGID: " + ident,
+        b"X-Gmail-Labels: Inbox",
+        f"From: {sender}".encode(),
+        b"To: Ada <ada@example.com>",
+        b"Subject: note",
+        b"Date: Tue, 14 Nov 2023 22:13:20 +0000",
+        f"Message-ID: <bin-{number}@example.com>".encode(),
+        b"MIME-Version: 1.0",
+        b'Content-Type: text/plain; charset="utf-8"',
+    ]
+    if auth:
+        lines.append(auth)
+    lines.extend([b"", body.encode(), b""])
+    return b"\n".join(lines)
 
 
 def _mbox_auth(fixtures: tuple[tuple[str, str, int, str | None], ...]) -> str:
