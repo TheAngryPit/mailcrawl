@@ -3,7 +3,7 @@ Local-first, read-only archive for mail you already exported. Pulls a local expo
 
 ## Status
 
-mailcrawl is pre-alpha. This revision is schema v2, cleaned body text, the attachment interface, rules 0 to 8, and read-only `stats` and `dry-run` counts. [The spec](docs/SPEC.md) is the behavior contract.
+mailcrawl is pre-alpha. This revision is schema v11, cleaned body text, the attachment interface, rules 0 to 8, and read-only `stats` and `dry-run` counts. [The spec](docs/SPEC.md) is the behavior contract.
 
 ## Why it exists
 
@@ -21,6 +21,27 @@ The archive follows these rules.
 - **No language model on the crawl path.**
 
 Bodies, subjects, and addresses from real mail never go to GitHub. The tree holds code, schema, and metadata. Fixtures are synthetic.
+
+## Install
+
+`python3 -m mailcrawl` imports this checkout when the working directory is the repository root. Any other directory needs an install.
+
+```
+python3 -m pip install .
+```
+
+## Quickstart
+
+Set `ARCHIVE` to an empty directory. Set `EXPORT` to a gog export directory. The synthetic export in this repository is `testdata/fixtures/gog-export/native`.
+
+```
+python3 -m mailcrawl --home "$ARCHIVE" --json init --account thehive --email ada@example.com
+python3 -m mailcrawl --home "$ARCHIVE" --json import gog-export --account thehive --dir "$EXPORT"
+python3 -m mailcrawl --home "$ARCHIVE" --json stats --account thehive
+python3 -m mailcrawl --home "$ARCHIVE" --json dry-run --account thehive --rules "$(python3 -c 'from mailcrawl.rules import bundled_rules_path; print(bundled_rules_path())')"
+```
+
+`stats` uses the rules file shipped in the package. `dry-run` reads `--rules` or `[rules] path` in the config. A relative config path is next to the config file. `--rules` stays relative to the working directory.
 
 ## Import a gog export
 
@@ -99,7 +120,7 @@ Archives stay on the local machine. Report a vulnerability in private. The steps
 
 ## Roadmap
 
-This revision is the spec, this README, the security policy, synthetic fixtures, schema v2, body cleaning, the attachment interface, rules 0 to 8, `stats`, dry-run counts, import, FTS search, and the phase 1 proof.
+This revision is the spec, this README, the security policy, synthetic fixtures, schema v11, body cleaning, the attachment interface, rules 0 to 8, `stats`, dry-run counts, import, FTS search, and the phase 1 proof.
 
 Phase 1 is the Python SQLite schema, an idempotent import of a gog export, FTS5 (`unicode61 remove_diacritics 2`), a JSON CLI, and fixture tests. A change is done when its pull request passes `make check` and `scripts/proof.sh` on a clean Linux runner with no network credentials.
 

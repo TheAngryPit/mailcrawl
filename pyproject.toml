@@ -23,3 +23,6 @@ mlx = [
 
 [tool.setuptools.packages.find]
 include = ["mailcrawl*"]
+
+[tool.setuptools.package-data]
+mailcrawl = ["rules-v0.json"]

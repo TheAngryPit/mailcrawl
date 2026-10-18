@@ -6,6 +6,8 @@ import json
 import os
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -41,6 +43,11 @@ _COMPOSE = (
     ("asks-reply", "reply", "imbox"),
     ("is-receipt", "reference", "paper_trail"),
 )
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise UsageError("jev refuses a redirect")
 
 
 class TokenLimit(Exception):
@@ -301,9 +308,6 @@ class HttpJev:
     ) -> tuple[dict[str, Answer], str]:
         enter_model()
         key = _api_key()
-        import urllib.error
-        import urllib.request
-
         payload = json.dumps(request_body(state, questions)).encode()
         req = urllib.request.Request(
             _ENDPOINT,
@@ -314,10 +318,11 @@ class HttpJev:
             },
             method="POST",
         )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
         raw = ""
         for attempt in (1, 2):
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with opener.open(req, timeout=30) as resp:
                     raw = resp.read().decode()
                 break
             except urllib.error.HTTPError as exc:

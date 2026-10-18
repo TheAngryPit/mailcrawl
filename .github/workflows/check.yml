@@ -44,3 +44,7 @@ jobs:
         env:
           ARTIFACT_DIR: ${{ runner.temp }}/mailcrawl-proof
         run: scripts/proof.sh
+
+      - name: Wheel install quickstart
+        shell: bash
+        run: scripts/wheel-install.sh

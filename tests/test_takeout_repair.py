@@ -1756,7 +1756,7 @@ class SentPoisonTest(unittest.TestCase):
     def test_a_numeric_plain_separator_stores_an_rfc822_id(self) -> None:
         path = self.home / "numeric-plain.mbox"
         path.write_text(
-            "From 123456789@qq.com Thu Oct 01 12:00:00 +0000 2026\n"
+            "From 123456789@example.com Thu Oct 01 12:00:00 +0000 2026\n"
             "X-Gmail-Labels: Outbox,Clientes\n"
             "From: Bob Fixture <bob@example.com>\n"
             "To: Bao Fixture <bao@example.com>\n"

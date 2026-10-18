@@ -7,6 +7,7 @@ import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 
 from mailcrawl.contract import GMAIL_LABEL_SQL
@@ -115,7 +116,11 @@ def load_rules(path: Path) -> RulesConfig:
 
 
 def bundled_rules_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "testdata" / "rules" / "rules-v0.json"
+    resource = files("mailcrawl").joinpath("rules-v0.json")
+    path = Path(str(resource))
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    return path
 
 
 @dataclass(frozen=True)

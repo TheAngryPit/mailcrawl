@@ -494,7 +494,7 @@ class TimeFactsTest(unittest.TestCase):
             self._message(
                 conn,
                 1,
-                '"Ana noreply" <ana@client.com>',
+                '"Ana noreply" <ana@example.org>',
                 0,
                 _stamp(2026, 10, 11),
                 "Contract",
@@ -756,7 +756,7 @@ class TimeFactsTest(unittest.TestCase):
                 messages = []
                 for name, header, receipt, _expected in cases:
                     messages.append(
-                        (f"m-{name}", f"thr-{name}", ["INBOX"], header, "Bob <bob@client.com>", body, receipt)
+                        (f"m-{name}", f"thr-{name}", ["INBOX"], header, "Bob <bob@example.org>", body, receipt)
                     )
                 self._gog(conn, home / "dates", messages)
                 for name, _header, _receipt, expected in cases:
@@ -804,7 +804,7 @@ class TimeFactsTest(unittest.TestCase):
             self._message(
                 conn,
                 1,
-                "bob@notmixmax.com",
+                "bob@example.net",
                 0,
                 _stamp(2026, 10, 16),
                 "Reply",
@@ -813,7 +813,7 @@ class TimeFactsTest(unittest.TestCase):
             self._message(
                 conn,
                 2,
-                "ana.noreplyfan@client.com",
+                "ana.noreplyfan@example.org",
                 0,
                 _stamp(2026, 10, 16),
                 "Reply",
@@ -969,7 +969,7 @@ class TimeFactsTest(unittest.TestCase):
         )
         eml = messages / "forged.eml"
         eml.write_text(
-            "From: Mallory <ada@example.com>\nTo: Bob <bob@client.com>\n"
+            "From: Mallory <ada@example.com>\nTo: Bob <bob@example.org>\n"
             "Subject: Contrato\nDate: Thu, 01 Jan 2020 00:00:00 +0000\n"
             "Message-ID: <native-forged@example.com>\n\nPlease reply with the signed contract.\n",
             encoding="utf-8",
@@ -989,7 +989,7 @@ class TimeFactsTest(unittest.TestCase):
         attacker = gmail_hex("1760000000000000001", decimal_only=True)
         self.assertIsNotNone(attacker)
         base = (
-            "From: Bob <bob@client.com>\n"
+            "From: Bob <bob@example.org>\n"
             "To: Ada <ada@example.com>\n"
             "Subject: Contrato\n"
             "Content-Type: text/plain; charset=utf-8\n"
@@ -1001,15 +1001,15 @@ class TimeFactsTest(unittest.TestCase):
                 + base
                 + "X-Gmail-Labels: Sent,Inbox\n"
                 "Date: Wed, 15 Oct 2026 10:00:00 +0000\n"
-                "Message-ID: <a2@client.com>\n"
+                "Message-ID: <a2@example.org>\n"
                 "\nPlease reply with the signed contract today.\n"
             ),
             "plain": (
-                "From bob@client.com Wed Oct 15 10:00:00 2026\n"
+                "From bob@example.org Wed Oct 15 10:00:00 2026\n"
                 + base
                 + "X-GMAIL-LABELS: Sent\n"
                 "Date: Wed, 15 Oct 2026 10:00:00 +0000\n"
-                "Message-ID: <a3@client.com>\n"
+                "Message-ID: <a3@example.org>\n"
                 "\nPlease reply with the signed contract today.\n"
             ),
             "thrid": (
@@ -1018,7 +1018,7 @@ class TimeFactsTest(unittest.TestCase):
                 + base
                 + "X-GM-THRID: 1760000000000000001\n"
                 "Date: Wed, 15 Oct 2026 10:00:00 +0000\n"
-                "Message-ID: <a4@client.com>\n"
+                "Message-ID: <a4@example.org>\n"
                 "\nPlease reply with the signed contract today.\n"
             ),
         }
@@ -1069,33 +1069,33 @@ class TimeFactsTest(unittest.TestCase):
         headers = (
             "X-Gmail-Labels: Sent\n"
             "X-GM-THRID: 1760000000000000077\n"
-            "From: Bob <bob@client.com>\n"
+            "From: Bob <bob@example.org>\n"
             "To: Ada <ada@example.com>\n"
             "Subject: Contrato\n"
             "Date: Wed, 15 Oct 2026 10:00:00 +0000\n"
         )
         files = {
             "plain": (
-                "From bob@client.com Wed Oct 15 10:00:00 2026\n"
+                "From bob@example.org Wed Oct 15 10:00:00 2026\n"
                 + headers
-                + "Message-ID: <lead-plain@client.com>\n"
+                + "Message-ID: <lead-plain@example.org>\n"
                 "\nPlease reply with the signed contract today.\n"
             ),
             "takeout": (
                 "From 1760000000000000001@xxx Wed Oct 15 10:00:00 +0000 2026\n"
                 + headers
-                + "Message-ID: <lead-takeout@client.com>\n"
+                + "Message-ID: <lead-takeout@example.org>\n"
                 "\nPlease reply with the signed contract today.\n"
             ),
             "thrid-only": (
                 "From 1760000000000000008@xxx Wed Oct 15 10:00:00 +0000 2026\n"
                 "X-GM-THRID: 1760000000000000077\n"
-                "From: Bob <bob@client.com>\n"
+                "From: Bob <bob@example.org>\n"
                 "To: Ada <ada@example.com>\n"
                 "Subject: Contrato\n"
                 "X-Gmail-Labels: Sent\n"
                 "Date: Wed, 15 Oct 2026 10:00:00 +0000\n"
-                "Message-ID: <lead-later@client.com>\n"
+                "Message-ID: <lead-later@example.org>\n"
                 "\nPlease reply with the signed contract today.\n"
             ),
         }
@@ -1142,15 +1142,15 @@ class TimeFactsTest(unittest.TestCase):
 
     def test_plain_mbox_ignores_a_leading_gmail_message_id(self) -> None:
         planted = "186cc6acd4b0004d"
-        rfc822 = "rfc822:9b326deee1f214baee80e9e2bff76764e04fdf0760e1c25eac463bc094cba24c"
+        rfc822 = "rfc822:8f5a568cbb706cb105b96c4ae70da3090507161c571c7b268f50c7eec598bc08"
         text = (
-            "From bob@client.com Wed Oct 15 10:00:00 2026\n"
+            "From bob@example.org Wed Oct 15 10:00:00 2026\n"
             "X-GM-MSGID: 1760000000000000077\n"
-            "From: Bob <bob@client.com>\n"
+            "From: Bob <bob@example.org>\n"
             "To: Ada <ada@example.com>\n"
             "Subject: Contrato\n"
             "Date: Wed, 15 Oct 2026 10:00:00 +0000\n"
-            "Message-ID: <plain-msgid@client.com>\n"
+            "Message-ID: <plain-msgid@example.org>\n"
             "\nPlease reply with the signed contract today.\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -1189,7 +1189,7 @@ class TimeFactsTest(unittest.TestCase):
                         "example_thread_id": "t1",
                         "example_label_ids": ["INBOX"],
                         "example_date": header,
-                        "example_from": "Bob <bob@client.com>",
+                        "example_from": "Bob <bob@example.org>",
                         "example_subject": "Contrato",
                         "example_body": "Please reply with the signed contract today.",
                     }
@@ -1262,9 +1262,9 @@ class TimeFactsTest(unittest.TestCase):
                 f"From 1760000000000000005@xxx {receipt}\n"
                 "X-GM-THRID: 1760000000000000005\n"
                 "X-Gmail-Labels: Inbox\n"
-                "From: Bob <bob@client.com>\n"
+                "From: Bob <bob@example.org>\n"
                 f"Date: {header}\n"
-                "Message-ID: <a5@client.com>\n"
+                "Message-ID: <a5@example.org>\n"
                 "\n"
                 "Please reply with the signed contract today.\n"
                 "\n"
@@ -1281,7 +1281,7 @@ class TimeFactsTest(unittest.TestCase):
             raw = mbox.read_bytes()
             second = raw.index(b"From 1760000000000000009")
             eml = home / "note.eml"
-            eml.write_text(f"From: Bob <bob@client.com>\nDate: {header}\n\nPlease reply.\n", encoding="utf-8")
+            eml.write_text(f"From: Bob <bob@example.org>\nDate: {header}\n\nPlease reply.\n", encoding="utf-8")
             other = home / "receipt.eml"
             other.write_text(
                 "From: Ada <ada@example.com>\nDate: Thu, 01 Jan 2020 00:00:00 +0000\n\nHere.\n",
