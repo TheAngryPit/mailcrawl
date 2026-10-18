@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Package version and provenance hash."""
 
 from __future__ import annotations

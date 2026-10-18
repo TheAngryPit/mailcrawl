@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Cleaned body text drops clear quote and signature markers only."""
 
 import os

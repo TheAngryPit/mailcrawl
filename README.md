@@ -128,6 +128,6 @@ A Go port comes after the Python prototype settles. The archive stays local.
 
 ## License
 
-[MIT](LICENSE).
+mailcrawl is [MIT](LICENSE). Libraries and models it can download are named in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This repository does not ship their weights.
 
 [Built by a storyteller who builds the worlds he imagines.](https://github.com/TheAngryPit)

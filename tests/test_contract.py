@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Fail-closed behavior of the unverified export contract."""
 
 import json

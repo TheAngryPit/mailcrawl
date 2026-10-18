@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Pure text helpers for subject lines, HTML bodies, and addresses."""
 
 from __future__ import annotations

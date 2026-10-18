@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Keyword search over one account database, with optional vector fill-in."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The suite must finish without loading the real embedding model."""
 
 import sys

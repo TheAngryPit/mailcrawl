@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Takeout pseudo-labels never act as Gmail labels in rules or plans."""
 
 import json

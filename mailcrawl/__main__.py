@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """python -m mailcrawl"""
 
 from mailcrawl.cli import main

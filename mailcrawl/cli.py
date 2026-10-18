@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """JSON CLI for init, import, search, rules, stats, dry-run, from-me, backfill, embed, knn, jev, bench, review, and decide."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Idempotent import of a gog export or a Takeout mbox through one writer."""
 
 from __future__ import annotations

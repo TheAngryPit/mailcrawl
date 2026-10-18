@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Declared inference points. Each one is off unless config turns it on."""
 
 from __future__ import annotations

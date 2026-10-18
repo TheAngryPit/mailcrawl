@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Decide whether a message is the owner's, and recompute that flag."""
 
 from __future__ import annotations

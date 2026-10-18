@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """A stored decision is not inferred again."""
 
 import sqlite3

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Attachment parsing stays behind an interface and does not require binaries."""
 
 import email

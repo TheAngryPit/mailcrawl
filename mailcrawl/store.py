@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Open one account database and migrate it to the current schema."""
 
 from __future__ import annotations

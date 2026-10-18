@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Read and write the local config file."""
 
 from __future__ import annotations

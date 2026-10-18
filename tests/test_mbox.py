@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Import a synthetic Takeout-style mbox through the gog-export writer."""
 
 import base64

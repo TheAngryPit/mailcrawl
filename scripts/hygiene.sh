@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
 # Tracked-file and secret gate. No network. No credentials.
 set -euo pipefail
 

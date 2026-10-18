@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Scaffold fixtures stay synthetic and are not a gog field guess."""
 
 import json

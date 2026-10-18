@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Localized Gmail system-label names from Google Help.
 
 Each name was copied from a help page fetched on 2026-10-17.

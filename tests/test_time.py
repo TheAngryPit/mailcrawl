@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Time facts veto a copied or scored state. The clock stays in one module."""
 
 import ast

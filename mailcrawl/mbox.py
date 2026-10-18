@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Stream a Google Takeout mbox into label and message records.
 
 SPEC section 4.1 lists which Takeout facts were observed on real mail and

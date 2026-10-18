@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Deterministic rules 0–8. No model. First match wins."""
 
 from __future__ import annotations

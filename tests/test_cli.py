@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Drive init and import the way a user does."""
 
 import json

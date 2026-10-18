@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Import the synthetic v0 fixture once, then again."""
 
 import hashlib

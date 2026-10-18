@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Default taxonomy and the local per-account override."""
 
 from __future__ import annotations

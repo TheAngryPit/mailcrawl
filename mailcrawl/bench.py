@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Compare embedders on a read-only archive and a temporary vector copy."""
 
 from __future__ import annotations

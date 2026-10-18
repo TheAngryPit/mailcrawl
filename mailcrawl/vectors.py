@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Optional vec0 tables. Weights load only inside a gated embed call."""
 
 from __future__ import annotations

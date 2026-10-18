@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Month names and the words that mark a date as a deadline or a meeting.
 
 Month names are the CLDR gregorian format/wide names.

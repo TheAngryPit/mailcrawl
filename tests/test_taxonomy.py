@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Default taxonomy, local override, and category counts."""
 
 import csv
