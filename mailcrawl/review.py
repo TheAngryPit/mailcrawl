@@ -233,7 +233,10 @@ def review_queue(
 ) -> tuple[ReviewItem, ...]:
     sql, params = _queue_sql(scope)
     rows = conn.execute(sql, params).fetchall()
-    return tuple(_item(conn, account, row, max_tokens, as_of) for row in rows)
+    return tuple(
+        _item(conn, account, row, max_tokens, as_of, hold_settled=not scope.time_closures)
+        for row in rows
+    )
 
 
 def open_readonly(path: Path) -> sqlite3.Connection:
@@ -443,20 +446,27 @@ def _item(
     row: sqlite3.Row,
     max_tokens: int,
     moment: int,
+    *,
+    hold_settled: bool = False,
 ) -> ReviewItem:
     thread_pk = int(row["thread_pk"])
     facts = thread_time_facts(conn, thread_pk, moment)
+    state = None if row["next_state"] is None else str(row["next_state"])
+    lane = None if row["lane"] is None else str(row["lane"])
+    closure = _closure_view(conn, row, facts, max_tokens)
+    if hold_settled and closure is not None and state in _CLOSURE_STATES and lane == "paper_trail":
+        state = "needs_review"
     return ReviewItem(
         str(row["gmail_thread_id"]),
         account,
         None if row["rule_id"] is None else str(row["rule_id"]),
-        None if row["lane"] is None else str(row["lane"]),
-        None if row["next_state"] is None else str(row["next_state"]),
+        lane,
+        state,
         _jev(conn, thread_pk),
         _body(conn, thread_pk, max_tokens),
         _images(conn, thread_pk),
         facts.public(),
-        _closure_view(conn, row, facts, max_tokens),
+        closure,
     )
 
 
@@ -558,9 +568,11 @@ def _same_model(current: sqlite3.Row, decision: AgentDecision) -> bool:
 def _same_write(current: sqlite3.Row, decision: AgentDecision) -> bool:
     if not _same_model(current, decision):
         return False
-    if decision.action != "revive":
-        return True
-    return revive_kind(current["evidence"]) == decision.kind
+    if decision.action == "revive":
+        return revive_kind(current["evidence"]) == decision.kind
+    if decision.action == "keep":
+        return _keep_only(current["evidence"])
+    return True
 
 
 def _insert_model(
@@ -957,17 +969,22 @@ def _queue_sql(scope: ReviewScope) -> tuple[str, list[object]]:
         " AND ("
         " instr(decisions.evidence, '\"type\":\"revive\"') > 0"
         " OR ("
-        " instr(decisions.evidence, '\"time_closure\":') > 0"
-        " AND instr(decisions.evidence, '\"time_reason\"') = 0"
-        " )))"
+        " json_valid(decisions.evidence)"
+        " AND json_type(decisions.evidence) = 'array'"
+        " AND json_array_length(decisions.evidence) > 0"
+        " AND NOT EXISTS ("
+        " SELECT 1 FROM json_each(decisions.evidence)"
+        " WHERE json_type(value) != 'object'"
+        " OR json_type(value, '$.time_closure') IS NOT 'object'"
+        " OR json_extract(value, '$.time_reason') IS NOT NULL"
+        " OR json_extract(value, '$.type') = 'revive'"
+        " ))))"
         " AND ((decisions.next_state IN ('reference', 'resolved')"
         " AND decisions.lane = 'paper_trail')"
         " OR decisions.next_state = 'needs_review')"
     )
-    if scope.time_closures and clauses:
+    if clauses:
         where = "(" + " AND ".join(clauses) + ") OR (" + closure + ")"
-    elif clauses:
-        where = " AND ".join(clauses)
     else:
         where = "1 = 1"
     sql = f"""

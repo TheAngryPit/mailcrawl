@@ -1613,6 +1613,10 @@ class TimeClosureReviewTest(unittest.TestCase):
             self.assertEqual(kept["decisions"][0]["changed"], True)
             self.assertEqual(kept["decisions"][0]["state"], "reference")
             self.assertEqual(kept["decisions"][0]["lane"], "paper_trail")
+            after = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            self.assertNotIn("noise-thread", [row["thread_id"] for row in after["items"]])
+            again = _decide(home, config, _keep("noise-thread"))
+            self.assertEqual(again["decisions"][0]["changed"], False)
 
     def test_the_first_pass_holds_a_time_close_and_settles_sender_rules(self) -> None:
         with TemporaryDirectory() as tmp:
