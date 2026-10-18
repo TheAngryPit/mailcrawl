@@ -244,6 +244,12 @@ class OwnerAliasTest(unittest.TestCase):
             ),
             "header-i": (
                 "mx.google.com; dkim=pass header.i=@example.com; dmarc=pass header.from=example.com",
+                1,
+                "alias",
+            ),
+            "i-before-d": (
+                "mx.google.com; dkim=pass header.i=@evil.example header.d=example.com; "
+                "dmarc=pass header.from=example.com",
                 0,
                 None,
             ),
@@ -300,15 +306,72 @@ class OwnerAliasTest(unittest.TestCase):
             conn.close()
         preview = self._json(["from-me", "--account", "vcl"])
         self.assertEqual(preview["applied"], False)
-        self.assertEqual(preview["alias"], 4)
+        self.assertEqual(preview["alias"], 5)
         self.assertEqual(self._stored(db)["aligned"], (0, None))
         applied = self._json(["from-me", "--account", "vcl", "--apply"])
         self.assertEqual(applied["applied"], True)
-        self.assertEqual(applied["alias"], 4)
-        self.assertEqual(applied["untrusted"], len(cases) - 4)
+        self.assertEqual(applied["alias"], 5)
+        self.assertEqual(applied["untrusted"], len(cases) - 5)
         stored = self._stored(db)
         for name, (_auth, mine, origin) in cases.items():
             self.assertEqual(stored[name], (mine, origin), name)
+
+    def test_encoded_words_are_not_mine_and_gmail_header_i_is(self) -> None:
+        self._init()
+        mbox = self.home / "takeout.mbox"
+        mbox.write_text(_mbox_auth(_AUTH_FIXTURES), encoding="utf-8")
+        imported = self._json(["import", "mbox", str(mbox), "--alias", "vcl"])
+        self.assertEqual(imported["ok"], True)
+        export = self.home / "gog"
+        account = export / "gmail" / "acct"
+        messages = account / "messages"
+        messages.mkdir(parents=True)
+        (account / "labels.json").write_text(
+            '[{"id":"INBOX","name":"INBOX","type":"system"}]\n',
+            encoding="utf-8",
+        )
+        lines = []
+        for number, (body, auth) in enumerate(_ENCODED, start=1):
+            name = f"gog-{number}.eml"
+            (messages / name).write_bytes(_eml(number, auth, body))
+            lines.append(
+                json.dumps(
+                    {
+                        "id": f"gog-{number}",
+                        "threadId": f"thread-gog-{number}",
+                        "labelIds": ["INBOX"],
+                        "internalDate": 1700000000000,
+                        "eml": f"gmail/acct/messages/{name}",
+                        "from": "Other <other@example.com>",
+                        "subject": "note",
+                    }
+                )
+            )
+        (messages / "index.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        gog = self._json(["import", "gog-export", "--dir", str(export), "--account", "vcl"])
+        self.assertEqual(gog["ok"], True)
+        stored = self._rows()
+        auth = self._auth()
+        for body, mine, origin in _AUTH_EXPECT:
+            self.assertEqual(stored[body], (mine, origin), body)
+        for body, _mine, _origin in _AUTH_EXPECT:
+            if body.startswith("encoded"):
+                self.assertIn("=?", auth[body], body)
+                self.assertNotIn("dkim=pass", auth[body], body)
+        for body, _auth in _ENCODED:
+            self.assertEqual(stored[f"gog {body}"], (0, None), body)
+            self.assertIn("=?", auth[f"gog {body}"], body)
+            self.assertNotIn("dkim=pass", auth[f"gog {body}"], body)
+
+    def test_from_me_warns_when_the_wal_file_is_not_empty(self) -> None:
+        db = init_account(self.home, "vcl", "ada@example.com")
+        Path(f"{db}-wal").write_bytes(b"")
+        quiet = self._json(["from-me", "--account", "vcl"])
+        self.assertNotIn("warning", quiet)
+        Path(f"{db}-wal").write_bytes(b"pending")
+        warned = self._json(["from-me", "--account", "vcl"])
+        self.assertEqual(warned["warning"], "wal may be stale")
+        self.assertEqual(warned["ok"], True)
 
     def test_from_me_dry_run_does_not_migrate(self) -> None:
         db = init_account(self.home, "vcl", "ada@example.com")
@@ -382,6 +445,14 @@ class OwnerAliasTest(unittest.TestCase):
     def _rows(self) -> dict[str, tuple[int, str | None]]:
         return self._stored(self._db())
 
+    def _auth(self) -> dict[str, str]:
+        conn = connect(self._db())
+        try:
+            found = conn.execute("SELECT body_text, auth_results FROM messages").fetchall()
+        finally:
+            conn.close()
+        return {str(row[0]): "" if row[1] is None else str(row[1]) for row in found}
+
     def _stored(self, db: Path) -> dict[str, tuple[int, str | None]]:
         conn = connect(db)
         try:
@@ -432,6 +503,92 @@ def _snapshot(db: Path) -> dict[str, bytes]:
         if path.name == db.name or path.name.startswith(db.name + "-"):
             found[path.name] = path.read_bytes()
     return found
+
+
+_ENCODED_COMMENT = (
+    "Authentication-Results: mx.google.com;\n"
+    "       spf=pass (google.com: domain of "
+    "=?utf-8?q?=29=3B_dkim=3Dpass_header.d=3Dexample.com=3B_dmarc=3Dpass_=28?=@evil.example "
+    "designates 192.0.2.1 as permitted sender) smtp.mailfrom=sender@evil.example"
+)
+_ENCODED_HEADER = (
+    "Authentication-Results: "
+    "=?utf-8?q?mx.google.com=3B_dkim=3Dpass_header.d=3Dexample.com=3B_dmarc=3Dpass?="
+)
+_ENCODED_CLAUSE = (
+    "Authentication-Results: mx.google.com;\n"
+    "       =?utf-8?q?dkim=3Dpass_header.d=3Dexample.com=3B_dmarc=3Dpass?="
+)
+_GMAIL_I = (
+    "Authentication-Results: mx.google.com;\n"
+    "       dkim=pass header.i=@example.com header.s=20161025 header.b=abc;\n"
+    "       spf=pass (google.com: domain of other@example.com designates 192.0.2.1 as permitted sender) "
+    "smtp.mailfrom=other@example.com;\n"
+    "       dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=example.com"
+)
+_GMAIL_ARC = (
+    "Authentication-Results: mx.google.com;\n"
+    "       dkim=pass header.i=@gmail.com header.s=20230601 header.b=EfGh;\n"
+    "       dkim=pass header.i=@example.com header.s=google header.b=AbCd;\n"
+    "       arc=pass (i=1 spf=pass spfdomain=example.com dkim=pass dkdomain=example.com "
+    "dmarc=pass fromdomain=example.com);\n"
+    "       spf=pass (google.com: domain of other@example.com designates 192.0.2.1 as permitted sender) "
+    "smtp.mailfrom=other@example.com;\n"
+    "       dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=example.com"
+)
+_GMAIL_SOFTFAIL = (
+    "Authentication-Results: mx.google.com;\n"
+    "       dkim=pass header.i=@example.com header.s=selector1 header.b=XyZ;\n"
+    "       spf=softfail (google.com: domain of transitioning other@example.com does not designate "
+    "192.0.2.1 as permitted sender) smtp.mailfrom=other@example.com;\n"
+    "       dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=example.com"
+)
+_GMAIL_NO_DMARC = (
+    "Authentication-Results: mx.google.com;\n"
+    "       dkim=pass header.i=@example.com header.s=20161025 header.b=abc;\n"
+    "       spf=pass (google.com: domain of other@example.com designates 192.0.2.1 as permitted sender) "
+    "smtp.mailfrom=other@example.com"
+)
+_AUTH_FIXTURES = (
+    ("encoded comment", _ENCODED_COMMENT, 0, None),
+    ("encoded header", _ENCODED_HEADER, 0, None),
+    ("encoded clause", _ENCODED_CLAUSE, 0, None),
+    ("gmail header.i", _GMAIL_I, 1, "alias"),
+    ("gmail arc", _GMAIL_ARC, 1, "alias"),
+    ("gmail softfail", _GMAIL_SOFTFAIL, 1, "alias"),
+    ("gmail no dmarc", _GMAIL_NO_DMARC, 0, None),
+)
+_AUTH_EXPECT = tuple((body, mine, origin) for body, _auth, mine, origin in _AUTH_FIXTURES)
+_ENCODED = tuple(
+    (body, auth) for body, auth, mine, _origin in _AUTH_FIXTURES if mine == 0 and body.startswith("encoded")
+)
+
+
+def _mbox_auth(fixtures: tuple[tuple[str, str, int, str | None], ...]) -> str:
+    messages = [
+        _message(str(200 + index), "Inbox", auth, "Other <Other@Example.com>", body)
+        for index, (body, auth, _mine, _origin) in enumerate(fixtures)
+    ]
+    return "\n".join(messages) + "\n"
+
+
+def _eml(number: int, auth: str, body: str) -> bytes:
+    text = "\r\n".join(
+        [
+            "From: Other <other@example.com>",
+            "To: Ada <ada@example.com>",
+            "Subject: note",
+            "Date: Tue, 14 Nov 2023 22:13:20 +0000",
+            f"Message-ID: <gog-{number}@example.com>",
+            "MIME-Version: 1.0",
+            'Content-Type: text/plain; charset="utf-8"',
+            *auth.replace("\n", "\r\n").split("\r\n"),
+            "",
+            f"gog {body}",
+            "",
+        ]
+    )
+    return text.encode("utf-8")
 
 
 def _mbox() -> str:
