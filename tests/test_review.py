@@ -1648,6 +1648,13 @@ class TimeClosureReviewTest(unittest.TestCase):
                 self.assertEqual(kept["decisions"][0]["state"], "resolved")
                 self.assertEqual(kept["decisions"][0]["lane"], "paper_trail")
                 self.assertEqual(_stored(db, "old-thread"), ("model", "resolved", "model-b"))
+                self.assertIn('"time_closure":', _evidence(db, "old-thread"))
+                config.write_text(
+                    config.read_text(encoding="utf-8") + "[review]\nllm_review = true\n",
+                    encoding="utf-8",
+                )
+                queued = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+                self.assertNotIn("old-thread", [item["thread_id"] for item in queued["items"]])
                 again = _decide(home, config, _keep_as("old-thread", "model-b"))
                 self.assertEqual(again["decisions"][0]["changed"], False)
                 revived = _decide(
