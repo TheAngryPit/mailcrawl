@@ -1402,6 +1402,218 @@ class TimeClosureReviewTest(unittest.TestCase):
             self.assertEqual(queued["items"][0]["time_closure"]["reason"], "time_closure")
             self.assertNotIn("young-thread", ids)
 
+    def test_a_stored_closure_stays_in_the_default_queue_when_llm_review_is_off(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = _closure_config(home, True)
+            db = _closure_db(home)
+            _seed_closure(db)
+            with _no_model():
+                _json(
+                    home,
+                    config,
+                    "rules",
+                    "--account",
+                    "personal",
+                    "--rules",
+                    str(bundled_rules_path()),
+                    "--now",
+                    str(_AS_OF),
+                    "--reevaluate",
+                    "--apply",
+                    "--csv",
+                    str(home / "plan.csv"),
+                )
+            self.assertEqual(_stored(db, "old-thread"), ("rule", "resolved", "time"))
+            self.assertEqual(_lane(db, "old-thread"), "paper_trail")
+            _closure_config(home, False)
+            queued = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            item = {row["thread_id"]: row for row in queued["items"]}["old-thread"]
+            self.assertEqual(item["state"], "needs_review")
+            self.assertEqual(item["time_closure"]["state"], "resolved")
+            self.assertEqual(item["time_closure"]["lane"], "paper_trail")
+            self.assertEqual(item["time_closure"]["reason"], "time_closure")
+            kept = _decide(home, config, _keep("old-thread"))
+            self.assertEqual(kept["decisions"][0]["changed"], True)
+            self.assertEqual(kept["decisions"][0]["state"], "resolved")
+            self.assertEqual(kept["decisions"][0]["lane"], "paper_trail")
+            _json(
+                home,
+                config,
+                "review",
+                "undo",
+                "--account",
+                "personal",
+                "--thread",
+                "old-thread",
+                "--now",
+                str(_AS_OF),
+            )
+            revived = _decide(
+                home,
+                config,
+                {
+                    "action": "revive",
+                    "kind": "forgotten",
+                    "reason": "still owed",
+                    "source_detail": "fixture-model",
+                    "state": "reply",
+                    "thread_id": "old-thread",
+                },
+            )
+            self.assertEqual(revived["decisions"][0]["changed"], True)
+            self.assertEqual(revived["decisions"][0]["state"], "reply")
+            self.assertEqual(revived["decisions"][0]["lane"], "imbox")
+
+    def test_a_harness_decision_removes_the_closure_and_does_not_return(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = _closure_config(home, True)
+            db = _closure_db(home)
+            _seed_closure(db)
+            with _no_model():
+                _json(
+                    home,
+                    config,
+                    "rules",
+                    "--account",
+                    "personal",
+                    "--rules",
+                    str(bundled_rules_path()),
+                    "--now",
+                    str(_AS_OF),
+                    "--reevaluate",
+                    "--apply",
+                    "--csv",
+                    str(home / "plan.csv"),
+                )
+            _closure_config(home, False)
+            kept = _decide(home, config, _keep("old-thread"))
+            self.assertEqual(kept["decisions"][0]["changed"], True)
+            after_keep = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            self.assertNotIn("old-thread", [row["thread_id"] for row in after_keep["items"]])
+            again = _json(
+                home,
+                config,
+                "rules",
+                "--account",
+                "personal",
+                "--rules",
+                str(bundled_rules_path()),
+                "--now",
+                str(_AS_OF),
+                "--reevaluate",
+                "--apply",
+                "--csv",
+                str(home / "again.csv"),
+            )
+            self.assertEqual(again["changed"], 0)
+            self.assertEqual(_stored(db, "old-thread"), ("model", "resolved", "fixture-model"))
+            still = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            self.assertNotIn("old-thread", [row["thread_id"] for row in still["items"]])
+            _json(
+                home,
+                config,
+                "review",
+                "undo",
+                "--account",
+                "personal",
+                "--thread",
+                "old-thread",
+                "--now",
+                str(_AS_OF),
+            )
+            revived = _decide(
+                home,
+                config,
+                {
+                    "action": "revive",
+                    "kind": "opportunity",
+                    "reason": "worth a reply",
+                    "source_detail": "fixture-model",
+                    "state": "action",
+                    "thread_id": "old-thread",
+                },
+            )
+            self.assertEqual(revived["decisions"][0]["changed"], True)
+            after_revive = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            self.assertNotIn("old-thread", [row["thread_id"] for row in after_revive["items"]])
+            _json(
+                home,
+                config,
+                "rules",
+                "--account",
+                "personal",
+                "--rules",
+                str(bundled_rules_path()),
+                "--now",
+                str(_AS_OF),
+                "--reevaluate",
+                "--apply",
+                "--csv",
+                str(home / "revive.csv"),
+            )
+            self.assertEqual(_stored(db, "old-thread"), ("model", "action", "fixture-model"))
+            final = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            self.assertNotIn("old-thread", [row["thread_id"] for row in final["items"]])
+
+    def test_a_mixed_harness_closure_is_not_already_reviewed(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = _closure_config(home, False)
+            db = _closure_db(home)
+            _seed_closure(db)
+            mark = json.dumps(
+                [
+                    {"distance": 1},
+                    {"time": {"age_days": 100}, "time_closure": {"lane": "paper_trail", "state": "reference"}},
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            conn = connect(db)
+            try:
+                thread_pk = int(
+                    conn.execute(
+                        "SELECT thread_pk FROM threads WHERE gmail_thread_id = 'noise-thread'"
+                    ).fetchone()[0]
+                )
+                old = int(
+                    conn.execute(
+                        "SELECT decision_id FROM decisions WHERE thread_pk = ? AND superseded_by IS NULL",
+                        (thread_pk,),
+                    ).fetchone()[0]
+                )
+                conn.execute(
+                    "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+                    (old, old),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO decisions(
+                      thread_pk, next_state, lane, source, origin, source_detail,
+                      rule_id, rules_version, evidence, created_at
+                    ) VALUES (?, 'reference', 'paper_trail', 'llm', 'model', 'fixture-model', 'harness', 'review-v1', ?, ?)
+                    """,
+                    (thread_pk, mark, _AS_OF),
+                )
+                new_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                conn.execute(
+                    "UPDATE decisions SET superseded_by = ? WHERE decision_id = ?",
+                    (new_id, old),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            queued = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            item = {row["thread_id"]: row for row in queued["items"]}["noise-thread"]
+            self.assertEqual(item["time_closure"]["state"], "reference")
+            self.assertEqual(item["time_closure"]["lane"], "paper_trail")
+            kept = _decide(home, config, _keep("noise-thread"))
+            self.assertEqual(kept["decisions"][0]["changed"], True)
+            self.assertEqual(kept["decisions"][0]["state"], "reference")
+            self.assertEqual(kept["decisions"][0]["lane"], "paper_trail")
+
     def test_the_first_pass_holds_a_time_close_and_settles_sender_rules(self) -> None:
         with TemporaryDirectory() as tmp:
             home = Path(tmp)
