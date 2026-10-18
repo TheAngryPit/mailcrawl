@@ -650,10 +650,11 @@ def knn_decide(
     distance, neighbour = ranked[0]
 
     def produce() -> DecisionDraft:
+        copied_rule = "" if neighbour["rule_id"] is None else str(neighbour["rule_id"])
         return DecisionDraft(
             next_state=neighbour["next_state"],
             lane=neighbour["lane"],
-            rule_id=neighbour["rule_id"],
+            rule_id="knn" if copied_rule == "harness" else copied_rule,
             rules_version=neighbour["rules_version"],
             origin="knn",
             source_detail=embedder.model_id,

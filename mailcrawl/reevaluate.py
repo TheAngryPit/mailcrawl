@@ -123,10 +123,14 @@ def message_after(conn: sqlite3.Connection, thread_pk: int, created_at: int) -> 
     found = conn.execute(
         """
         SELECT 1 FROM messages
-        WHERE thread_pk = ? AND internal_date > ?
+        WHERE thread_pk = ?
+          AND (
+            (coalesce(date_trusted, 1) != 0 AND internal_date > ?)
+            OR (coalesce(date_trusted, 1) = 0 AND imported_at > ?)
+          )
         LIMIT 1
         """,
-        (thread_pk, created_at),
+        (thread_pk, created_at, created_at),
     ).fetchone()
     return found is not None
 
