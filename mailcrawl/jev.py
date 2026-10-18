@@ -11,7 +11,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Protocol
 
-from mailcrawl.decisions import DecisionDraft, decide_open, eligible_thread_pks
+from mailcrawl.decisions import DecisionDraft, current_decision, decide_open, eligible_thread_pks
+from mailcrawl.reevaluate import revive_holds
 from mailcrawl.inference import enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.timefacts import TimePolicy, apply_time, present_time_closure, thread_time_facts
@@ -172,6 +173,9 @@ def jev_decide(
     _refuse_alias(client.model_id)
     if _image_only(conn, thread_pk):
         return None
+    stored = current_decision(conn, thread_pk)
+    if stored is not None and revive_holds(conn, stored):
+        return stored
     return decide_open(
         conn,
         thread_pk,

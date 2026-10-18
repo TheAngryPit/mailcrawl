@@ -23,6 +23,7 @@ from mailcrawl.decisions import (
     open_for_model,
 )
 from mailcrawl.inference import BoundaryError, enabled_points, enter_model, invoke
+from mailcrawl.reevaluate import revive_holds
 from mailcrawl.paths import UsageError
 from mailcrawl.threads import image_gate, opened_limit_reason, pillow_limits
 from mailcrawl.timefacts import (
@@ -624,6 +625,8 @@ def knn_decide(
     if "embeddings" not in enabled_points(config) or embedder is None:
         return None
     stored = current_decision(conn, thread_pk)
+    if stored is not None and revive_holds(conn, stored):
+        return stored
     if not open_for_model(stored):
         return stored
     require_vec(conn)
@@ -647,10 +650,11 @@ def knn_decide(
     distance, neighbour = ranked[0]
 
     def produce() -> DecisionDraft:
+        copied_rule = "" if neighbour["rule_id"] is None else str(neighbour["rule_id"])
         return DecisionDraft(
             next_state=neighbour["next_state"],
             lane=neighbour["lane"],
-            rule_id=neighbour["rule_id"],
+            rule_id="knn" if copied_rule == "harness" else copied_rule,
             rules_version=neighbour["rules_version"],
             origin="knn",
             source_detail=embedder.model_id,

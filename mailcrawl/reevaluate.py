@@ -56,6 +56,10 @@ def reevaluate_time(
             record["skipped"] = "human"
             rows.append(record)
             continue
+        if revive_holds(conn, current):
+            record["skipped"] = "revive"
+            rows.append(record)
+            continue
         if state == "needs_review":
             record["skipped"] = "needs_review"
             rows.append(record)
@@ -109,6 +113,32 @@ def revive_kind(value: object) -> str:
         if item.get("type") == "revive" and kind in ("forgotten", "opportunity"):
             return str(kind)
     return ""
+
+
+def harness_revive(row: sqlite3.Row) -> bool:
+    return str(row["rule_id"]) == "harness" and revive_kind(row["evidence"]) != ""
+
+
+def message_after(conn: sqlite3.Connection, thread_pk: int, created_at: int) -> bool:
+    found = conn.execute(
+        """
+        SELECT 1 FROM messages
+        WHERE thread_pk = ?
+          AND (
+            (coalesce(date_trusted, 1) != 0 AND internal_date > ?)
+            OR (coalesce(date_trusted, 1) = 0 AND imported_at > ?)
+          )
+        LIMIT 1
+        """,
+        (thread_pk, created_at, created_at),
+    ).fetchone()
+    return found is not None
+
+
+def revive_holds(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    if not harness_revive(row):
+        return False
+    return not message_after(conn, int(row["thread_pk"]), int(row["created_at"]))
 
 
 def _stored_evidence(value: object) -> tuple[dict[str, object], ...]:

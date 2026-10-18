@@ -727,7 +727,7 @@ def _closure_target(current: sqlite3.Row | None) -> tuple[str, str] | None:
         return None
     if str(current["origin"]) not in _QUEUE_ORIGINS:
         return None
-    if current["rule_id"] is not None and str(current["rule_id"]) == _RULE_ID:
+    if _handled_by_harness(current):
         return None
     marked = _marked_closure(current["evidence"])
     if marked is None:
@@ -739,6 +739,35 @@ def _closure_target(current: sqlite3.Row | None) -> tuple[str, str] | None:
     if state == "needs_review":
         return marked
     return None
+
+
+def _handled_by_harness(row: sqlite3.Row) -> bool:
+    if str(row["origin"]) != "model" or str(row["rule_id"]) != _RULE_ID:
+        return False
+    evidence = row["evidence"]
+    if revive_kind(evidence):
+        return True
+    return _keep_only(evidence)
+
+
+def _keep_only(evidence: object) -> bool:
+    if not isinstance(evidence, str) or not evidence:
+        return False
+    try:
+        parsed = json.loads(evidence)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(parsed, list) or not parsed:
+        return False
+    saw = False
+    for item in parsed:
+        if not isinstance(item, dict) or "time_reason" in item or item.get("type") == "revive":
+            return False
+        if isinstance(item.get("time_closure"), dict):
+            saw = True
+            continue
+        return False
+    return saw
 
 
 def _marked_closure(evidence: object) -> tuple[str, str] | None:
@@ -922,7 +951,15 @@ def _queue_sql(scope: ReviewScope) -> tuple[str, list[object]]:
         params.append(_like_prefix(scope.label))
     closure = (
         "instr(decisions.evidence, '\"time_closure\":') > 0"
-        " AND coalesce(decisions.rule_id, '') != 'harness'"
+        " AND NOT ("
+        " decisions.origin = 'model'"
+        " AND coalesce(decisions.rule_id, '') = 'harness'"
+        " AND ("
+        " instr(decisions.evidence, '\"type\":\"revive\"') > 0"
+        " OR ("
+        " instr(decisions.evidence, '\"time_closure\":') > 0"
+        " AND instr(decisions.evidence, '\"time_reason\"') = 0"
+        " )))"
         " AND ((decisions.next_state IN ('reference', 'resolved')"
         " AND decisions.lane = 'paper_trail')"
         " OR decisions.next_state = 'needs_review')"
