@@ -229,13 +229,20 @@ def rules_path(path: Path) -> Path | None:
         return None
     block = document.get("rules")
     if isinstance(block, str):
-        return Path(_rules_value(block)).expanduser()
+        return _locate_rules(path, _rules_value(block))
     if not isinstance(block, dict):
         raise UsageError("rules config is not a table")
     value = block.get("path")
     if value is None:
         return None
-    return Path(_rules_value(value)).expanduser()
+    return _locate_rules(path, _rules_value(value))
+
+
+def _locate_rules(config: Path, raw: str) -> Path:
+    expanded = Path(raw).expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return config.parent / expanded
 
 
 def embedder_name(path: Path) -> str:

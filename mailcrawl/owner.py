@@ -157,24 +157,37 @@ def _gmail_aligned(auth_results: str | None, domain: str) -> bool:
     """Trust the first Authentication-Results block only.
 
     Gmail prepends its own result. A later block can repeat ``mx.google.com``
-    and still be the sender's header.
+    and still be the sender's header. DMARC and DKIM prove that domain, not
+    one mailbox on it.
     """
     if not auth_results:
         return False
-    wanted = _fold(domain).rstrip(".")
+    wanted = _strip_one_dot(_fold(domain))
     if not wanted:
         return False
     blocks = _blocks(auth_results)
     if not blocks:
         return False
-    clauses = _clauses(_strip_comments(blocks[0]))
-    if not clauses or _authserv(clauses[0]) != _AUTHSERV:
+    clauses = _scan(blocks[0])
+    if clauses is None or not clauses or clauses[0] != [(_AUTHSERV, "")]:
+        return False
+    dmarc = [
+        value
+        for clause in clauses[1:]
+        for key, value in clause
+        if key == "dmarc"
+    ]
+    if len(dmarc) != 1 or dmarc[0] == "fail":
         return False
     for clause in clauses[1:]:
-        if _passes(clause, "dmarc", "header.from", wanted):
-            return True
-        if _passes(clause, "dkim", "header.i", wanted) or _passes(clause, "dkim", "header.d", wanted):
-            return True
+        if not clause or clause[0] != ("dkim", "pass"):
+            continue
+        for key, value in clause[1:]:
+            if key != "header.d":
+                continue
+            if _domain_of(value) == wanted:
+                return True
+            break
     return False
 
 
@@ -189,71 +202,103 @@ def _blocks(text: str) -> list[str]:
             current.append(line)
     if current:
         blocks.append(current)
-    return [" ".join("".join(part).split()) for part in blocks if "".join(part).strip()]
+    return ["\n".join(part) for part in blocks if "".join(part).strip()]
 
 
-def _clauses(text: str) -> list[str]:
-    parts: list[str] = []
-    buf: list[str] = []
+def _scan(text: str) -> list[list[tuple[str, str]]] | None:
+    """Split one block into key=value pairs.
+
+    ``None`` means an unbalanced comment, quote, or trailing escape.
+    A quoted string hides parentheses and semicolons, including inside a
+    comment. Every method result is kept. The caller uses the first
+    property value for a key.
+    """
+    clauses: list[list[str]] = [[]]
+    token: list[str] = []
+    depth = 0
     quote = False
+    escape = False
+
+    def finish_token() -> None:
+        nonlocal token
+        if token:
+            clauses[-1].append("".join(token))
+            token = []
+
     for char in text:
+        if escape:
+            escape = False
+            if depth == 0:
+                token.append(char)
+            continue
+        if char == "\\":
+            escape = True
+            continue
+        if quote:
+            if char == '"':
+                quote = False
+            elif depth == 0:
+                token.append(char)
+            continue
+        if depth:
+            if char == '"':
+                quote = True
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            continue
         if char == '"':
-            quote = not quote
-            buf.append(char)
+            quote = True
             continue
-        if char == ";" and not quote:
-            parts.append("".join(buf).strip())
-            buf = []
+        if char == "(":
+            depth = 1
             continue
-        buf.append(char)
-    tail = "".join(buf).strip()
-    if tail:
-        parts.append(tail)
-    return parts
-
-
-def _authserv(clause: str) -> str:
-    token = clause.strip().split(None, 1)[0] if clause.strip() else ""
-    return _fold(token.split("@", 1)[0].rstrip(";"))
-
-
-def _passes(clause: str, method: str, prop: str, wanted: str) -> bool:
-    text = " ".join(clause.split())
-    folded = _fold(text)
-    prefix = method + "="
-    if not folded.startswith(prefix):
-        return False
-    result = folded[len(prefix):].split(None, 1)[0].rstrip(";")
-    if result != "pass":
-        return False
-    marker = prop + "="
-    index = folded.find(marker)
-    if index < 0:
-        return False
-    raw = folded[index + len(marker):].split(None, 1)[0].rstrip(";")
-    return _domain_of(raw) == wanted
+        if char == ")":
+            return None
+        if char == ";":
+            finish_token()
+            if clauses[-1]:
+                clauses.append([])
+            continue
+        if char.isspace():
+            finish_token()
+            continue
+        token.append(char)
+    if escape or quote or depth:
+        return None
+    finish_token()
+    if clauses and not clauses[-1]:
+        clauses.pop()
+    parsed: list[list[tuple[str, str]]] = []
+    for clause in clauses:
+        pairs: list[tuple[str, str]] = []
+        for item in clause:
+            if "=" not in item:
+                continue
+            key, value = item.split("=", 1)
+            pairs.append((_fold(key), _fold(value)))
+        if clause and "=" not in clause[0]:
+            if len(clause) != 1:
+                return None
+            parsed.append([(_fold(clause[0]), "")])
+            continue
+        if pairs:
+            parsed.append(pairs)
+    return parsed
 
 
 def _domain_of(value: str) -> str:
-    token = value.strip().rstrip(".").lstrip("@")
+    token = _strip_one_dot(_fold(value.strip())).lstrip("@")
     if "@" in token:
-        token = token.rsplit("@", 1)[1]
-    return _fold(token).rstrip(".")
+        token = _strip_one_dot(token.rsplit("@", 1)[1])
+    return token
 
 
-def _strip_comments(text: str) -> str:
-    kept: list[str] = []
-    depth = 0
-    for char in text:
-        if char == "(":
-            depth += 1
-            continue
-        if char == ")" and depth:
-            depth -= 1
-            continue
-        if depth == 0:
-            kept.append(char)
-    return "".join(kept)
+def _strip_one_dot(value: str) -> str:
+    if value.endswith("."):
+        return value[:-1]
+    return value
 
 
 def _fold(value: str) -> str:

@@ -33,6 +33,7 @@ from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
 from mailcrawl.owner import recompute_from_me
+from mailcrawl.schema import USER_VERSION
 from mailcrawl.inference import enabled_points
 from mailcrawl.jev import jev_decide, open_client, score_grey_band
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
@@ -402,8 +403,6 @@ def _rules(args: argparse.Namespace) -> int:
     if args.apply and not args.reevaluate:
         raise UsageError("apply needs reevaluate")
     rules_file = _rules_file(args)
-    if not rules_file.is_file():
-        raise UsageError("rules file is missing")
     config = load_rules(rules_file)
     now = _as_of(args)
     owners, domains, security_senders, test_recipients = _identity(args)
@@ -487,9 +486,25 @@ def _stats(args: argparse.Namespace) -> int:
 def _from_me(args: argparse.Namespace) -> int:
     alias = canonical_alias(args.account)
     cfg = config_path(args.config)
+    aliases = owner_addresses(cfg, alias)
+    if not args.apply:
+        conn = _open_dry(data_dir(args.home) / f"{alias}.db")
+        try:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version < USER_VERSION:
+                _emit(args, {"account": alias, "error": "needs migration", "ok": False})
+                return 2
+            if version > USER_VERSION:
+                _emit(args, {"account": alias, "error": "unsupported_schema", "ok": False})
+                return 3
+            report = recompute_from_me(conn, aliases, apply=False)
+        finally:
+            conn.close()
+        _emit(args, {"account": alias, **report.public()})
+        return 0
     conn = _account_db(args)
     try:
-        report = recompute_from_me(conn, owner_addresses(cfg, alias), apply=bool(args.apply))
+        report = recompute_from_me(conn, aliases, apply=True)
     finally:
         conn.close()
     _emit(args, {"account": alias, **report.public()})
@@ -499,8 +514,6 @@ def _from_me(args: argparse.Namespace) -> int:
 def _dry_run(args: argparse.Namespace) -> int:
     now = _as_of(args)
     rules_file = _rules_file(args)
-    if not rules_file.is_file():
-        raise UsageError("rules file is missing")
     config = load_rules(rules_file)
     export_path, sample, seed = _export_args(args)
     owners, domains, security_senders, test_recipients = _identity(args)
@@ -608,10 +621,15 @@ def _embedder(args: argparse.Namespace) -> str:
 
 def _rules_file(args: argparse.Namespace) -> Path:
     if args.rules:
-        return Path(args.rules)
+        chosen = Path(args.rules).expanduser()
+        if not chosen.is_file():
+            raise UsageError("rules file from --rules is missing")
+        return chosen
     configured = rules_path(config_path(args.config))
     if configured is None:
         raise UsageError("rules needs --rules or a rules path in config")
+    if not configured.is_file():
+        raise UsageError("rules file from config is missing")
     return configured
 
 
@@ -767,6 +785,16 @@ def _taxonomy_warnings(conn, alias: str, catalogue: Path | None) -> list[str]:
     if catalogue is None:
         return []
     return missing_labels(load_taxonomy(catalogue), alias, present_label_names(conn))
+
+
+def _open_dry(path: Path) -> sqlite3.Connection:
+    # A read-only WAL connection still creates -wal and -shm. immutable does not.
+    if not path.is_file():
+        raise UsageError("account is not initialized")
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    return conn
 
 
 def _account_db(args: argparse.Namespace) -> sqlite3.Connection:
