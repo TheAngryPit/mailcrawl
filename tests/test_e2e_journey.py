@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import email
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -181,6 +182,59 @@ class CompareTest(unittest.TestCase):
             CHECK.compare(actual, expected),
             "thread e2e-en-old-ask: queue_off expected present actual absent\n",
         )
+
+    def test_duplicate_queue_entry_reports_the_count(self) -> None:
+        self.assertEqual(
+            CHECK.compare({"queue_off": ["a", "a", "b"]}, {"queue_off": ["a", "b"]}),
+            "thread a: queue_off expected count 1 actual 2\n",
+        )
+
+    def test_reordered_export_reports_the_index(self) -> None:
+        self.assertEqual(
+            CHECK.compare({"export_ids": ["b", "a"]}, {"export_ids": ["a", "b"]}),
+            "export_ids: order differs at index 0\n",
+        )
+
+    def test_duplicated_thread_row_reports_the_count(self) -> None:
+        row = _thread("e2e-pt-question")
+        self.assertEqual(
+            CHECK.compare(
+                {"final": {"threads": [row, dict(row)]}},
+                {"final": {"threads": [row]}},
+            ),
+            "thread e2e-pt-question: final expected count 1 actual 2\n",
+        )
+
+    def test_any_difference_exits_nonzero(self) -> None:
+        row = _thread("e2e-pt-question")
+        other = _thread("e2e-from-me")
+        document = json.loads((ROOT / "testdata/e2e/expected.json").read_text())
+        broken = json.loads((ROOT / "testdata/e2e/expected.json").read_text())
+        broken["queue_off"].append("e2e-pt-question")
+        pairs = [
+            ({"queue_off": ["a", "a", "b"]}, {"queue_off": ["a", "b"]}),
+            ({"export_ids": ["b", "a"]}, {"export_ids": ["a", "b"]}),
+            ({"final": {"threads": [row, dict(row)]}}, {"final": {"threads": [row]}}),
+            ({"queue_off": None}, {"queue_off": []}),
+            ({"imports": {"mbox": {"n_new": 1}}}, {"imports": {"mbox": {"n_new": 2}}}),
+            (
+                {"final": {"threads": [other, row]}},
+                {"final": {"threads": [row, other]}},
+            ),
+            ({"queue_on": ["b", "a"]}, {"queue_on": ["a", "b"]}),
+            (["a", "b"], ["b", "a"]),
+            ("left", "right"),
+            ({"extra": 1}, {}),
+            (
+                {"final": {"threads": [row, dict(row), dict(row)]}},
+                {"final": {"threads": [row, dict(row)]}},
+            ),
+            ({"export_ids": ["a", "a"]}, {"export_ids": ["a"]}),
+            (document, broken),
+        ]
+        for actual, expected in pairs:
+            self.assertNotEqual(actual, expected)
+            self.assertNotEqual(CHECK.compare(actual, expected), "")
 
     def test_journey_guards_name_bcc_and_the_undo_queue(self) -> None:
         kept = _thread(
