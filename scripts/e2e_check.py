@@ -157,30 +157,106 @@ def _id_list(value: object) -> list[str] | None:
     return None
 
 
+def _counts(ids: list[str]) -> dict[str, int]:
+    found: dict[str, int] = {}
+    for thread_id in ids:
+        found[thread_id] = found.get(thread_id, 0) + 1
+    return found
+
+
+def _thread_rows(section: object) -> list[dict[str, object]] | None:
+    if not isinstance(section, dict):
+        return None
+    rows = section.get("threads")
+    if not isinstance(rows, list):
+        return None
+    found: list[dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("thread_id"), str):
+            return None
+        found.append(row)
+    return found
+
+
+def _membership(section: str, thread_id: str, expected_count: int, actual_count: int) -> str:
+    if expected_count > 1 or actual_count > 1:
+        return (
+            f"thread {thread_id}: {section} "
+            f"expected count {expected_count} actual {actual_count}"
+        )
+    if expected_count == 1:
+        return f"thread {thread_id}: {section} expected present actual absent"
+    return f"thread {thread_id}: {section} expected absent actual present"
+
+
+def _order_line(section: str, actual_ids: list[str], expected_ids: list[str]) -> str | None:
+    if _counts(actual_ids) != _counts(expected_ids) or actual_ids == expected_ids:
+        return None
+    for index, (left, right) in enumerate(zip(actual_ids, expected_ids)):
+        if left != right:
+            return f"{section}: order differs at index {index}"
+    return None
+
+
+def _field_lines(
+    section: str,
+    thread_id: str,
+    actual_row: dict[str, object],
+    expected_row: dict[str, object],
+) -> list[str]:
+    lines: list[str] = []
+    for field in sorted((set(actual_row) | set(expected_row)) - {"thread_id"}):
+        if actual_row.get(field) != expected_row.get(field):
+            lines.append(
+                f"thread {thread_id}: {section}.{field} "
+                f"expected {_show(expected_row.get(field))} actual {_show(actual_row.get(field))}"
+            )
+    return lines
+
+
+def _finish(section: str, actual: object, expected: object, lines: list[str]) -> list[str]:
+    if actual != expected and not lines:
+        lines.append(f"{section}: differs")
+    return lines
+
+
 def _threads(section: str, actual: object, expected: object) -> list[str]:
-    actual_map = _thread_map(actual)
-    expected_map = _thread_map(expected)
-    if actual_map is None or expected_map is None:
+    actual_rows = _thread_rows(actual)
+    expected_rows = _thread_rows(expected)
+    if actual_rows is None or expected_rows is None:
         if actual == expected:
             return []
         return [f"{section} expected {_show(expected)} actual {_show(actual)}"]
+    actual_ids = [str(row["thread_id"]) for row in actual_rows]
+    expected_ids = [str(row["thread_id"]) for row in expected_rows]
+    actual_counts = _counts(actual_ids)
+    expected_counts = _counts(expected_ids)
+    actual_grouped: dict[str, list[dict[str, object]]] = {}
+    expected_grouped: dict[str, list[dict[str, object]]] = {}
+    for row in actual_rows:
+        actual_grouped.setdefault(str(row["thread_id"]), []).append(row)
+    for row in expected_rows:
+        expected_grouped.setdefault(str(row["thread_id"]), []).append(row)
     lines: list[str] = []
-    for thread_id in sorted(set(actual_map) | set(expected_map)):
-        if thread_id not in expected_map:
-            lines.append(f"thread {thread_id}: {section} expected absent actual present")
-            continue
-        if thread_id not in actual_map:
-            lines.append(f"thread {thread_id}: {section} expected present actual absent")
-            continue
-        left = actual_map[thread_id]
-        right = expected_map[thread_id]
-        for field in sorted((set(left) | set(right)) - {"thread_id"}):
-            if left.get(field) != right.get(field):
-                lines.append(
-                    f"thread {thread_id}: {section}.{field} "
-                    f"expected {_show(right.get(field))} actual {_show(left.get(field))}"
+    for thread_id in sorted(set(actual_counts) | set(expected_counts)):
+        actual_count = actual_counts.get(thread_id, 0)
+        expected_count = expected_counts.get(thread_id, 0)
+        shared = min(actual_count, expected_count)
+        for index in range(shared):
+            lines.extend(
+                _field_lines(
+                    section,
+                    thread_id,
+                    actual_grouped[thread_id][index],
+                    expected_grouped[thread_id][index],
                 )
-    return lines
+            )
+        if actual_count != expected_count:
+            lines.append(_membership(section, thread_id, expected_count, actual_count))
+    order = _order_line(section, actual_ids, expected_ids)
+    if order:
+        lines.append(order)
+    return _finish(section, actual, expected, lines)
 
 
 def _ids(name: str, actual: object, expected: object) -> list[str]:
@@ -190,12 +266,18 @@ def _ids(name: str, actual: object, expected: object) -> list[str]:
         if actual == expected:
             return []
         return [f"{name} expected {_show(expected)} actual {_show(actual)}"]
+    actual_counts = _counts(actual_ids)
+    expected_counts = _counts(expected_ids)
     lines: list[str] = []
-    for thread_id in sorted(set(expected_ids) - set(actual_ids)):
-        lines.append(f"thread {thread_id}: {name} expected present actual absent")
-    for thread_id in sorted(set(actual_ids) - set(expected_ids)):
-        lines.append(f"thread {thread_id}: {name} expected absent actual present")
-    return lines
+    for thread_id in sorted(set(actual_counts) | set(expected_counts)):
+        actual_count = actual_counts.get(thread_id, 0)
+        expected_count = expected_counts.get(thread_id, 0)
+        if actual_count != expected_count:
+            lines.append(_membership(name, thread_id, expected_count, actual_count))
+    order = _order_line(name, actual_ids, expected_ids)
+    if order:
+        lines.append(order)
+    return _finish(name, actual, expected, lines)
 
 
 def _walk(path: str, actual: object, expected: object) -> list[str]:
@@ -215,8 +297,22 @@ def _walk(path: str, actual: object, expected: object) -> list[str]:
     return [f"{label} expected {_show(expected)} actual {_show(actual)}"]
 
 
+def _unreported(actual: object, expected: object) -> list[str]:
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        lines = [
+            f"{key}: differs"
+            for key in sorted(set(actual) | set(expected))
+            if actual.get(key) != expected.get(key)
+        ]
+        if lines:
+            return lines
+    return ["document: differs"]
+
+
 def compare(actual: object, expected: object) -> str:
     lines = _walk("", actual, expected)
+    if actual != expected and not lines:
+        lines = _unreported(actual, expected)
     if not lines:
         return ""
     return "\n".join(lines) + "\n"
