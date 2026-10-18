@@ -17,6 +17,7 @@ RULES = ROOT / "testdata" / "rules" / "rules-v0.json"
 NOW = 1_700_000_000
 PASS = (
     "Authentication-Results: mx.google.com;\n"
+    "       dkim=pass header.d=example.com;\n"
     "       dmarc=pass (p=NONE; sp=NONE) header.from=example.com"
 )
 
@@ -56,7 +57,7 @@ class OwnerAliasTest(unittest.TestCase):
         self.assertEqual(stored["Can you confirm?"], (1, "alias"))
         self.assertEqual(stored["Can you confirm the spoof?"], (0, None))
         self.assertEqual(stored["Can you confirm the later pass?"], (0, None))
-        self.assertEqual(stored["Can you confirm the dkim?"], (1, "alias"))
+        self.assertEqual(stored["Can you confirm the dkim?"], (0, None))
         self.assertEqual(stored["Can you confirm the later fail?"], (1, "alias"))
         self.assertEqual(stored["Thanks, all set."], (1, "sent"))
         self.assertEqual(stored["hello from a colleague"], (0, None))
@@ -66,13 +67,13 @@ class OwnerAliasTest(unittest.TestCase):
             report,
             {
                 "account": "vcl",
-                "alias": 3,
+                "alias": 2,
                 "applied": False,
                 "changed": 0,
                 "ok": True,
                 "sent": 1,
                 "unchanged": 8,
-                "untrusted": 3,
+                "untrusted": 4,
             },
         )
         decided = self._json(["rules", "--account", "vcl", "--now", str(NOW)])
@@ -80,7 +81,8 @@ class OwnerAliasTest(unittest.TestCase):
         self.assertEqual(self._decisions()["Can you confirm?"], ("6", "waiting"))
         self.assertEqual(self._decisions()["Can you confirm the spoof?"], ("5", "reply"))
         self.assertEqual(self._decisions()["Can you confirm the later pass?"], ("5", "reply"))
-        self.assertEqual(self._decisions()["Can you confirm the dkim?"], ("6", "waiting"))
+        self.assertEqual(self._decisions()["Can you confirm the dkim?"], ("5", "reply"))
+        self.assertEqual(self._decisions()["Can you confirm the later fail?"], ("6", "waiting"))
         self.assertEqual(self._decisions()["Thanks, all set."], ("8", "resolved"))
         self.assertEqual(self._decisions()["hello from a colleague"], ("5", "reply"))
         self.assertEqual(self._decisions()["Can you confirm the subdomain?"], ("5", "reply"))
@@ -111,7 +113,7 @@ class OwnerAliasTest(unittest.TestCase):
                     thread,
                     NOW,
                     "João مرحبا <jo\u00e3o@example.com>",
-                    "mx.google.com; dmarc=pass header.from=example.com",
+                    "mx.google.com; dkim=pass header.d=example.com; dmarc=pass header.from=example.com",
                     NOW,
                 ),
             )
@@ -164,23 +166,224 @@ class OwnerAliasTest(unittest.TestCase):
         self.assertIn("from_me_origin", columns)
         self.assertEqual(USER_VERSION, 11)
 
+    def test_forged_authentication_results_stay_untrusted(self) -> None:
+        db = init_account(self.home, "vcl", "ada@example.com")
+        aligned = "dkim=pass header.d=example.com; dmarc=pass header.from=example.com"
+        cases = {
+            "aligned": (f"mx.google.com; {aligned}", 1, "alias"),
+            "quoted-local": (
+                'mx.google.com; spf=pass (google.com: domain of "x)"@example.com designates sender) '
+                'smtp.mailfrom="x)"@example.com; dkim=pass header.d=example.com; dmarc=pass header.from=example.com',
+                1,
+                "alias",
+            ),
+            "trailing-dot": (
+                "mx.google.com; dkim=pass header.d=example.com.; dmarc=none header.from=example.com",
+                1,
+                "alias",
+            ),
+            "second-dkim": (
+                "mx.google.com; dkim=pass header.d=evil.example; "
+                "dkim=pass header.d=example.com; dmarc=pass header.from=example.com",
+                1,
+                "alias",
+            ),
+            "comment-escape": (
+                r'mx.google.com; spf=pass (google.com: domain of "x\);dmarc=pass header.from=example.com; '
+                r'dkim=pass header.d=example.com;\(y dmarc=fail header.from=evil.example"@evil.example)',
+                0,
+                None,
+            ),
+            "unescaped-paren": (
+                'mx.google.com; spf=pass (google.com: domain of "x);dmarc=pass header.from=example.com; '
+                'dkim=pass header.d=example.com;(y dmarc=fail header.from=evil.example)"@evil.example)',
+                0,
+                None,
+            ),
+            "visible-fail": (
+                r'mx.google.com; spf=pass (google.com: domain of "x\);dmarc=pass header.from=example.com;\(y"@evil.example '
+                "designates sender); dmarc=fail header.from=evil.example",
+                0,
+                None,
+            ),
+            "header-s": (
+                "mx.google.com; dkim=pass header.s=header.d=example.com; dmarc=pass header.from=example.com",
+                0,
+                None,
+            ),
+            "xheader": (
+                "mx.google.com; dkim=pass header.d=evil.example; policy.xheader.from=example.com; "
+                "dmarc=pass header.from=example.com",
+                0,
+                None,
+            ),
+            "authserv-at": (f"mx.google.com@evil.example; {aligned}", 0, None),
+            "authserv-extra": (f"mx.google.com 1; {aligned}", 0, None),
+            "dmarc-only": ("mx.google.com; dmarc=pass header.from=example.com", 0, None),
+            "dkim-and-fail": (
+                "mx.google.com; dmarc=fail header.from=example.com; dkim=pass header.d=example.com",
+                0,
+                None,
+            ),
+            "two-dmarc": (
+                "mx.google.com; dkim=pass header.d=example.com; dmarc=pass header.from=example.com; "
+                "dmarc=pass header.from=example.com",
+                0,
+                None,
+            ),
+            "same-clause-fail": (
+                "mx.google.com; dkim=pass header.d=example.com; dmarc=pass dmarc=fail header.from=example.com",
+                0,
+                None,
+            ),
+            "first-header-d": (
+                "mx.google.com; dkim=pass header.d=evil.example header.d=example.com; "
+                "dmarc=pass header.from=example.com",
+                0,
+                None,
+            ),
+            "header-i": (
+                "mx.google.com; dkim=pass header.i=@example.com; dmarc=pass header.from=example.com",
+                0,
+                None,
+            ),
+            "subdomain": (
+                "mx.google.com; dkim=pass header.d=mail.example.com; dmarc=pass header.from=mail.example.com",
+                0,
+                None,
+            ),
+            "unbalanced-quote": (
+                'mx.google.com; dkim=pass header.d="example.com; dmarc=pass header.from=example.com',
+                0,
+                None,
+            ),
+            "trailing-escape": (
+                "mx.google.com; dkim=pass header.d=example.com\\",
+                0,
+                None,
+            ),
+        }
+        conn = connect(db)
+        try:
+            account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+            thread = conn.execute(
+                """
+                INSERT INTO threads(account_id, gmail_thread_id)
+                VALUES (?, 'thread-forged')
+                RETURNING thread_pk
+                """,
+                (account,),
+            ).fetchone()[0]
+            for name, (auth, _mine, _origin) in cases.items():
+                conn.execute(
+                    """
+                    INSERT INTO messages(
+                      account_id, gmail_message_id, thread_pk, internal_date,
+                      from_hdr, auth_results, body_text, is_from_me,
+                      raw_sha256, provenance_hash, imported_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'prov', ?)
+                    """,
+                    (
+                        account,
+                        name,
+                        thread,
+                        NOW,
+                        "Other <Other@Example.com>",
+                        auth,
+                        name,
+                        name,
+                        NOW,
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        preview = self._json(["from-me", "--account", "vcl"])
+        self.assertEqual(preview["applied"], False)
+        self.assertEqual(preview["alias"], 4)
+        self.assertEqual(self._stored(db)["aligned"], (0, None))
+        applied = self._json(["from-me", "--account", "vcl", "--apply"])
+        self.assertEqual(applied["applied"], True)
+        self.assertEqual(applied["alias"], 4)
+        self.assertEqual(applied["untrusted"], len(cases) - 4)
+        stored = self._stored(db)
+        for name, (_auth, mine, origin) in cases.items():
+            self.assertEqual(stored[name], (mine, origin), name)
+
+    def test_from_me_dry_run_does_not_migrate(self) -> None:
+        db = init_account(self.home, "vcl", "ada@example.com")
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute("ALTER TABLE messages DROP COLUMN from_me_origin")
+            conn.execute("PRAGMA user_version = 10")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.commit()
+        finally:
+            conn.close()
+        before = _snapshot(db)
+        code, doc = self._code(["from-me", "--account", "vcl"])
+        self.assertEqual(code, 2)
+        self.assertEqual(doc, {"account": "vcl", "error": "needs migration", "ok": False})
+        self.assertEqual(_snapshot(db), before)
+        conn = sqlite3.connect(db)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(version, 10)
+        self.assertNotIn("from_me_origin", columns)
+        applied = self._json(["from-me", "--account", "vcl", "--apply"])
+        self.assertEqual(applied["ok"], True)
+        self.assertEqual(applied["applied"], True)
+        conn = sqlite3.connect(db)
+        try:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertEqual(version, USER_VERSION)
+        self.assertIn("from_me_origin", columns)
+
+    def test_from_me_dry_run_rejects_a_newer_schema(self) -> None:
+        db = init_account(self.home, "vcl", "ada@example.com")
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute("PRAGMA user_version = 12")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.commit()
+        finally:
+            conn.close()
+        before = _snapshot(db)
+        code, doc = self._code(["from-me", "--account", "vcl"])
+        self.assertEqual(code, 3)
+        self.assertEqual(doc, {"account": "vcl", "error": "unsupported_schema", "ok": False})
+        self.assertEqual(_snapshot(db), before)
+
     def _init(self) -> None:
         self._json(["init", "--account", "vcl", "--email", "ada@example.com"])
 
     def _json(self, args: list[str]) -> dict[str, object]:
+        code, doc = self._code(args)
+        self.assertEqual(code, 0, doc)
+        return doc
+
+    def _code(self, args: list[str]) -> tuple[int, dict[str, object]]:
         buf = io.StringIO()
         with redirect_stdout(buf):
             code = main(
                 ["--json", "--home", str(self.home), "--config", str(self.config), *args]
             )
-        self.assertEqual(code, 0, buf.getvalue())
-        return json.loads(buf.getvalue())
+        return code, json.loads(buf.getvalue())
 
     def _db(self) -> Path:
         return self.home / "vcl.db"
 
     def _rows(self) -> dict[str, tuple[int, str | None]]:
-        conn = connect(self._db())
+        return self._stored(self._db())
+
+    def _stored(self, db: Path) -> dict[str, tuple[int, str | None]]:
+        conn = connect(db)
         try:
             found = conn.execute(
                 "SELECT body_text, is_from_me, from_me_origin FROM messages"
@@ -223,6 +426,14 @@ class OwnerAliasTest(unittest.TestCase):
         return str(row[0])
 
 
+def _snapshot(db: Path) -> dict[str, bytes]:
+    found: dict[str, bytes] = {}
+    for path in db.parent.iterdir():
+        if path.name == db.name or path.name.startswith(db.name + "-"):
+            found[path.name] = path.read_bytes()
+    return found
+
+
 def _mbox() -> str:
     messages = [
         _message(
@@ -263,7 +474,7 @@ def _mbox() -> str:
             "Inbox",
             "\n".join(
                 [
-                    "Authentication-Results: mx.google.com; dmarc=pass header.from=example.com",
+                    "Authentication-Results: mx.google.com; dkim=pass header.d=example.com; dmarc=pass header.from=example.com",
                     "Authentication-Results: mx.google.com; dmarc=fail header.from=example.com",
                 ]
             ),
@@ -281,7 +492,7 @@ def _mbox() -> str:
         _message(
             "108",
             "Inbox",
-            "Authentication-Results: mx.google.com; dmarc=pass header.from=mail.example.com",
+            "Authentication-Results: mx.google.com; dkim=pass header.d=mail.example.com; dmarc=pass header.from=mail.example.com",
             "Other@Example.com",
             "Can you confirm the subdomain?",
         ),

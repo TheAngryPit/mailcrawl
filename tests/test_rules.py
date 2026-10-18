@@ -680,7 +680,7 @@ class RulesEngineTest(unittest.TestCase):
             ]
         )
         self.assertEqual(overridden, 2)
-        self.assertEqual(overridden_doc["detail"], "rules file is missing")
+        self.assertEqual(overridden_doc["detail"], "rules file from --rules is missing")
         bare = Path(self.tmp.name) / "bare.toml"
         bare.write_text("\n", encoding="utf-8")
         absent, absent_doc = self._code(
@@ -702,6 +702,68 @@ class RulesEngineTest(unittest.TestCase):
             absent_doc["detail"],
             "rules needs --rules or a rules path in config",
         )
+
+    def test_relative_rules_path_is_next_to_the_config(self) -> None:
+        self._thread("hello there")
+        self.conn.commit()
+        folder = Path(self.tmp.name) / "cfg"
+        folder.mkdir()
+        (folder / "rules-v0.json").write_bytes(RULES.read_bytes())
+        config = folder / "config.toml"
+        config.write_text('[rules]\npath = "rules-v0.json"\n', encoding="utf-8")
+        previous = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            applied = self._json(
+                [
+                    "--json",
+                    "--home",
+                    self.tmp.name,
+                    "--config",
+                    str(config),
+                    "rules",
+                    "--account",
+                    "vcl",
+                    "--now",
+                    str(NOW),
+                ]
+            )
+            self.assertEqual(applied["ok"], True)
+            config.write_text('rules = "rules-v0.json"\n', encoding="utf-8")
+            preview = self._json(
+                [
+                    "--json",
+                    "--home",
+                    self.tmp.name,
+                    "--config",
+                    str(config),
+                    "dry-run",
+                    "--account",
+                    "vcl",
+                    "--now",
+                    str(NOW),
+                ]
+            )
+            self.assertEqual(preview["by_rule"], {"5": 1})
+            config.write_text('[rules]\npath = "missing.json"\n', encoding="utf-8")
+            missing, missing_doc = self._code(
+                [
+                    "--json",
+                    "--home",
+                    self.tmp.name,
+                    "--config",
+                    str(config),
+                    "rules",
+                    "--account",
+                    "vcl",
+                    "--now",
+                    str(NOW),
+                ]
+            )
+        finally:
+            os.chdir(previous)
+        self.assertEqual(missing, 2)
+        self.assertEqual(missing_doc["detail"], "rules file from config is missing")
 
     def test_configured_rules_path_expands_a_tilde(self) -> None:
         self._thread("hello there")
