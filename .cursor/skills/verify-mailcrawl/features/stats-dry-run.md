@@ -13,9 +13,9 @@
 ## How to get to it (user POV)
 
 - Init account `vcl` in an isolated home and seed the same two synthetic threads the rules drive uses.
-- Run `python3 -m mailcrawl --json stats --account vcl` and `python3 -m mailcrawl --json dry-run --account vcl --now 1700000000` before `rules`. The decision table stays empty.
+- Run `python3 -m mailcrawl --json stats --account vcl` and `python3 -m mailcrawl --json dry-run --account vcl --now 1700000000 --rules testdata/rules/rules-v0.json` before `rules`. The decision table stays empty.
 - Load `testdata/fixtures/old-taxonomy/pre-category.sql` into a fresh account and run `python3 -m mailcrawl --json backfill --account vcl`.
-- Run `python3 -m mailcrawl --json rules --account vcl --rules testdata/rules/rules-v0.json --now 1700000000`, then dry-run again.
+- Run `python3 -m mailcrawl --json rules --account vcl --rules testdata/rules/rules-v0.json --now 1700000000`, then dry-run again with the same `--rules` flag.
 
 ## Driving it with mailcrawl-verify
 

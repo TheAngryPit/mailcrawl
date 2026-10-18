@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import unicodedata
 import tomllib
 from pathlib import Path
 
 from mailcrawl.clock import require_as_of
 from mailcrawl.inference import BoundaryError, enabled_points
 from mailcrawl.paths import UsageError, canonical_alias
+from mailcrawl.textnorm import parse_address
 
 
 def load_config(path: Path) -> dict[str, object]:
@@ -197,11 +199,50 @@ def inference_device(path: Path) -> str:
     return _device_value(raw["device"])
 
 
+def owner_addresses(path: Path, alias: str) -> frozenset[str]:
+    document = load_config(path)
+    accounts = document.get("accounts")
+    if not isinstance(accounts, dict):
+        return frozenset()
+    row = accounts.get(canonical_alias(alias))
+    if not isinstance(row, dict):
+        return frozenset()
+    value = row.get("owner_addresses")
+    if value is None:
+        return frozenset()
+    if not isinstance(value, list):
+        raise UsageError("owner_addresses needs a list")
+    found: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise UsageError("owner address is not an email")
+        _name, address, _domain = parse_address(item)
+        if address is None:
+            raise UsageError("owner address is not an email")
+        found.add(_fold_address(address))
+    return frozenset(found)
+
+
 def rules_path(path: Path) -> Path | None:
     document = load_config(path)
     if "rules" not in document:
         return None
-    return Path(_rules_value(document.get("rules"))).expanduser()
+    block = document.get("rules")
+    if isinstance(block, str):
+        return _locate_rules(path, _rules_value(block))
+    if not isinstance(block, dict):
+        raise UsageError("rules config is not a table")
+    value = block.get("path")
+    if value is None:
+        return None
+    return _locate_rules(path, _rules_value(value))
+
+
+def _locate_rules(config: Path, raw: str) -> Path:
+    expanded = Path(raw).expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return config.parent / expanded
 
 
 def embedder_name(path: Path) -> str:
@@ -296,10 +337,9 @@ def write_account(path: Path, alias: str, email: str) -> None:
     if isinstance(taxonomy, str) and taxonomy and '"' not in taxonomy:
         lines.append(f'taxonomy = "{taxonomy}"')
         lines.append("")
-    configured_rules = document.get("rules")
-    if isinstance(configured_rules, str) and configured_rules:
-        lines.append(f'rules = "{_rules_value(configured_rules)}"')
-        lines.append("")
+    rules_value = _stored_rules(document.get("rules"))
+    if rules_value:
+        lines.extend(["[rules]", f'path = "{_rules_value(rules_value)}"', ""])
     inference = document.get("inference")
     if isinstance(inference, dict):
         saved = [
@@ -346,10 +386,13 @@ def write_account(path: Path, alias: str, email: str) -> None:
             continue
         lines.append(f"[accounts.{name}]")
         lines.append(f'email = "{addr}"')
+        owner_aliases = _string_list(account.get("owner_addresses"))
         owners = _string_list(account.get("owners"))
         domains = _string_list(account.get("domains"))
         security_senders = _string_list(account.get("security_senders"))
         test_recipients = _string_list(account.get("test_recipients"))
+        if owner_aliases:
+            lines.append(f"owner_addresses = {_toml_strings(owner_aliases)}")
         if owners:
             lines.append(f"owners = {_toml_strings(owners)}")
         if domains:
@@ -378,6 +421,20 @@ def _llm_lines(block: dict[str, object]) -> list[str]:
         lines.append("allow_remote = true")
     lines.append("")
     return lines
+
+
+def _stored_rules(value: object) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value
+    if isinstance(value, dict):
+        path = value.get("path")
+        if isinstance(path, str) and path.strip():
+            return path
+    return None
+
+
+def _fold_address(value: str) -> str:
+    return unicodedata.normalize("NFC", value).casefold()
 
 
 def _address_set(value: object) -> frozenset[str]:

@@ -89,7 +89,7 @@ def parsed_record(
         size_bytes=size_bytes,
         in_reply_to=headers.get("in-reply-to"),
         references_hdr=headers.get("references"),
-        auth_results=headers.get("authentication-results"),
+        auth_results=header_block(parsed, "authentication-results"),
         date_trusted=date_trusted,
     )
 
@@ -161,6 +161,31 @@ def is_attachment(part: Message) -> bool:
     if disposition == "inline" and filename:
         return True
     return disposition is None and bool(filename)
+
+
+def header_block(message: EmailMessage, name: str) -> str | None:
+    """Return the raw header text.
+
+    ``get_all`` decodes RFC 2047 encoded words. Authentication-Results is not
+    an unstructured header, and that decoding can close a comment early.
+    """
+    wanted = name.lower()
+    parts: list[str] = []
+    for key, value in message.raw_items():
+        if key.lower() != wanted:
+            continue
+        text = _raw_header(value)
+        if text:
+            parts.append(text)
+    if not parts:
+        return None
+    return "\n".join(parts)
+
+
+def _raw_header(value: str) -> str:
+    # raw_items keeps a lone 8-bit byte as a surrogate. SQLite rejects that.
+    text = value.encode("ascii", "surrogateescape").decode("utf-8", "replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def header_text(message: EmailMessage, name: str) -> str | None:

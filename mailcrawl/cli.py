@@ -1,4 +1,4 @@
-"""JSON CLI for init, import, search, rules, stats, dry-run, backfill, embed, knn, jev, bench, review, and decide."""
+"""JSON CLI for init, import, search, rules, stats, dry-run, from-me, backfill, embed, knn, jev, bench, review, and decide."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from mailcrawl.configfile import (
     allow_override,
     inference_config,
     llm_review,
+    owner_addresses,
     inference_device,
     local_llm,
     rules_path,
@@ -31,6 +32,8 @@ from mailcrawl.configfile import (
 from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
+from mailcrawl.owner import recompute_from_me
+from mailcrawl.schema import USER_VERSION
 from mailcrawl.inference import enabled_points
 from mailcrawl.jev import jev_decide, open_client, score_grey_band
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
@@ -99,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
             return _review(args)
         if args.command == "decide":
             return _decide(args)
+        if args.command == "from-me":
+            return _from_me(args)
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
@@ -178,6 +183,10 @@ def _parser() -> argparse.ArgumentParser:
     counts = sub.add_parser("stats")
     counts.add_argument("--account", required=True)
     counts.add_argument("--taxonomy")
+
+    mine = sub.add_parser("from-me")
+    mine.add_argument("--account", required=True)
+    mine.add_argument("--apply", action="store_true")
 
     preview = sub.add_parser("dry-run")
     preview.add_argument("--account", required=True)
@@ -280,14 +289,17 @@ def _import(args: argparse.Namespace) -> int:
     try:
         result: ImportResult
         if args.import_command == "gog-export":
+            aliases = owner_addresses(cfg, alias)
             result = import_gog_export(
                 conn,
                 alias=alias,
                 export_dir=Path(args.dir),
                 taxonomy_path=catalogue,
                 account_email=email,
+                aliases=aliases,
             )
         elif args.import_command == "mbox":
+            aliases = owner_addresses(cfg, alias)
             result = import_mbox(
                 conn,
                 alias=alias,
@@ -296,6 +308,7 @@ def _import(args: argparse.Namespace) -> int:
                 labels_path=Path(args.labels) if args.labels else None,
                 taxonomy_path=catalogue,
                 account_email=email,
+                aliases=aliases,
             )
         else:
             raise UsageError("unknown import command")
@@ -390,8 +403,6 @@ def _rules(args: argparse.Namespace) -> int:
     if args.apply and not args.reevaluate:
         raise UsageError("apply needs reevaluate")
     rules_file = _rules_file(args)
-    if not rules_file.is_file():
-        raise UsageError("rules file is missing")
     config = load_rules(rules_file)
     now = _as_of(args)
     owners, domains, security_senders, test_recipients = _identity(args)
@@ -472,9 +483,40 @@ def _stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _from_me(args: argparse.Namespace) -> int:
+    alias = canonical_alias(args.account)
+    cfg = config_path(args.config)
+    aliases = owner_addresses(cfg, alias)
+    if not args.apply:
+        db_path = data_dir(args.home) / f"{alias}.db"
+        warning = _wal_warning(db_path)
+        conn = _open_dry(db_path)
+        try:
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version < USER_VERSION:
+                _emit(args, _with_warning({"account": alias, "error": "needs migration", "ok": False}, warning))
+                return 2
+            if version > USER_VERSION:
+                _emit(args, _with_warning({"account": alias, "error": "unsupported_schema", "ok": False}, warning))
+                return 3
+            report = recompute_from_me(conn, aliases, apply=False)
+        finally:
+            conn.close()
+        _emit(args, _with_warning({"account": alias, **report.public()}, warning))
+        return 0
+    conn = _account_db(args)
+    try:
+        report = recompute_from_me(conn, aliases, apply=True)
+    finally:
+        conn.close()
+    _emit(args, {"account": alias, **report.public()})
+    return 0
+
+
 def _dry_run(args: argparse.Namespace) -> int:
     now = _as_of(args)
-    config = None if not args.rules else load_rules(Path(args.rules))
+    rules_file = _rules_file(args)
+    config = load_rules(rules_file)
     export_path, sample, seed = _export_args(args)
     owners, domains, security_senders, test_recipients = _identity(args)
 
@@ -581,10 +623,15 @@ def _embedder(args: argparse.Namespace) -> str:
 
 def _rules_file(args: argparse.Namespace) -> Path:
     if args.rules:
-        return Path(args.rules)
+        chosen = Path(args.rules).expanduser()
+        if not chosen.is_file():
+            raise UsageError("rules file from --rules is missing")
+        return chosen
     configured = rules_path(config_path(args.config))
     if configured is None:
         raise UsageError("rules needs --rules or a rules path in config")
+    if not configured.is_file():
+        raise UsageError("rules file from config is missing")
     return configured
 
 
@@ -740,6 +787,30 @@ def _taxonomy_warnings(conn, alias: str, catalogue: Path | None) -> list[str]:
     if catalogue is None:
         return []
     return missing_labels(load_taxonomy(catalogue), alias, present_label_names(conn))
+
+
+def _wal_warning(path: Path) -> str | None:
+    wal = Path(f"{path}-wal")
+    if wal.is_file() and wal.stat().st_size > 0:
+        return "wal may be stale"
+    return None
+
+
+def _with_warning(doc: dict[str, object], warning: str | None) -> dict[str, object]:
+    if warning is None:
+        return doc
+    print(warning, file=sys.stderr)
+    return {**doc, "warning": warning}
+
+
+def _open_dry(path: Path) -> sqlite3.Connection:
+    # A read-only WAL connection still creates -wal and -shm. immutable does not.
+    if not path.is_file():
+        raise UsageError("account is not initialized")
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    return conn
 
 
 def _account_db(args: argparse.Namespace) -> sqlite3.Connection:

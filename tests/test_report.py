@@ -29,6 +29,12 @@ class StatsDryRunTest(unittest.TestCase):
         self.old_taxonomy = os.environ.get("MAILCRAWL_TAXONOMY")
         os.environ["HOME"] = str(self.home)
         os.environ.pop("MAILCRAWL_TAXONOMY", None)
+        cfg = self.home / ".config" / "mailcrawl"
+        cfg.mkdir(parents=True)
+        (cfg / "config.toml").write_text(
+            f'[rules]\npath = "{RULES}"\n',
+            encoding="utf-8",
+        )
         self.db = init_account(self.home, "vcl", "ada@example.com")
         conn = connect(self.db)
         try:

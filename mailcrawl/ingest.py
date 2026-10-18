@@ -24,6 +24,7 @@ from mailcrawl.mbox import PROVISIONAL, RAW_PATH, MboxSource, Refused
 from mailcrawl.paths import UsageError
 from mailcrawl.taxonomy import axis_of, generic_category, load_taxonomy
 from mailcrawl.store import index_message
+from mailcrawl.owner import classify_from_me
 from mailcrawl.takeout_labels import checked_label_map
 from mailcrawl.takeout_repair import repair_takeout
 from mailcrawl.textnorm import clean_body, parse_address, subject_norm
@@ -67,6 +68,7 @@ def import_gog_export(
     export_dir: Path,
     taxonomy_path: Path | None,
     account_email: str,
+    aliases: frozenset[str] = frozenset(),
 ) -> ImportResult:
     parsed, manifest_sha = _load_export(export_dir)
     account_id = _account_id(conn, alias)
@@ -80,6 +82,7 @@ def import_gog_export(
         run_json=parsed.raw_json,
         catalogue=load_catalogue_entries(taxonomy_path, alias),
         account_email=account_email,
+        aliases=aliases,
     )
 
 
@@ -92,6 +95,7 @@ def import_mbox(
     taxonomy_path: Path | None,
     account_email: str,
     label_map: dict[str, str] | None = None,
+    aliases: frozenset[str] = frozenset(),
 ) -> ImportResult:
     account_id = _account_id(conn, alias)
     mapping = checked_label_map(label_map)
@@ -125,8 +129,9 @@ def import_mbox(
         run_json=None,
         catalogue=load_catalogue_entries(taxonomy_path, alias),
         account_email=account_email,
+        aliases=aliases,
     )
-    report = repair_takeout(conn, label_map)
+    report = repair_takeout(conn, label_map, aliases=aliases)
     result.takeout_unmapped = report.unmapped
     conn.commit()
     return result
@@ -153,6 +158,7 @@ def _ingest(
     run_json: str | None,
     catalogue: dict[str, dict[str, str | None]],
     account_email: str,
+    aliases: frozenset[str] = frozenset(),
 ) -> ImportResult:
     version = mailcrawl_version()
     me = account_email.strip().lower()
@@ -178,6 +184,7 @@ def _ingest(
                 message=item,
                 version=version,
                 me=me,
+                aliases=aliases,
             )
             counts[outcome] += 1
             if outcome == "conflict":
@@ -359,6 +366,7 @@ def _upsert_message(
     message: MessageRec,
     version: str,
     me: str,
+    aliases: frozenset[str] = frozenset(),
 ) -> tuple[str, str | None]:
     """Return the outcome and, when a row already existed, its kept ``raw_sha256``.
 
@@ -368,7 +376,14 @@ def _upsert_message(
     """
     thread_pk = _ensure_thread(conn, account_id, message.gmail_thread_id)
     sender_id, _address = _ensure_sender(conn, account_id, message.from_hdr)
-    is_from_me = 1 if "SENT" in message.label_ids else 0
+    verdict = classify_from_me(
+        has_sent="SENT" in message.label_ids,
+        from_header=message.from_hdr,
+        auth_results=message.auth_results,
+        aliases=aliases,
+    )
+    is_from_me = int(verdict.mine)
+    from_me_origin = verdict.origin
     prov = provenance_hash(alias, message.gmail_message_id, message.raw_sha256, version)
     raw_body = message.body_text
     cleaned = clean_body(raw_body)
@@ -378,9 +393,9 @@ def _upsert_message(
           account_id, gmail_message_id, thread_pk, gmail_history_id, internal_date,
           rfc822_message_id, in_reply_to, references_hdr, sender_id,
           from_hdr, to_hdr, cc_hdr, bcc_hdr, reply_to_hdr,
-          subject, snippet, body_text_raw, body_text, size_bytes, is_from_me, date_trusted,
+          subject, snippet, body_text_raw, body_text, size_bytes, is_from_me, from_me_origin, date_trusted,
           raw_path, raw_sha256, raw_json, auth_results, provenance_hash, imported_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(account_id, gmail_message_id) DO NOTHING
         RETURNING msg_pk
         """,
@@ -405,6 +420,7 @@ def _upsert_message(
             cleaned,
             message.size_bytes,
             is_from_me,
+            from_me_origin,
             message.date_trusted,
             message.raw_path,
             message.raw_sha256,
@@ -441,19 +457,19 @@ def _upsert_message(
         conn.execute(
             """
             UPDATE messages
-            SET is_from_me = ?, internal_date = ?, date_trusted = ?, raw_path = ?
+            SET is_from_me = ?, from_me_origin = ?, internal_date = ?, date_trusted = ?, raw_path = ?
             WHERE msg_pk = ?
             """,
-            (is_from_me, message.internal_date, message.date_trusted, message.raw_path, msg_pk),
+            (is_from_me, from_me_origin, message.internal_date, message.date_trusted, message.raw_path, msg_pk),
         )
     else:
         conn.execute(
             """
             UPDATE messages
-            SET is_from_me = ?, internal_date = ?, date_trusted = ?
+            SET is_from_me = ?, from_me_origin = ?, internal_date = ?, date_trusted = ?
             WHERE msg_pk = ?
             """,
-            (is_from_me, message.internal_date, message.date_trusted, msg_pk),
+            (is_from_me, from_me_origin, message.internal_date, message.date_trusted, msg_pk),
         )
     _replace_labels(conn, account_id, msg_pk, message, source)
     current = str(existing["gmail_thread_id"])

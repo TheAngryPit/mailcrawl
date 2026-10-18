@@ -3,6 +3,7 @@ synthetic = true
 
 [accounts.thehive]
 email = "ada@example.com"
+owner_addresses = ["ada.other@example.com"]
 owners = ["ada@example.com", "ada.other@example.com"]
 domains = ["example.com"]
 security_senders = ["alerts@example.com"]
