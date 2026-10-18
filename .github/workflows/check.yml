@@ -86,7 +86,10 @@ jobs:
           else
             uid="$(id -u)"
             gid="$(id -g)"
+            home="$HOME"
+            user="$(id -un)"
             sudo --preserve-env=PATH,REPO unshare --net \
               setpriv --reuid="$uid" --regid="$gid" --init-groups \
+              env HOME="$home" USER="$user" \
               bash "$REPO/scripts/e2e-journey.sh"
           fi
