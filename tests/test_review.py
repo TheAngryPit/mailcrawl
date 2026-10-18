@@ -1620,6 +1620,40 @@ class TimeClosureReviewTest(unittest.TestCase):
             self.assertEqual(again["decisions"][0]["changed"], False)
 
     def test_unparseable_evidence_stays_in_the_queue(self) -> None:
+        closure = {"lane": "paper_trail", "state": "reference"}
+        shapes = (
+            ("noise-thread", "needs_review", "imbox", "not-json"),
+            (
+                "object-thread",
+                "reference",
+                "paper_trail",
+                json.dumps({"time_closure": closure, "type": "x"}, sort_keys=True, separators=(",", ":")),
+            ),
+            (
+                "string-thread",
+                "reference",
+                "paper_trail",
+                json.dumps(["a", {"time_closure": closure}], sort_keys=True, separators=(",", ":")),
+            ),
+            (
+                "number-thread",
+                "reference",
+                "paper_trail",
+                json.dumps([1, {"time_closure": closure}], sort_keys=True, separators=(",", ":")),
+            ),
+            (
+                "null-thread",
+                "reference",
+                "paper_trail",
+                json.dumps([None, {"time_closure": closure}], sort_keys=True, separators=(",", ":")),
+            ),
+            (
+                "keep-thread",
+                "reference",
+                "paper_trail",
+                json.dumps([{"time_closure": closure}], sort_keys=True, separators=(",", ":")),
+            ),
+        )
         with TemporaryDirectory() as tmp:
             home = Path(tmp)
             config = _closure_config(home, False)
@@ -1627,14 +1661,48 @@ class TimeClosureReviewTest(unittest.TestCase):
             _seed_closure(db)
             conn = connect(db)
             try:
-                _install_harness(conn, "noise-thread", "needs_review", "imbox", "not-json")
+                account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+                for thread_id, state, lane, evidence in shapes:
+                    if thread_id != "noise-thread":
+                        _thread(
+                            conn,
+                            account,
+                            thread_id,
+                            _AS_OF - 86400,
+                            "reply",
+                            ((0, "Cam Fixture <cam@example.com>"),),
+                        )
+                    _install_harness(conn, thread_id, state, lane, evidence)
                 conn.commit()
             finally:
                 conn.close()
-            queued = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
-            item = {row["thread_id"]: row for row in queued["items"]}["noise-thread"]
-            self.assertEqual(item["state"], "needs_review")
-            self.assertEqual(queued["ok"], True)
+            for extra in ((), ("--origin", "model")):
+                queued = _json(
+                    home,
+                    config,
+                    "review",
+                    "queue",
+                    "--account",
+                    "personal",
+                    "--now",
+                    str(_AS_OF),
+                    *extra,
+                )
+                present = {row["thread_id"]: row for row in queued["items"]}
+                for thread_id, _state, _lane, _evidence in shapes:
+                    if thread_id == "keep-thread":
+                        self.assertNotIn(thread_id, present)
+                        continue
+                    self.assertEqual(present[thread_id]["state"], "needs_review", thread_id)
+            config.write_text(
+                config.read_text(encoding="utf-8") + "[review]\nllm_review = true\n",
+                encoding="utf-8",
+            )
+            enabled = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            enabled_ids = {row["thread_id"] for row in enabled["items"]}
+            self.assertIn("object-thread", enabled_ids)
+            self.assertIn("string-thread", enabled_ids)
+            self.assertNotIn("keep-thread", enabled_ids)
 
     def test_queue_and_keep_agree_on_reason_and_revive_shapes(self) -> None:
         shapes = (
