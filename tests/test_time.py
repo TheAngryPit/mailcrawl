@@ -17,7 +17,7 @@ from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import invoke
 from mailcrawl.jev import MODEL_ID, FakeJev, jev_decide
 from mailcrawl.paths import UsageError
-from mailcrawl.review import undo_decisions
+from mailcrawl.review import apply_agent_decision, parse_agent_decision, undo_decisions
 from mailcrawl.contract import CONTRACT_V0
 from mailcrawl.ingest import import_gog_export, import_mbox
 from mailcrawl.mbox import gmail_hex
@@ -333,6 +333,80 @@ class TimeFactsTest(unittest.TestCase):
                 "SELECT next_state FROM decisions WHERE thread_pk = 2"
             ).fetchone()
             self.assertIsNone(copied)
+
+    def test_knn_does_not_copy_a_confirmed_keep(self) -> None:
+        if __import__("importlib").util.find_spec("sqlite_vec") is None:
+            self.skipTest("sqlite-vec is not installed")
+        young = _stamp(2026, 10, 15)
+        with self._db() as conn:
+            self._message(conn, 1, "other@example.com", 0, _stamp(2025, 2, 10), "Old", "same words")
+            self._message(conn, 2, "other@example.com", 0, young, "Young", "same words")
+            self._message(conn, 3, "other@example.com", 0, young, "Young", "same words")
+            self._held_closure(conn, 1)
+            kept, changed = apply_agent_decision(
+                conn,
+                parse_agent_decision(
+                    {"action": "keep", "source_detail": "model-b", "thread_id": "thread-1"}
+                ),
+                AS_OF,
+            )
+            self.assertTrue(changed)
+            self.assertEqual(
+                json.loads(kept["evidence"]),
+                [{"time_closure": {"lane": "paper_trail", "state": "reference"}}],
+            )
+            flags = {"embeddings": True}
+            invoke("embeddings", lambda: embed_threads(conn, FakeEmbedder(), flags), flags)
+            quiet = knn_decide(conn, 2, FakeEmbedder(), flags, AS_OF, review=False)
+            loud = knn_decide(conn, 3, FakeEmbedder(), flags, AS_OF, review=True)
+            self.assertIsNone(quiet)
+            self.assertIsNone(loud)
+            copied = conn.execute(
+                "SELECT thread_pk, next_state, lane FROM decisions WHERE thread_pk IN (2, 3)"
+            ).fetchall()
+            self.assertEqual(list(copied), [])
+
+    def test_knn_copies_a_revived_neighbour_and_skips_a_keep(self) -> None:
+        if __import__("importlib").util.find_spec("sqlite_vec") is None:
+            self.skipTest("sqlite-vec is not installed")
+        young = _stamp(2026, 10, 15)
+        with self._db() as conn:
+            self._message(conn, 1, "other@example.com", 0, _stamp(2025, 2, 10), "Revived", "same words")
+            self._message(conn, 2, "other@example.com", 0, young, "Young", "same words")
+            self._message(conn, 4, "other@example.com", 0, young, "Young", "same words")
+            self._message(conn, 5, "other@example.com", 0, _stamp(2025, 2, 10), "Kept", "same words")
+            self._held_closure(conn, 1)
+            self._held_closure(conn, 5)
+            apply_agent_decision(
+                conn,
+                parse_agent_decision(
+                    {
+                        "action": "revive",
+                        "kind": "forgotten",
+                        "reason": "still owed",
+                        "source_detail": "model-c",
+                        "state": "reply",
+                        "thread_id": "thread-1",
+                    }
+                ),
+                AS_OF,
+            )
+            apply_agent_decision(
+                conn,
+                parse_agent_decision(
+                    {"action": "keep", "source_detail": "model-b", "thread_id": "thread-5"}
+                ),
+                AS_OF,
+            )
+            flags = {"embeddings": True}
+            invoke("embeddings", lambda: embed_threads(conn, FakeEmbedder(), flags), flags)
+            quiet = knn_decide(conn, 2, FakeEmbedder(), flags, AS_OF, review=False)
+            loud = knn_decide(conn, 4, FakeEmbedder(), flags, AS_OF, review=True)
+            for stored in (quiet, loud):
+                self.assertEqual(stored["origin"], "knn")
+                self.assertEqual(stored["next_state"], "reply")
+                self.assertEqual(stored["lane"], "imbox")
+                self.assertNotIn("time_closure", stored["evidence"])
 
     def test_knn_does_not_copy_a_reply_onto_an_old_thread(self) -> None:
         if __import__("importlib").util.find_spec("sqlite_vec") is None:
@@ -1359,6 +1433,26 @@ class TimeFactsTest(unittest.TestCase):
                 f"sha-{thread_pk}-{when}",
                 f"prov-{thread_pk}-{when}",
             ),
+        )
+        conn.commit()
+
+    def _held_closure(self, conn, thread_pk: int) -> None:
+        mark = json.dumps(
+            [
+                {
+                    "time_closure": {"lane": "paper_trail", "state": "reference"},
+                    "time_reason": ["last activity is old"],
+                }
+            ]
+        )
+        conn.execute(
+            """
+            INSERT INTO decisions(
+              thread_pk, next_state, lane, source, origin, source_detail,
+              rule_id, rules_version, evidence, created_at
+            ) VALUES (?, 'needs_review', 'imbox', 'rule', 'rule', '5', '5', 'rules-v4', ?, 1)
+            """,
+            (thread_pk, mark),
         )
         conn.commit()
 
