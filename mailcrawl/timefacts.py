@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import calendar
+import json
 import re
 import sqlite3
 from dataclasses import dataclass, replace
@@ -256,6 +257,18 @@ def _time_closes(draft: DecisionDraft) -> bool:
         and draft.lane == "paper_trail"
         and any(reason in _CLOSURE_REASONS for reason in reasons)
     )
+
+
+def carries_time_closure(evidence: object) -> bool:
+    if not isinstance(evidence, str) or not evidence:
+        return False
+    try:
+        parsed = json.loads(evidence)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(parsed, list):
+        return False
+    return any(isinstance(item, dict) and isinstance(item.get("time_closure"), dict) for item in parsed)
 
 
 def _stamp_closure(draft: DecisionDraft) -> DecisionDraft:

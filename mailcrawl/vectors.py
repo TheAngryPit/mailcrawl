@@ -25,7 +25,13 @@ from mailcrawl.decisions import (
 from mailcrawl.inference import BoundaryError, enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.threads import image_gate, opened_limit_reason, pillow_limits
-from mailcrawl.timefacts import TimePolicy, apply_time, present_time_closure, thread_time_facts
+from mailcrawl.timefacts import (
+    TimePolicy,
+    apply_time,
+    carries_time_closure,
+    present_time_closure,
+    thread_time_facts,
+)
 
 NATIVE_DIM = 768
 CLASSIFICATION_PREFIX = "task: classification | query: "
@@ -632,7 +638,7 @@ def knn_decide(
         if other_pk == thread_pk:
             continue
         decision = current_decision(conn, other_pk)
-        if decision is None:
+        if decision is None or carries_time_closure(decision["evidence"]):
             continue
         ranked.append((distance, decision))
     if not ranked:
