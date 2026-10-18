@@ -81,4 +81,8 @@ jobs:
           ALL_PROXY: http://127.0.0.1:9
         run: |
           unset TYPESAFE_API_KEY JEV_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN
-          bash "$REPO/scripts/e2e-journey.sh"
+          if unshare -rn true; then
+            unshare -rn bash "$REPO/scripts/e2e-journey.sh"
+          else
+            sudo --preserve-env=PATH,REPO unshare --net bash "$REPO/scripts/e2e-journey.sh"
+          fi

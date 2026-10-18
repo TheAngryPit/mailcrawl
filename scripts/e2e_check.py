@@ -222,6 +222,55 @@ def compare(actual: object, expected: object) -> str:
     return "\n".join(lines) + "\n"
 
 
+_INJECT_ID = "<e2e-header-injection@example.com>"
+_TRAVERSAL_ID = "<e2e-traversal@example.com>"
+_UNDO_THREAD = "e2e-en-old-ask"
+_ESCAPE_NAMES = (
+    "../../tmp/mailcrawl-e2e-escape.png",
+    "/tmp/mailcrawl-e2e-absolute.png",
+)
+
+
+def journey_guards(actual: object) -> list[str]:
+    if not isinstance(actual, dict):
+        return ["document expected an object"]
+    lines: list[str] = []
+    for section in ("final", "revived"):
+        mapped = _thread_map(actual.get(section))
+        if mapped is None:
+            lines.append(f"{section} expected threads actual {_show(actual.get(section))}")
+            continue
+        injection = [
+            row for row in mapped.values() if row.get("message_id") == _INJECT_ID
+        ]
+        if not injection:
+            lines.append(f"thread e2e-header-injection: {section} expected present actual absent")
+        for row in injection:
+            if row.get("bcc") is not None:
+                lines.append(
+                    f"thread {row['thread_id']}: {section}.bcc "
+                    f"expected null actual {_show(row.get('bcc'))}"
+                )
+        traversal = [
+            row for row in mapped.values() if row.get("message_id") == _TRAVERSAL_ID
+        ]
+        if not traversal:
+            lines.append(f"thread e2e-traversal: {section} expected present actual absent")
+        for row in traversal:
+            names = row.get("attachments")
+            for wanted in _ESCAPE_NAMES:
+                if not isinstance(names, list) or wanted not in names:
+                    lines.append(
+                        f"thread {row['thread_id']}: {section}.attachments "
+                        f"expected {_show(wanted)} actual {_show(names)}"
+                    )
+    for key in ("queue_off_after_undo", "queue_on_after_undo"):
+        found = _id_list(actual.get(key))
+        if found is None or _UNDO_THREAD not in found:
+            lines.append(f"thread {_UNDO_THREAD}: {key} expected present actual absent")
+    return lines
+
+
 def assemble(
     db: Path,
     queue_off: Path,
@@ -230,6 +279,8 @@ def assemble(
     export_path: Path,
     native_import: Path,
     mbox_import: Path,
+    queue_off_after_undo: Path,
+    queue_on_after_undo: Path,
 ) -> dict[str, object]:
     native = json.loads(native_import.read_text(encoding="utf-8"))
     mbox = json.loads(mbox_import.read_text(encoding="utf-8"))
@@ -242,7 +293,9 @@ def assemble(
             "native": {"n_new": native.get("n_new"), "n_refused": native.get("n_refused")},
         },
         "queue_off": queue_ids(queue_off),
+        "queue_off_after_undo": queue_ids(queue_off_after_undo),
         "queue_on": queue_ids(queue_on),
+        "queue_on_after_undo": queue_ids(queue_on_after_undo),
         "revived": revived,
     }
 
@@ -253,6 +306,8 @@ def main() -> None:
     parser.add_argument("--revived-db", required=True)
     parser.add_argument("--queue-off", required=True)
     parser.add_argument("--queue-on", required=True)
+    parser.add_argument("--queue-off-after-undo", required=True)
+    parser.add_argument("--queue-on-after-undo", required=True)
     parser.add_argument("--export", required=True)
     parser.add_argument("--native-import", required=True)
     parser.add_argument("--mbox-import", required=True)
@@ -267,7 +322,13 @@ def main() -> None:
         Path(args.export),
         Path(args.native_import),
         Path(args.mbox_import),
+        Path(args.queue_off_after_undo),
+        Path(args.queue_on_after_undo),
     )
+    guarded = journey_guards(actual)
+    if guarded:
+        print("\n".join(guarded))
+        raise SystemExit(1)
     expected_path = Path(args.expected)
     if args.record:
         expected_path.write_text(canon(actual), encoding="utf-8")

@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import email
 import importlib.util
 import sys
 import tempfile
 import unittest
+from email import policy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,9 +65,31 @@ class CorpusTest(unittest.TestCase):
             for host in ("@example.com", "@example.org", "@example.net"):
                 self.assertIn(host, blob)
             self.assertNotIn("@gmail.com", blob)
-            self.assertIn(b"../../tmp/mailcrawl-e2e-escape", left)
+            self.assertIn(CORPUS.INJECT_SUBJECT.encode("ascii"), left)
+            self.assertNotIn(b"Bcc: ", left)
+            self.assertIn(CORPUS.REL_ESCAPE.encode("utf-8"), left)
+            self.assertIn(CORPUS.ABS_ESCAPE.encode("utf-8"), left)
             native = Path(first) / "native" / "gmail" / "acct_personal" / "messages" / "index.jsonl"
             self.assertNotIn("..", native.read_text(encoding="utf-8"))
+
+    def test_header_injection_stays_inside_the_subject(self) -> None:
+        spec = next(row for row in CORPUS.specs() if row.fixture_id == "e2e-header-injection")
+        message = email.message_from_bytes(CORPUS.render_bytes(spec), policy=policy.default)
+        self.assertIsNone(message.get("bcc"))
+        self.assertEqual(message.get("subject"), "hello\r\nBcc: hidden@example.com")
+
+    def test_traversal_filenames_are_png_attachments(self) -> None:
+        spec = next(row for row in CORPUS.specs() if row.fixture_id == "e2e-traversal")
+        message = email.message_from_bytes(CORPUS.render_bytes(spec), policy=policy.default)
+        names = []
+        for part in message.walk():
+            filename = part.get_filename()
+            if not filename:
+                continue
+            names.append(filename)
+            self.assertEqual(part.get_content_type(), "image/png")
+            self.assertEqual(part.get_content_disposition(), "attachment")
+        self.assertEqual(names, [CORPUS.REL_ESCAPE, CORPUS.ABS_ESCAPE])
 
 
 def _thread(thread_id: str, **overrides: object) -> dict[str, object]:
@@ -156,6 +180,35 @@ class CompareTest(unittest.TestCase):
         self.assertEqual(
             CHECK.compare(actual, expected),
             "thread e2e-en-old-ask: queue_off expected present actual absent\n",
+        )
+
+    def test_journey_guards_name_bcc_and_the_undo_queue(self) -> None:
+        kept = _thread(
+            "e2e-traversal",
+            message_id="<e2e-traversal@example.com>",
+            attachments=[
+                "../../tmp/mailcrawl-e2e-escape.png",
+                "/tmp/mailcrawl-e2e-absolute.png",
+            ],
+        )
+        injected = _thread(
+            "e2e-header-injection",
+            message_id="<e2e-header-injection@example.com>",
+            bcc="hidden@example.com",
+        )
+        document = {
+            "final": {"threads": [injected, kept]},
+            "revived": {"threads": [injected, kept]},
+            "queue_off_after_undo": ["e2e-en-newsletter"],
+            "queue_on_after_undo": ["e2e-en-old-ask"],
+        }
+        self.assertEqual(
+            CHECK.journey_guards(document),
+            [
+                'thread e2e-header-injection: final.bcc expected null actual "hidden@example.com"',
+                'thread e2e-header-injection: revived.bcc expected null actual "hidden@example.com"',
+                "thread e2e-en-old-ask: queue_off_after_undo expected present actual absent",
+            ],
         )
 
 

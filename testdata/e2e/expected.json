@@ -187,7 +187,7 @@
         "thread_id": "25bf6196bd1000a"
       },
       {
-        "bcc": "hidden@example.com",
+        "bcc": null,
         "from_me": 0,
         "from_me_origin": null,
         "kind": "",
@@ -233,7 +233,8 @@
       },
       {
         "attachments": [
-          "../../tmp/mailcrawl-e2e-escape"
+          "../../tmp/mailcrawl-e2e-escape.png",
+          "/tmp/mailcrawl-e2e-absolute.png"
         ],
         "bcc": null,
         "from_me": 0,
@@ -401,7 +402,7 @@
         "thread_id": "e2e-from-me"
       },
       {
-        "bcc": "hidden@example.com",
+        "bcc": null,
         "from_me": 0,
         "from_me_origin": null,
         "kind": "",
@@ -507,7 +508,8 @@
       },
       {
         "attachments": [
-          "../../tmp/mailcrawl-e2e-escape"
+          "../../tmp/mailcrawl-e2e-escape.png",
+          "/tmp/mailcrawl-e2e-absolute.png"
         ],
         "bcc": null,
         "from_me": 0,
@@ -549,6 +551,17 @@
     "e2e-prompt-injection",
     "e2e-pt-question"
   ],
+  "queue_off_after_undo": [
+    "25bf6196bd10002",
+    "25bf6196bd10004",
+    "25bf6196bd10005",
+    "25bf6196bd10006",
+    "e2e-ar-rtl",
+    "e2e-de-billing",
+    "e2e-en-old-ask",
+    "e2e-ja-notice",
+    "e2e-pt-question"
+  ],
   "queue_on": [
     "25bf6196bd10002",
     "25bf6196bd10004",
@@ -561,6 +574,17 @@
     "e2e-en-old-ask",
     "e2e-ja-notice",
     "e2e-prompt-injection",
+    "e2e-pt-question"
+  ],
+  "queue_on_after_undo": [
+    "25bf6196bd10002",
+    "25bf6196bd10004",
+    "25bf6196bd10005",
+    "25bf6196bd10006",
+    "e2e-ar-rtl",
+    "e2e-de-billing",
+    "e2e-en-old-ask",
+    "e2e-ja-notice",
     "e2e-pt-question"
   ],
   "revived": {
@@ -717,7 +741,7 @@
         "thread_id": "25bf6196bd1000a"
       },
       {
-        "bcc": "hidden@example.com",
+        "bcc": null,
         "from_me": 0,
         "from_me_origin": null,
         "kind": "",
@@ -763,7 +787,8 @@
       },
       {
         "attachments": [
-          "../../tmp/mailcrawl-e2e-escape"
+          "../../tmp/mailcrawl-e2e-escape.png",
+          "/tmp/mailcrawl-e2e-absolute.png"
         ],
         "bcc": null,
         "from_me": 0,
@@ -931,7 +956,7 @@
         "thread_id": "e2e-from-me"
       },
       {
-        "bcc": "hidden@example.com",
+        "bcc": null,
         "from_me": 0,
         "from_me_origin": null,
         "kind": "",
@@ -1037,7 +1062,8 @@
       },
       {
         "attachments": [
-          "../../tmp/mailcrawl-e2e-escape"
+          "../../tmp/mailcrawl-e2e-escape.png",
+          "/tmp/mailcrawl-e2e-absolute.png"
         ],
         "bcc": null,
         "from_me": 0,

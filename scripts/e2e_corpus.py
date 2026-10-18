@@ -10,6 +10,7 @@ ids, never message text.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime
 import hashlib
 import json
@@ -22,7 +23,12 @@ NOW = 1780272000
 ACCOUNT = "personal"
 OWNER = "ada@example.com"
 ALIAS = "ada.alias@example.net"
-ESCAPE_NAME = "../../tmp/mailcrawl-e2e-escape"
+REL_ESCAPE = "../../tmp/mailcrawl-e2e-escape.png"
+ABS_ESCAPE = "/tmp/mailcrawl-e2e-absolute.png"
+INJECT_SUBJECT = "=?utf-8?q?hello=0D=0ABcc=3A_hidden=40example.com?="
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 OVERSIZE = 256 * 1024
 
 _UTC = datetime.timezone.utc
@@ -53,7 +59,7 @@ class Spec:
     auth: str | None = None
     harness: HarnessAct | None = None
     native: bool = True
-    attachment_name: str | None = None
+    attachment_names: tuple[str, ...] = ()
 
 
 def _when(year: int, month: int, day: int) -> datetime.datetime:
@@ -261,7 +267,7 @@ def specs() -> tuple[Spec, ...]:
             _when(2026, 4, 4),
             ("Inbox",),
             ("INBOX",),
-            attachment_name=ESCAPE_NAME,
+            attachment_names=(REL_ESCAPE, ABS_ESCAPE),
         ),
         Spec(
             "e2e-html-script",
@@ -334,8 +340,7 @@ def render_bytes(spec: Spec) -> bytes:
         lines = [
             f"From: {spec.from_name} <{spec.from_addr}>",
             f"To: Archive <{spec.to_addr}>",
-            "Subject: hello",
-            "Bcc: hidden@example.com",
+            f"Subject: {INJECT_SUBJECT}",
             f"Date: {_stamp(spec)}",
             f"Message-ID: <{spec.fixture_id}@example.com>",
             "MIME-Version: 1.0",
@@ -358,19 +363,24 @@ def render_bytes(spec: Spec) -> bytes:
         payload = "--not-the-boundary\r\n" + body
     elif spec.kind == "attachment":
         headers.append('Content-Type: multipart/mixed; boundary="e2e"')
-        name = spec.attachment_name or "note.txt"
-        payload = (
+        encoded = base64.b64encode(_PNG).decode("ascii")
+        parts = [
             "--e2e\r\n"
             'Content-Type: text/plain; charset="utf-8"\r\n'
             "\r\n"
             f"{body}\r\n"
-            "--e2e\r\n"
-            "Content-Type: text/plain\r\n"
-            f'Content-Disposition: attachment; filename="{name}"\r\n'
-            "\r\n"
-            "not-an-image\r\n"
-            "--e2e--\r\n"
-        )
+        ]
+        for name in spec.attachment_names:
+            parts.append(
+                "--e2e\r\n"
+                "Content-Type: image/png\r\n"
+                "Content-Transfer-Encoding: base64\r\n"
+                f'Content-Disposition: attachment; filename="{name}"\r\n'
+                "\r\n"
+                f"{encoded}\r\n"
+            )
+        parts.append("--e2e--\r\n")
+        payload = "".join(parts)
     else:
         headers.append('Content-Type: text/plain; charset="utf-8"')
         payload = body

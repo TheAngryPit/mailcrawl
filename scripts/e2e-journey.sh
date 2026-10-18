@@ -16,6 +16,15 @@ if [[ -z "${REPO:-}" ]]; then
   exit 1
 fi
 
+python3 - << 'PY'
+import socket
+try:
+    socket.create_connection(("1.1.1.1", 443), 3)
+except OSError:
+    raise SystemExit(0)
+raise SystemExit("journey network is reachable")
+PY
+
 location="$(python3 -c 'import mailcrawl; print(mailcrawl.__file__)')"
 printf '%s\n' "$location"
 case "$location" in
@@ -79,10 +88,30 @@ PY
 
 mc import-native "$ON" import gog-export --dir "$CORPUS/native" --account "$ACCOUNT"
 mc import-mbox "$ON" import mbox "$CORPUS/corpus.mbox" --account "$ACCOUNT"
-if [[ -e /tmp/mailcrawl-e2e-escape ]]; then
-  echo "attachment name escaped the archive" >&2
-  exit 1
-fi
+python3 - "$ARCHIVE" << 'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+outside = (
+    Path("/tmp/mailcrawl-e2e-escape"),
+    Path("/tmp/mailcrawl-e2e-escape.png"),
+    Path("/tmp/mailcrawl-e2e-absolute.png"),
+)
+escaped = [str(path) for path in outside if path.exists()]
+for path in root.rglob("*"):
+    if "mailcrawl-e2e-escape" in path.name or "mailcrawl-e2e-absolute" in path.name:
+        escaped.append(str(path))
+images = [path for path in (root / "images").glob("*") if path.is_file()]
+if not images:
+    raise SystemExit("image attachment was not stored under the archive")
+for path in images:
+    name = path.name
+    if len(name) != 64 or any(char not in "0123456789abcdef" for char in name):
+        escaped.append(str(path))
+if escaped:
+    raise SystemExit("attachment name escaped the archive: " + ", ".join(escaped))
+PY
 mc from-me "$ON" from-me --account "$ACCOUNT" --apply
 mc stats "$ON" stats --account "$ACCOUNT"
 mc rules "$ON" rules --account "$ACCOUNT" --now "$NOW"
@@ -100,6 +129,8 @@ mc hold "$OFF" rules --account "$ACCOUNT" --reevaluate --apply --csv "$EVIDENCE/
 mc knn-again "$ON" knn --account "$ACCOUNT" --embedder fake --now "$NOW"
 cp "$ARCHIVE/${ACCOUNT}.db" "$EVIDENCE/revived.db"
 mc undo "$ON" review undo --account "$ACCOUNT" --thread e2e-en-old-ask --now "$NOW"
+mc queue-off-after "$OFF" review queue --account "$ACCOUNT" --now "$NOW"
+mc queue-on-after "$ON" review queue --account "$ACCOUNT" --now "$NOW"
 mc export "$ON" dry-run --account "$ACCOUNT" --export-decisions "$EVIDENCE/export.csv" --now "$NOW"
 
 record=()
@@ -111,6 +142,8 @@ python3 "$REPO/scripts/e2e_check.py" \
   --revived-db "$EVIDENCE/revived.db" \
   --queue-off "$EVIDENCE/queue-off.json" \
   --queue-on "$EVIDENCE/queue-on.json" \
+  --queue-off-after-undo "$EVIDENCE/queue-off-after.json" \
+  --queue-on-after-undo "$EVIDENCE/queue-on-after.json" \
   --export "$EVIDENCE/export.csv" \
   --native-import "$EVIDENCE/import-native.json" \
   --mbox-import "$EVIDENCE/import-mbox.json" \
