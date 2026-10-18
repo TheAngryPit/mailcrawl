@@ -1,20 +1,24 @@
 """Harness queue and decide stay off the model path unless review run is configured."""
 
+import calendar
+import csv
 import json
 import os
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 from mailcrawl.cli import main
 from mailcrawl.configfile import allow_override, local_llm, write_account
 from mailcrawl.paths import UsageError
 from mailcrawl.review import ReviewScope, parse_agent_decision, review_queue, review_run
-from mailcrawl.store import connect
+from mailcrawl.rules import bundled_rules_path
+from mailcrawl.store import connect, init_account
 
 
 class ReviewHarnessTest(unittest.TestCase):
@@ -1180,6 +1184,405 @@ def _decision_rows(path: Path) -> list[tuple[object, ...]]:
         ]
     finally:
         conn.close()
+
+
+class TimeClosureReviewTest(unittest.TestCase):
+    def test_a_disabled_step_holds_a_closure_for_keep_and_revive(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = _closure_config(home, False)
+            db = _closure_db(home)
+            _seed_closure(db)
+            with _no_model():
+                held = _json(
+                    home,
+                    config,
+                    "rules",
+                    "--account",
+                    "personal",
+                    "--rules",
+                    str(bundled_rules_path()),
+                    "--now",
+                    str(_AS_OF),
+                    "--reevaluate",
+                    "--apply",
+                    "--csv",
+                    str(home / "plan.csv"),
+                )
+                queued = _json(
+                    home,
+                    config,
+                    "review",
+                    "queue",
+                    "--account",
+                    "personal",
+                    "--now",
+                    str(_AS_OF),
+                )
+            self.assertEqual(held["changed"], 2)
+            self.assertEqual(_stored(db, "old-thread"), ("rule", "needs_review", "time"))
+            self.assertEqual(_stored(db, "young-thread"), ("rule", "waiting", "time"))
+            self.assertEqual(_lane(db, "old-thread"), "imbox")
+            by_id = {item["thread_id"]: item for item in queued["items"]}
+            self.assertIn("old-thread", by_id)
+            self.assertNotIn("young-thread", by_id)
+            closure = by_id["old-thread"]["time_closure"]
+            self.assertEqual(closure["reason"], "time_closure")
+            self.assertEqual(closure["subject"], "synthetic subject")
+            self.assertEqual(closure["participants"], ["Bao Fixture", "Ada Fixture"])
+            self.assertEqual(closure["previous_state"], "reply")
+            self.assertEqual(closure["previous_rule"], "5")
+            self.assertEqual(closure["state"], "resolved")
+            self.assertEqual(closure["lane"], "paper_trail")
+            self.assertEqual(closure["last_human"], "owner")
+            self.assertEqual(closure["excerpt"], " ".join(["word"] * 32) + " ")
+            self.assertLess(len(closure["excerpt"]), len(by_id["old-thread"]["untrusted"]["text"]))
+            self.assertNotIn("@", json.dumps(closure))
+            kept = _decide(home, config, _keep("old-thread"))
+            self.assertEqual(kept["decisions"][0]["changed"], True)
+            self.assertEqual(kept["decisions"][0]["origin"], "model")
+            self.assertEqual(kept["decisions"][0]["state"], "resolved")
+            self.assertEqual(kept["decisions"][0]["lane"], "paper_trail")
+            before_keep = _decision_rows(db)
+            again = _decide(home, config, _keep("old-thread"))
+            self.assertEqual(again["decisions"][0]["changed"], False)
+            self.assertEqual(_decision_rows(db), before_keep)
+            undone = _json(
+                home,
+                config,
+                "review",
+                "undo",
+                "--account",
+                "personal",
+                "--thread",
+                "old-thread",
+                "--now",
+                str(_AS_OF),
+            )
+            self.assertEqual(undone["decisions"][0]["state"], "needs_review")
+            self.assertEqual(undone["decisions"][0]["source_detail"], "time")
+            revived = _decide(
+                home,
+                config,
+                {
+                    "action": "revive",
+                    "kind": "forgotten",
+                    "reason": "still owed",
+                    "source_detail": "fixture-model",
+                    "state": "reply",
+                    "thread_id": "old-thread",
+                },
+            )
+            self.assertEqual(revived["decisions"][0]["kind"], "forgotten")
+            self.assertEqual(revived["decisions"][0]["state"], "reply")
+            self.assertEqual(revived["decisions"][0]["lane"], "imbox")
+            self.assertEqual(revived["decisions"][0]["origin"], "model")
+            counted = _json(home, config, "stats", "--account", "personal")
+            self.assertEqual(counted["revive_forgotten"], 1)
+            self.assertEqual(counted["revive_opportunity"], 0)
+            csv_path = home / "again.csv"
+            _json(
+                home,
+                config,
+                "rules",
+                "--account",
+                "personal",
+                "--rules",
+                str(bundled_rules_path()),
+                "--now",
+                str(_AS_OF),
+                "--reevaluate",
+                "--csv",
+                str(csv_path),
+            )
+            with csv_path.open(encoding="utf-8", newline="") as handle:
+                plan = {row["gmail_thread_id"]: row for row in csv.DictReader(handle)}
+            self.assertEqual(plan["old-thread"]["kind"], "forgotten")
+            self.assertEqual(plan["old-thread"]["state"], "reply")
+            _json(
+                home,
+                config,
+                "review",
+                "undo",
+                "--account",
+                "personal",
+                "--thread",
+                "old-thread",
+                "--now",
+                str(_AS_OF),
+            )
+            self.assertEqual(_stored(db, "old-thread"), ("rule", "needs_review", "time"))
+            opportunity = _decide(
+                home,
+                config,
+                {
+                    "action": "revive",
+                    "kind": "opportunity",
+                    "reason": "worth a reply",
+                    "source_detail": "fixture-model",
+                    "state": "action",
+                    "thread_id": "old-thread",
+                },
+            )
+            self.assertEqual(opportunity["decisions"][0]["state"], "action")
+            self.assertEqual(
+                _json(home, config, "stats", "--account", "personal")["revive_opportunity"],
+                1,
+            )
+            before = _decision_rows(db)
+            for line in (
+                {**_keep("old-thread"), "state": "noise"},
+                {
+                    "action": "revive",
+                    "kind": "spam",
+                    "reason": "no",
+                    "source_detail": "fixture-model",
+                    "state": "reply",
+                    "thread_id": "old-thread",
+                },
+                {"action": "drop", "source_detail": "fixture-model", "thread_id": "old-thread"},
+                {
+                    "action": "revive",
+                    "kind": "forgotten",
+                    "source_detail": "fixture-model",
+                    "state": "reply",
+                    "thread_id": "old-thread",
+                },
+                _keep("young-thread"),
+            ):
+                refused = _decide(home, config, line)
+                self.assertEqual(refused["ok"], False)
+                self.assertEqual(_decision_rows(db), before)
+
+    def test_an_enabled_step_stores_the_closure_and_keeps_it_in_scope(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = _closure_config(home, True)
+            db = _closure_db(home)
+            _seed_closure(db)
+            with _no_model():
+                applied = _json(
+                    home,
+                    config,
+                    "rules",
+                    "--account",
+                    "personal",
+                    "--rules",
+                    str(bundled_rules_path()),
+                    "--now",
+                    str(_AS_OF),
+                    "--reevaluate",
+                    "--apply",
+                    "--csv",
+                    str(home / "plan.csv"),
+                )
+                queued = _json(
+                    home,
+                    config,
+                    "review",
+                    "queue",
+                    "--account",
+                    "personal",
+                    "--all",
+                    "--state",
+                    "noise",
+                    "--now",
+                    str(_AS_OF),
+                )
+            self.assertEqual(applied["changed"], 2)
+            self.assertEqual(_stored(db, "old-thread"), ("rule", "resolved", "time"))
+            self.assertEqual(_lane(db, "old-thread"), "paper_trail")
+            ids = [item["thread_id"] for item in queued["items"]]
+            self.assertEqual(ids, ["old-thread", "noise-thread"])
+            self.assertEqual(queued["items"][0]["time_closure"]["reason"], "time_closure")
+            self.assertNotIn("young-thread", ids)
+
+    def test_llm_review_rejects_a_non_boolean(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = home / "config.toml"
+            config.write_text("[review]\nllm_review = \"yes\"\n", encoding="utf-8")
+            init_account(home, "personal", "ada@example.com")
+            refused = _json(
+                home,
+                config,
+                "review",
+                "queue",
+                "--account",
+                "personal",
+            )
+            self.assertEqual(refused["detail"], "llm_review is a boolean")
+
+
+_AS_OF = calendar.timegm((2026, 10, 17, 12, 0, 0))
+
+
+def _closure_config(home: Path, enabled: bool) -> Path:
+    path = home / "config.toml"
+    lines = ['[accounts.personal]', 'email = "ada@example.com"', ""]
+    if enabled:
+        lines.extend(["[review]", "llm_review = true", ""])
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _closure_db(home: Path) -> Path:
+    return init_account(home, "personal", "ada@example.com")
+
+
+def _seed_closure(db: Path) -> None:
+    conn = connect(db)
+    try:
+        account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        _thread(
+            conn,
+            account,
+            "old-thread",
+            _AS_OF - 100 * 86400,
+            "reply",
+            (
+                (0, "Bao Fixture <bao@example.com>"),
+                (1, "Ada Fixture <ada@example.com>"),
+            ),
+        )
+        _thread(
+            conn,
+            account,
+            "young-thread",
+            _AS_OF - 10 * 86400,
+            "reply",
+            ((1, "Ada Fixture <ada@example.com>"),),
+        )
+        _thread(
+            conn,
+            account,
+            "noise-thread",
+            _AS_OF - 10 * 86400,
+            "noise",
+            ((0, "Cam Fixture <cam@example.com>"),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _thread(conn, account: int, thread_id: str, when: int, state: str, people) -> None:
+    conn.execute(
+        "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (?, ?, ?, 0)",
+        (account, thread_id, len(people)),
+    )
+    thread_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    body = " ".join(["word"] * 80)
+    for index, (mine, header) in enumerate(people):
+        conn.execute(
+            """
+            INSERT INTO messages(
+              account_id, gmail_message_id, thread_pk, internal_date, from_hdr,
+              subject, body_text, is_from_me, date_trusted, raw_sha256, provenance_hash, imported_at
+            ) VALUES (?, ?, ?, ?, ?, 'synthetic subject', ?, ?, 1, ?, 'prov', 1)
+            """,
+            (
+                account,
+                f"m-{thread_id}-{index}",
+                thread_pk,
+                when + index,
+                header,
+                body,
+                mine,
+                f"sha-{thread_id}-{index}",
+            ),
+        )
+    conn.execute(
+        """
+        INSERT INTO decisions(
+          thread_pk, next_state, lane, source, origin, source_detail,
+          rule_id, rules_version, evidence, created_at
+        ) VALUES (?, ?, 'imbox', 'rule', 'rule', 'rule-5', '5', 'rules-v4', '[]', 1)
+        """,
+        (thread_pk, state),
+    )
+
+
+def _keep(thread_id: str) -> dict[str, str]:
+    return {"action": "keep", "source_detail": "fixture-model", "thread_id": thread_id}
+
+
+def _decide(home: Path, config: Path, line: dict[str, str]) -> dict[str, object]:
+    path = home / "decisions.jsonl"
+    path.write_text(json.dumps(line) + "\n", encoding="utf-8")
+    return _json(
+        home,
+        config,
+        "decide",
+        "--account",
+        "personal",
+        "--file",
+        str(path),
+        "--now",
+        str(_AS_OF),
+    )
+
+
+def _json(home: Path, config: Path, *args: str) -> dict[str, object]:
+    code, doc = _cli(
+        ["--json", "--home", str(home), "--config", str(config), *args]
+    )
+    if code != 0 and doc.get("ok") is not False:
+        raise AssertionError(doc)
+    return doc
+
+
+def _stored(db: Path, thread_id: str) -> tuple[str, str, str]:
+    conn = connect(db)
+    try:
+        row = conn.execute(
+            """
+            SELECT origin, next_state, source_detail FROM decisions
+            JOIN threads ON threads.thread_pk = decisions.thread_pk
+            WHERE gmail_thread_id = ? AND superseded_by IS NULL
+            """,
+            (thread_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return (str(row["origin"]), str(row["next_state"]), str(row["source_detail"]))
+
+
+def _lane(db: Path, thread_id: str) -> str:
+    conn = connect(db)
+    try:
+        row = conn.execute(
+            """
+            SELECT lane FROM decisions
+            JOIN threads ON threads.thread_pk = decisions.thread_pk
+            WHERE gmail_thread_id = ? AND superseded_by IS NULL
+            """,
+            (thread_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return str(row["lane"])
+
+
+def _decision_rows(db: Path) -> int:
+    conn = connect(db)
+    try:
+        return int(conn.execute("SELECT count(*) FROM decisions").fetchone()[0])
+    finally:
+        conn.close()
+
+
+@contextmanager
+def _no_model():
+    bomb = mock.Mock(side_effect=AssertionError("model call"))
+    with (
+        mock.patch("mailcrawl.review.enter_model", bomb),
+        mock.patch("mailcrawl.review.invoke", bomb),
+        mock.patch("mailcrawl.inference.enter_model", bomb),
+        mock.patch("urllib.request.urlopen", bomb),
+        mock.patch("urllib.request.OpenerDirector.open", bomb),
+    ):
+        yield
 
 
 def _snapshot(path: Path) -> bytes:

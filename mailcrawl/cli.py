@@ -20,6 +20,7 @@ from mailcrawl.configfile import (
     embedder_name,
     allow_override,
     inference_config,
+    llm_review,
     inference_device,
     local_llm,
     rules_path,
@@ -404,6 +405,7 @@ def _rules(args: argparse.Namespace) -> int:
                 now=now,
                 policy=time_policy(config_path(args.config)),
                 apply=bool(args.apply),
+                review=llm_review(config_path(args.config)),
             )
             _write_reevaluate(Path(args.csv), rows)
             changed = sum(1 for row in rows if row["changed"] == "1")
@@ -754,6 +756,7 @@ def _write_reevaluate(path: Path, rows: list[dict[str, str]]) -> None:
         "changed",
         "skipped",
         "reason",
+        "kind",
     )
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
@@ -789,6 +792,7 @@ def _review_scope(args: argparse.Namespace):
         state=args.state,
         since=args.since,
         limit=args.limit,
+        time_closures=llm_review(config_path(args.config)),
     )
 
 

@@ -218,25 +218,30 @@ class MboxSource:
         return found
 
 
+def from_line_is_separator(preceding: bytes | None) -> bool:
+    if preceding is None:
+        return True
+    return preceding.endswith(b"\n") and preceding.strip(b"\r\n") == b""
+
+
 def _entries(
     handle: BinaryIO, digest: Callable[[bytes], None], stored: Callable[[str], bool]
 ) -> Iterator[_Entry]:
     offset = 0
     entry: _Entry | None = None
-    previous_blank = True
+    preceding: bytes | None = None
     for line in handle:
         digest(line)
-        blank = line.strip(b"\r\n") == b""
-        if line.startswith(b"From ") and previous_blank:
+        if line.startswith(b"From ") and from_line_is_separator(preceding):
             if entry is not None:
                 yield entry
             entry = _Entry(offset, line, stored)
         elif entry is None:
-            if not blank:
+            if line.strip(b"\r\n") != b"":
                 raise ExportInvalid("unsupported_schema", "file does not start with an mbox From line", 3)
         else:
             entry.add(_canonical(line[1:] if _ESCAPED_FROM.match(line) else line))
-        previous_blank = blank
+        preceding = line
         offset += len(line)
     if entry is None:
         raise ExportInvalid("unsupported_schema", "file has no mbox From line", 3)
@@ -471,13 +476,29 @@ def _mbox_ref(raw_path: str) -> tuple[Path, int] | None:
 
 
 def _mbox_boundary(path: Path, offset: int) -> bool:
+    return from_line_is_separator(_preceding_line(path, offset))
+
+
+def _preceding_line(path: Path, offset: int) -> bytes | None:
     if offset == 0:
-        return True
-    size = min(offset, 4)
+        return None
     with path.open("rb") as handle:
-        handle.seek(offset - size)
-        prev = handle.read(size)
-    return prev.endswith(b"\n\n") or prev.endswith(b"\r\n\r\n")
+        handle.seek(offset - 1)
+        if handle.read(1) != b"\n":
+            return b"x"
+        start = 0
+        cursor = offset - 2
+        while cursor >= 0:
+            handle.seek(cursor)
+            byte = handle.read(1)
+            if byte == b"\n":
+                start = cursor + 1
+                break
+            if byte != b"\r":
+                return b"x\n"
+            cursor -= 1
+        handle.seek(start)
+        return handle.read(offset - start)
 
 
 def _read_mbox_separator(path: Path, offset: int) -> bytes:

@@ -13,6 +13,7 @@ from typing import NamedTuple
 from mailcrawl.advise import MODEL_NAME, AdviceCase, Advisor
 from mailcrawl.clock import as_of
 from mailcrawl.contract import GMAIL_LABEL_SQL
+from mailcrawl.reevaluate import revive_kind
 from mailcrawl.rules import RulesConfig, bundled_rules_path, load_rules, preview_rules
 from mailcrawl.timefacts import thread_time_facts
 from mailcrawl.taxonomy import (
@@ -64,6 +65,8 @@ def stats(
         "messages": messages,
         "needs_review_else": fallthrough,
         "needs_review_rule0": rule0,
+        "revive_forgotten": _revive_count(conn, "forgotten"),
+        "revive_opportunity": _revive_count(conn, "opportunity"),
         "senders": senders,
         "threads": threads,
         "uncategorized": _uncategorized(conn),
@@ -477,6 +480,16 @@ def _category_counts(conn: sqlite3.Connection, categories: tuple[str, ...]) -> d
         for name in found:
             counts[name] += 1
     return counts
+
+
+def _revive_count(conn: sqlite3.Connection, kind: str) -> int:
+    count = 0
+    for (evidence,) in conn.execute(
+        "SELECT evidence FROM decisions WHERE superseded_by IS NULL"
+    ):
+        if revive_kind(evidence) == kind:
+            count += 1
+    return count
 
 
 def _month(stamp: int) -> str | None:
