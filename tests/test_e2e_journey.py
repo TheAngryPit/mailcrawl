@@ -103,9 +103,10 @@ class CompareTest(unittest.TestCase):
             }
         }
         diff = CHECK.compare(actual, expected)
-        self.assertIn("e2e-en-newsletter", diff)
-        self.assertIn("noise", diff)
-        self.assertIn("reply", diff)
+        self.assertEqual(
+            diff,
+            'thread e2e-en-newsletter: final.state expected "reply" actual "noise"\n',
+        )
         self.assertEqual(CHECK.compare(actual, actual), "")
 
     def test_broken_bcc_names_the_injection_thread(self) -> None:
@@ -122,12 +123,10 @@ class CompareTest(unittest.TestCase):
                 ]
             }
         }
-        diff = CHECK.compare(actual, expected)
-        self.assertIn(
-            'thread e2e-header-injection: final.bcc expected null actual "hidden@example.com"',
-            diff,
+        self.assertEqual(
+            CHECK.compare(actual, expected),
+            'thread e2e-header-injection: final.bcc expected null actual "hidden@example.com"\n',
         )
-        self.assertNotIn("e2e-from-me", diff)
 
     def test_broken_labels_name_the_traversal_thread(self) -> None:
         actual = {
@@ -146,22 +145,18 @@ class CompareTest(unittest.TestCase):
                 ]
             }
         }
-        diff = CHECK.compare(actual, expected)
-        self.assertIn(
-            'thread e2e-traversal: final.labels expected ["INBOX", "SENT"] actual ["INBOX"]',
-            diff,
+        self.assertEqual(
+            CHECK.compare(actual, expected),
+            'thread e2e-traversal: final.labels expected ["INBOX", "SENT"] actual ["INBOX"]\n',
         )
-        self.assertNotIn("e2e-from-me", diff)
 
     def test_broken_queue_entry_names_the_thread(self) -> None:
         actual = {"queue_off": ["e2e-en-newsletter"]}
         expected = {"queue_off": ["e2e-en-newsletter", "e2e-en-old-ask"]}
-        diff = CHECK.compare(actual, expected)
-        self.assertIn(
-            "thread e2e-en-old-ask: queue_off expected present actual absent",
-            diff,
+        self.assertEqual(
+            CHECK.compare(actual, expected),
+            "thread e2e-en-old-ask: queue_off expected present actual absent\n",
         )
-        self.assertNotIn("e2e-en-newsletter", diff)
 
 
 class HarnessTest(unittest.TestCase):

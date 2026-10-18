@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import difflib
 import json
 import sqlite3
 from pathlib import Path
@@ -120,11 +119,107 @@ def canon(document: object) -> str:
     return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
 
+_THREAD_SECTIONS = frozenset({"final", "revived"})
+_ID_LISTS = frozenset(
+    {
+        "export_ids",
+        "queue_off",
+        "queue_off_after_undo",
+        "queue_on",
+        "queue_on_after_undo",
+    }
+)
+
+
+def _show(value: object) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def _thread_map(section: object) -> dict[str, dict[str, object]] | None:
+    if not isinstance(section, dict):
+        return None
+    rows = section.get("threads")
+    if not isinstance(rows, list):
+        return None
+    found: dict[str, dict[str, object]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("thread_id"), str):
+            return None
+        found[row["thread_id"]] = row
+    return found
+
+
+def _id_list(value: object) -> list[str] | None:
+    if value is None:
+        return []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    return None
+
+
+def _threads(section: str, actual: object, expected: object) -> list[str]:
+    actual_map = _thread_map(actual)
+    expected_map = _thread_map(expected)
+    if actual_map is None or expected_map is None:
+        if actual == expected:
+            return []
+        return [f"{section} expected {_show(expected)} actual {_show(actual)}"]
+    lines: list[str] = []
+    for thread_id in sorted(set(actual_map) | set(expected_map)):
+        if thread_id not in expected_map:
+            lines.append(f"thread {thread_id}: {section} expected absent actual present")
+            continue
+        if thread_id not in actual_map:
+            lines.append(f"thread {thread_id}: {section} expected present actual absent")
+            continue
+        left = actual_map[thread_id]
+        right = expected_map[thread_id]
+        for field in sorted((set(left) | set(right)) - {"thread_id"}):
+            if left.get(field) != right.get(field):
+                lines.append(
+                    f"thread {thread_id}: {section}.{field} "
+                    f"expected {_show(right.get(field))} actual {_show(left.get(field))}"
+                )
+    return lines
+
+
+def _ids(name: str, actual: object, expected: object) -> list[str]:
+    actual_ids = _id_list(actual)
+    expected_ids = _id_list(expected)
+    if actual_ids is None or expected_ids is None:
+        if actual == expected:
+            return []
+        return [f"{name} expected {_show(expected)} actual {_show(actual)}"]
+    lines: list[str] = []
+    for thread_id in sorted(set(expected_ids) - set(actual_ids)):
+        lines.append(f"thread {thread_id}: {name} expected present actual absent")
+    for thread_id in sorted(set(actual_ids) - set(expected_ids)):
+        lines.append(f"thread {thread_id}: {name} expected absent actual present")
+    return lines
+
+
+def _walk(path: str, actual: object, expected: object) -> list[str]:
+    if actual == expected:
+        return []
+    if path in _THREAD_SECTIONS:
+        return _threads(path, actual, expected)
+    if path in _ID_LISTS:
+        return _ids(path, actual, expected)
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        lines: list[str] = []
+        for key in sorted(set(actual) | set(expected)):
+            child = f"{path}.{key}" if path else key
+            lines.extend(_walk(child, actual.get(key), expected.get(key)))
+        return lines
+    label = path or "document"
+    return [f"{label} expected {_show(expected)} actual {_show(actual)}"]
+
+
 def compare(actual: object, expected: object) -> str:
-    left = canon(expected).splitlines(keepends=True)
-    right = canon(actual).splitlines(keepends=True)
-    diff = difflib.unified_diff(left, right, fromfile="expected", tofile="actual")
-    return "".join(diff)
+    lines = _walk("", actual, expected)
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
 
 
 def assemble(
