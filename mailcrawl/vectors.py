@@ -473,11 +473,7 @@ def _encode_guarded(model, payload, device: str, *, image: bool):
 
 def _optional_torch():
     enter_model()
-    try:
-        import torch
-    except ImportError:
-        return None
-    return torch
+    return sys.modules.get("torch")
 
 
 def _empty_device_cache(torch, requested: str) -> None:
