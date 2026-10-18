@@ -68,6 +68,24 @@ class CorpusTest(unittest.TestCase):
             self.assertNotIn("..", native.read_text(encoding="utf-8"))
 
 
+def _thread(thread_id: str, **overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "bcc": None,
+        "from_me": 0,
+        "from_me_origin": None,
+        "kind": "",
+        "labels": ["INBOX"],
+        "lane": "imbox",
+        "message_id": f"<{thread_id}@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": thread_id,
+    }
+    row.update(overrides)
+    return row
+
+
 class CompareTest(unittest.TestCase):
     def test_broken_expected_state_names_the_thread(self) -> None:
         actual = {
@@ -89,6 +107,61 @@ class CompareTest(unittest.TestCase):
         self.assertIn("noise", diff)
         self.assertIn("reply", diff)
         self.assertEqual(CHECK.compare(actual, actual), "")
+
+    def test_broken_bcc_names_the_injection_thread(self) -> None:
+        threads = [
+            _thread("e2e-from-me"),
+            _thread("e2e-header-injection", bcc="hidden@example.com"),
+        ]
+        actual = {"final": {"threads": threads}}
+        expected = {
+            "final": {
+                "threads": [
+                    _thread("e2e-from-me"),
+                    _thread("e2e-header-injection", bcc=None),
+                ]
+            }
+        }
+        diff = CHECK.compare(actual, expected)
+        self.assertIn(
+            'thread e2e-header-injection: final.bcc expected null actual "hidden@example.com"',
+            diff,
+        )
+        self.assertNotIn("e2e-from-me", diff)
+
+    def test_broken_labels_name_the_traversal_thread(self) -> None:
+        actual = {
+            "final": {
+                "threads": [
+                    _thread("e2e-from-me"),
+                    _thread("e2e-traversal", labels=["INBOX"]),
+                ]
+            }
+        }
+        expected = {
+            "final": {
+                "threads": [
+                    _thread("e2e-from-me"),
+                    _thread("e2e-traversal", labels=["INBOX", "SENT"]),
+                ]
+            }
+        }
+        diff = CHECK.compare(actual, expected)
+        self.assertIn(
+            'thread e2e-traversal: final.labels expected ["INBOX", "SENT"] actual ["INBOX"]',
+            diff,
+        )
+        self.assertNotIn("e2e-from-me", diff)
+
+    def test_broken_queue_entry_names_the_thread(self) -> None:
+        actual = {"queue_off": ["e2e-en-newsletter"]}
+        expected = {"queue_off": ["e2e-en-newsletter", "e2e-en-old-ask"]}
+        diff = CHECK.compare(actual, expected)
+        self.assertIn(
+            "thread e2e-en-old-ask: queue_off expected present actual absent",
+            diff,
+        )
+        self.assertNotIn("e2e-en-newsletter", diff)
 
 
 class HarnessTest(unittest.TestCase):
