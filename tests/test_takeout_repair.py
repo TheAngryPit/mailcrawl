@@ -1563,6 +1563,218 @@ class SentPoisonTest(unittest.TestCase):
         ).fetchone()
         self.assertEqual((int(row[0]), int(row[1])), (111, 0))
 
+    def test_a_numeric_plain_sender_loses_mbox_labels_without_the_file(self) -> None:
+        recent = AS_OF - 16 * 86400
+        numeric_id = gmail_hex("123456789", decimal_only=True)
+        takeout_id = gmail_hex("1501", decimal_only=True)
+        daemon_id = "rfc822:" + "ab" * 32
+        path = self.home / "v7-numeric.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("ALTER TABLE messages DROP COLUMN date_trusted")
+            conn.execute("PRAGMA user_version = 7")
+            conn.execute(
+                "INSERT INTO accounts(account_id, alias, email_hash, created_at) VALUES (1, 'personal', 'abc', 1)"
+            )
+            conn.execute(
+                """
+                INSERT INTO senders(sender_id, account_id, address_norm, domain, display_name, msg_count)
+                VALUES (1, 1, 'bob@example.com', 'example.com', 'Bob Fixture', 4)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO labels(account_id, gmail_label_id, name, kind, catalogue_key, seen_at)
+                VALUES (1, 'mbox:Outbox', 'Outbox', 'user', 'CATEGORY_PROMOTIONS', 0),
+                       (1, 'mbox:Clientes', 'Clientes', 'user', NULL, 0)
+                """
+            )
+            rows = (
+                (numeric_id, "mbox:" + "11" * 32),
+                (daemon_id, "mbox:" + "22" * 32),
+                ("rfc822:" + "33" * 32, "mbox:" + "33" * 32),
+                (takeout_id, str(takeout_id)),
+            )
+            for gid, thread_id in rows:
+                conn.execute(
+                    "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (1, ?, 1, 0)",
+                    (thread_id,),
+                )
+                thread_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                conn.execute(
+                    """
+                    INSERT INTO messages(
+                      account_id, gmail_message_id, thread_pk, internal_date, sender_id, from_hdr,
+                      subject, body_text, is_from_me, raw_path, raw_sha256, provenance_hash, imported_at
+                    ) VALUES (1, ?, ?, ?, 1, 'Bob Fixture <bob@example.com>', 'synthetic',
+                              'Can you send the file?', 0, ?, ?, 'prov', 1)
+                    """,
+                    (gid, thread_pk, recent, f"mbox:{self.home / 'gone.mbox'}#0", f"sha-{gid}"),
+                )
+                if gid == "rfc822:" + "33" * 32:
+                    continue
+                msg_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                conn.execute(
+                    """
+                    INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+                    VALUES (?, 1, 'mbox:Outbox', ?), (?, 1, 'mbox:Clientes', ?)
+                    """,
+                    (msg_pk, recent, msg_pk, recent),
+                )
+            conn.commit()
+            migrate(conn)
+            def labels_of(gid: str) -> list[str]:
+                return [
+                    str(item[0])
+                    for item in conn.execute(
+                        """
+                        SELECT gmail_label_id FROM message_labels
+                        JOIN messages ON messages.msg_pk = message_labels.msg_pk
+                        WHERE messages.gmail_message_id = ?
+                        ORDER BY gmail_label_id
+                        """,
+                        (gid,),
+                    )
+                ]
+
+            self.assertEqual(labels_of(numeric_id), [])
+            self.assertEqual(labels_of(daemon_id), [])
+            self.assertEqual(labels_of(takeout_id), ["mbox:Clientes", "mbox:Outbox"])
+            apply_rules(conn, now=AS_OF, config=load_rules(RULES))
+
+            def route(gid: str) -> tuple[str, str]:
+                row = conn.execute(
+                    """
+                    SELECT decisions.rule_id, decisions.next_state
+                    FROM decisions
+                    JOIN messages ON messages.thread_pk = decisions.thread_pk
+                    WHERE messages.gmail_message_id = ?
+                      AND decisions.superseded_by IS NULL
+                    """,
+                    (gid,),
+                ).fetchone()
+                return (str(row[0]), str(row[1]))
+
+            self.assertEqual(route(numeric_id), ("5", "reply"))
+            self.assertEqual(route("rfc822:" + "33" * 32), ("5", "reply"))
+        finally:
+            conn.close()
+
+    def test_a_numeric_plain_separator_stores_an_rfc822_id(self) -> None:
+        path = self.home / "numeric-plain.mbox"
+        path.write_text(
+            "From 123456789@qq.com Thu Oct 01 12:00:00 +0000 2026\n"
+            "X-Gmail-Labels: Outbox,Clientes\n"
+            "From: Bob Fixture <bob@example.com>\n"
+            "To: Bao Fixture <bao@example.com>\n"
+            "Subject: synthetic\n"
+            "Date: Thu, 01 Oct 2026 12:00:00 +0000\n"
+            "Message-ID: <plain-num@example.com>\n"
+            "\n"
+            "Can you send the file?\n"
+            "\n"
+            "From MAILER-DAEMON Thu Oct 01 12:00:00 +0000 2026\n"
+            "X-Gmail-Labels: Outbox,Clientes\n"
+            "From: Bob Fixture <bob@example.com>\n"
+            "To: Bao Fixture <bao@example.com>\n"
+            "Subject: synthetic\n"
+            "Date: Thu, 01 Oct 2026 12:00:00 +0000\n"
+            "Message-ID: <plain-daemon@example.com>\n"
+            "\n"
+            "Can you send the file?\n",
+            encoding="utf-8",
+        )
+        result = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual((result.n_new, result.n_refused), (2, 0))
+        stored = [
+            str(row[0])
+            for row in self.conn.execute("SELECT gmail_message_id FROM messages ORDER BY gmail_message_id")
+        ]
+        self.assertEqual(len(stored), 2)
+        self.assertTrue(all(item.startswith("rfc822:") for item in stored))
+        self.assertNotIn(gmail_hex("123456789", decimal_only=True), stored)
+        threads = [
+            str(row[0])
+            for row in self.conn.execute("SELECT gmail_thread_id FROM threads")
+        ]
+        self.assertTrue(all(item.startswith("mbox:") for item in threads))
+
+    def test_an_invalid_takeout_separator_id_is_refused(self) -> None:
+        path = self.home / "bad-id.mbox"
+        huge = str(1 << 64)
+        path.write_text(
+            "From 0@xxx Thu Oct 01 12:00:00 +0000 2026\n"
+            "X-Gmail-Labels: Sent,Clientes\n"
+            "From: Ada Fixture <ada@example.com>\n"
+            "To: Bao Fixture <bao@example.com>\n"
+            "Subject: synthetic\n"
+            "Date: Thu, 01 Oct 2026 12:00:00 +0000\n"
+            "Message-ID: <zero@example.com>\n"
+            "\n"
+            "note\n"
+            "\n"
+            f"From {huge}@xxx Thu Oct 01 12:00:00 +0000 2026\n"
+            "X-Gmail-Labels: Sent,Clientes\n"
+            "From: Ada Fixture <ada@example.com>\n"
+            "To: Bao Fixture <bao@example.com>\n"
+            "Subject: synthetic\n"
+            "Date: Thu, 01 Oct 2026 12:00:00 +0000\n"
+            "Message-ID: <huge@example.com>\n"
+            "\n"
+            "note\n"
+            "\n"
+            "From 1501@xxx Thu Oct 01 12:00:00 +0000 2026\n"
+            "X-GM-THRID: 4242\n"
+            "X-Gmail-Labels: Sent,Clientes\n"
+            "From: Ada Fixture <ada@example.com>\n"
+            "To: Bao Fixture <bao@example.com>\n"
+            "Subject: synthetic\n"
+            "Date: Thu, 01 Oct 2026 12:00:00 +0000\n"
+            "Message-ID: <ok@example.com>\n"
+            "\n"
+            "note\n",
+            encoding="utf-8",
+        )
+        result = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual((result.n_new, result.n_refused), (1, 2))
+        stored = [
+            str(row[0])
+            for row in self.conn.execute("SELECT gmail_message_id FROM messages")
+        ]
+        self.assertEqual(stored, [gmail_hex("1501", decimal_only=True)])
+        self.assertFalse(any(item.startswith("rfc822:") for item in stored))
+        labels = [
+            str(row[0])
+            for row in self.conn.execute(
+                """
+                SELECT gmail_label_id FROM message_labels
+                JOIN messages ON messages.msg_pk = message_labels.msg_pk
+                WHERE messages.gmail_message_id = ?
+                ORDER BY gmail_label_id
+                """,
+                (gmail_hex("1501", decimal_only=True),),
+            )
+        ]
+        self.assertIn("SENT", labels)
+        self.assertIn("mbox:Clientes", labels)
+
     def _labels(self, number: int) -> list[str]:
         return [
             row[0]
