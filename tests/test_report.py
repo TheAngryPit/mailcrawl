@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """stats and dry-run print counts and do not write."""
 
 import csv

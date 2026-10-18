@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """An archive from before category keys can be filled without a reimport."""
 
 import io

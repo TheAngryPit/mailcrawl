@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Account aliases and on-disk locations."""
 
 from __future__ import annotations

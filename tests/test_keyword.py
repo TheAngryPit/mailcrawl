@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Keyword search, image_only, and pdftotext stay off the model path."""
 
 import shutil

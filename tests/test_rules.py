@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Rules 0–8 are deterministic, synthetic, and first-match."""
 
 import io

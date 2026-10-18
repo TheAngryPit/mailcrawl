@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
 # Install the wheel and run the README quickstart from outside the checkout.
 set -euo pipefail
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Attachment text extraction. External tools stay optional."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """mailcrawl.
 
 Schema v1, fixture import, and FTS search are implemented.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Typed Jev battery. Answers are stored once. Code composes the lane."""
 
 from __future__ import annotations

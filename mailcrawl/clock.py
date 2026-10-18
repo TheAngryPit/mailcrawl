@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The one clock decision code is allowed to read."""
 
 from __future__ import annotations

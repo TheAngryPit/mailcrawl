@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Accepted-case error on a synthetic audited set. Grey rows are not accepted."""
 
 from __future__ import annotations

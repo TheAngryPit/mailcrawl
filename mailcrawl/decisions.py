@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Store one current decision per thread and do not infer it again."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Localized Takeout labels, the unknown-locale Sent fallback, and time reevaluation."""
 
 import calendar

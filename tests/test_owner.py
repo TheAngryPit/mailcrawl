@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Owner addresses count only with Gmail's own authentication result."""
 
 import io

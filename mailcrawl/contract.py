@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Fixture contract mailcrawl.gog-export.v0.
 
 Key names belong to this contract. They are not verified gog field names.

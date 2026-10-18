@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Read a gog backup plaintext export.
 
 `gog backup export` writes `gmail/<account>/labels.json` and

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """SQLite tables for one account archive."""
 
 USER_VERSION = 11

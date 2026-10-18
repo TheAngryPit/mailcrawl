@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Revisit stored rule, kNN, and model rows with time facts. Human rows stay."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Bench compares embedders without importing a model."""
 
 import base64

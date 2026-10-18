@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Advisory suggestions for else threads. Callers pass an advisor. The default is none."""
 
 from __future__ import annotations

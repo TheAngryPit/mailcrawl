@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Read one RFC822 message with the standard library email parser."""
 
 from __future__ import annotations

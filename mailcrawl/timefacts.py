@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Per-thread dates from stored mail. The text scan is bounded and has no eval."""
 
 from __future__ import annotations

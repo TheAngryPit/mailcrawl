@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Jev stays off unless config turns the battery or the reranker on."""
 
 from __future__ import annotations

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Phase 3 vectors stay off unless config turns the point on."""
 
 import importlib.util

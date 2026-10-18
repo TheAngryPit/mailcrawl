@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Remap localized Takeout names and list the names the table does not know."""
 
 from __future__ import annotations

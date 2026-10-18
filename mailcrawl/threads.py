@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Thread flags derived from stored messages and attachments."""
 
 from __future__ import annotations

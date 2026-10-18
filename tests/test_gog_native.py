@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Import a synthetic gog backup export with no export.json."""
 
 import json

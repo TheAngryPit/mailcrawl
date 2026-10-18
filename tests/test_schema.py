@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Schema v2 creates ingest, FTS, and the empty decision tables."""
 
 import sqlite3

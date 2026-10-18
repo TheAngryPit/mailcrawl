@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Archive counts and dry-run counts. Dry-run does not write decisions."""
 
 from __future__ import annotations
