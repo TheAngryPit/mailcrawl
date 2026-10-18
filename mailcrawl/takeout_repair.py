@@ -60,9 +60,12 @@ def repair_takeout(
     mapping = checked_label_map(label_map)
     digest = _map_digest(mapping)
     current = not rewrite_unprovable and _map_is_current(conn, digest)
-    if scope.can_remap() and not current:
-        _drop_plain_mbox_labels(conn)
-        _remap_takeout_labels(conn, mapping)
+    if scope.can_remap():
+        _drop_rfc822_mbox_labels(conn)
+        if not current:
+            _drop_plain_mbox_labels(conn)
+            _remap_takeout_labels(conn, mapping)
+            _set_is_from_me_from_sent(conn)
     if not current and scope.can_refresh_dates():
         _refresh_dates(conn, scope, rewrite_unprovable=rewrite_unprovable)
     if not current:
@@ -76,6 +79,36 @@ def takeout_status(
 ) -> TakeoutReport:
     """List unmapped Takeout names without rewriting labels."""
     return _unmapped(conn, checked_label_map(label_map))
+
+
+def _drop_rfc822_mbox_labels(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        DELETE FROM message_labels
+        WHERE gmail_label_id LIKE 'mbox:%'
+          AND msg_pk IN (
+            SELECT msg_pk FROM messages WHERE gmail_message_id LIKE 'rfc822:%'
+          )
+        """
+    )
+    _drop_orphan_mbox_labels(conn)
+
+
+def _set_is_from_me_from_sent(conn: sqlite3.Connection) -> None:
+    if "is_from_me" not in {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}:
+        return
+    if not _has_table(conn, "message_labels"):
+        return
+    conn.execute(
+        """
+        UPDATE messages
+        SET is_from_me = CASE WHEN EXISTS (
+          SELECT 1 FROM message_labels
+          WHERE message_labels.msg_pk = messages.msg_pk
+            AND message_labels.gmail_label_id = 'SENT'
+        ) THEN 1 ELSE 0 END
+        """
+    )
 
 
 def _drop_plain_mbox_labels(conn: sqlite3.Connection) -> None:

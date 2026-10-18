@@ -47,6 +47,36 @@ def run_mailcrawl(home: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _sent_outcome(conn: sqlite3.Connection) -> tuple[object, ...]:
+    gid = gmail_hex("1501", decimal_only=True)
+    row = conn.execute(
+        "SELECT is_from_me, internal_date FROM messages WHERE gmail_message_id = ?",
+        (gid,),
+    ).fetchone()
+    labels = tuple(
+        str(item[0])
+        for item in conn.execute(
+            """
+            SELECT gmail_label_id FROM message_labels
+            JOIN messages ON messages.msg_pk = message_labels.msg_pk
+            WHERE gmail_message_id = ?
+              AND gmail_label_id NOT LIKE 'pseudo:%'
+            ORDER BY gmail_label_id
+            """,
+            (gid,),
+        )
+    )
+    decision = conn.execute(
+        """
+        SELECT rule_id, next_state FROM decisions
+        JOIN messages ON messages.thread_pk = decisions.thread_pk
+        WHERE messages.gmail_message_id = ? AND decisions.superseded_by IS NULL
+        """,
+        (gid,),
+    ).fetchone()
+    return (int(row[0]), int(row[1]), labels, str(decision[0]), str(decision[1]))
+
+
 def _block(number: int, labels: str, sender: str, body: str) -> str:
     return (
         f"From {number}@example.com {RECEIPT}\n"
@@ -376,8 +406,8 @@ class TakeoutRepairTest(unittest.TestCase):
                 return flags, labels, notes, version
 
             got = snapshot()
-            self.assertEqual(got[0][gmail_hex("1501", decimal_only=True)], (0, RECEIPT_STAMP, 1))
-            self.assertEqual(got[0][gmail_hex("1502", decimal_only=True)], (1, RECEIPT_STAMP, 1))
+            self.assertEqual(got[0][gmail_hex("1501", decimal_only=True)], (1, RECEIPT_STAMP, 1))
+            self.assertEqual(got[0][gmail_hex("1502", decimal_only=True)], (0, RECEIPT_STAMP, 1))
             self.assertEqual(got[1], [(1, "SENT"), (2, "mbox:Club")])
             digest = hashlib.sha256(b"").hexdigest()
             self.assertEqual(
@@ -496,7 +526,7 @@ class TakeoutRepairTest(unittest.TestCase):
             self.assertEqual(labels.count("mbox:Outbox"), 22)
             self.assertNotIn("mbox:Enviado", labels)
             mines = [int(row[0]) for row in conn.execute("SELECT is_from_me FROM messages ORDER BY msg_pk")]
-            self.assertEqual(mines, [0] * 23)
+            self.assertEqual(mines, [0] * 22 + [1])
             with self.assertRaises(UsageError) as caught:
                 repair_takeout(conn, {"Outbox": "SENT"})
             self.assertEqual(str(caught.exception), "add Outbox to the Takeout label table via PR")
@@ -511,7 +541,7 @@ class TakeoutRepairTest(unittest.TestCase):
             )
             self.assertEqual(
                 [int(row[0]) for row in conn.execute("SELECT is_from_me FROM messages ORDER BY msg_pk")],
-                [0] * 23,
+                [0] * 22 + [1],
             )
             self.assertNotIn(
                 "last_msg_from_me",
@@ -1211,7 +1241,7 @@ class SentPoisonTest(unittest.TestCase):
             ["mbox:Enviado"],
         )
 
-    def test_v7_forged_from_is_cleared_and_v8_keeps_the_stored_flag(self) -> None:
+    def test_v7_and_v8_clear_a_forged_from_that_has_no_sent_label(self) -> None:
         def plant(version: int) -> sqlite3.Connection:
             path = self.home / f"v{version}.db"
             conn = sqlite3.connect(path)
@@ -1267,7 +1297,7 @@ class SentPoisonTest(unittest.TestCase):
             reply = kept.execute(
                 "SELECT is_from_me FROM messages WHERE subject = 'Re: Contrato'"
             ).fetchone()
-            self.assertEqual(int(reply[0]), 1)
+            self.assertEqual(int(reply[0]), 0)
         finally:
             kept.close()
 
@@ -1314,6 +1344,224 @@ class SentPoisonTest(unittest.TestCase):
             self.assertEqual(int(conn.execute("PRAGMA user_version").fetchone()[0]), USER_VERSION)
         finally:
             conn.close()
+
+    def test_rfc822_mbox_labels_are_dropped_and_do_not_steer_rules(self) -> None:
+        path = self.home / "v7-plain.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.execute("ALTER TABLE messages DROP COLUMN date_trusted")
+            conn.execute("PRAGMA user_version = 7")
+            conn.execute(
+                "INSERT INTO accounts(account_id, alias, email_hash, created_at) VALUES (1, 'personal', 'abc', 1)"
+            )
+            conn.execute(
+                """
+                INSERT INTO senders(sender_id, account_id, address_norm, domain, display_name, msg_count)
+                VALUES (1, 1, 'bob@example.com', 'example.com', 'Bob Fixture', 23)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO labels(account_id, gmail_label_id, name, kind, catalogue_key, seen_at)
+                VALUES (1, 'mbox:Outbox', 'Outbox', 'user', 'CATEGORY_PROMOTIONS', 0)
+                """
+            )
+            recent = AS_OF - 16 * 86400
+            for number in range(22):
+                conn.execute(
+                    "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (1, ?, 1, 0)",
+                    (f"out-{number}",),
+                )
+                thread_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                conn.execute(
+                    """
+                    INSERT INTO messages(
+                      account_id, gmail_message_id, thread_pk, internal_date, sender_id, from_hdr,
+                      subject, body_text, is_from_me, raw_path, raw_sha256, provenance_hash, imported_at
+                    ) VALUES (1, ?, ?, ?, 1, 'Bob Fixture <bob@example.com>', 'synthetic',
+                              'Can you send the file?', 0, ?, ?, 'prov', 1)
+                    """,
+                    (
+                        f"rfc822:{number:064x}",
+                        thread_pk,
+                        recent,
+                        f"mbox:{self.home / 'missing.mbox'}#0",
+                        f"sha-{number}",
+                    ),
+                )
+                msg_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                conn.execute(
+                    """
+                    INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+                    VALUES (?, 1, 'mbox:Outbox', 111)
+                    """,
+                    (msg_pk,),
+                )
+            conn.execute(
+                "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (1, 'plain-mail', 1, 0)"
+            )
+            plain_thread = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            conn.execute(
+                """
+                INSERT INTO messages(
+                  account_id, gmail_message_id, thread_pk, internal_date, sender_id, from_hdr,
+                  subject, body_text, is_from_me, raw_path, raw_sha256, provenance_hash, imported_at
+                ) VALUES (1, 'rfc822:plain', ?, ?, 1, 'Bob Fixture <bob@example.com>', 'synthetic',
+                          'Can you send the file?', 0, ?, 'plain', 'prov', 1)
+                """,
+                (plain_thread, recent, f"mbox:{self.home / 'missing.mbox'}#0"),
+            )
+            conn.commit()
+            migrate(conn)
+            left = conn.execute(
+                "SELECT count(*) FROM message_labels WHERE gmail_label_id = 'mbox:Outbox'"
+            ).fetchone()
+            self.assertEqual(int(left[0]), 0)
+            apply_rules(conn, now=AS_OF, config=load_rules(RULES))
+            labeled = conn.execute(
+                """
+                SELECT decisions.rule_id, decisions.next_state
+                FROM decisions
+                JOIN messages ON messages.thread_pk = decisions.thread_pk
+                WHERE messages.gmail_message_id = ?
+                  AND decisions.superseded_by IS NULL
+                """,
+                (f"rfc822:{0:064x}",),
+            ).fetchone()
+            control = conn.execute(
+                """
+                SELECT decisions.rule_id, decisions.next_state
+                FROM decisions
+                JOIN messages ON messages.thread_pk = decisions.thread_pk
+                WHERE messages.gmail_message_id = 'rfc822:plain'
+                  AND decisions.superseded_by IS NULL
+                """
+            ).fetchone()
+            self.assertEqual((labeled[0], labeled[1]), ("5", "reply"))
+            self.assertEqual((control[0], control[1]), ("5", "reply"))
+        finally:
+            conn.close()
+
+    def test_migrated_v7_and_v8_match_a_fresh_import(self) -> None:
+        path = self.home / "enviado.mbox"
+        receipt = "Thu Oct 01 12:00:00 +0000 2026"
+        recent = calendar.timegm((2026, 10, 1, 12, 0, 0))
+        path.write_text(
+            _block(1501, "Enviado", "Ada Fixture <ada@example.com>", "Can you confirm?").replace(
+                RECEIPT, receipt
+            ),
+            encoding="utf-8",
+        )
+        fresh = connect(init_account(self.home, "vcl", "ada@example.com"))
+        try:
+            import_mbox(
+                fresh,
+                alias="vcl",
+                mbox_path=path,
+                labels_path=None,
+                taxonomy_path=None,
+                account_email="ada@example.com",
+            )
+            apply_rules(fresh, now=AS_OF, config=load_rules(RULES))
+            imported = _sent_outcome(fresh)
+            self.assertEqual(imported, (1, recent, ("SENT",), "6", "waiting"))
+        finally:
+            fresh.close()
+        for version in (7, 8):
+            conn = sqlite3.connect(self.home / f"src-{version}.db")
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.executescript(SCHEMA_SQL)
+                conn.execute("PRAGMA foreign_keys = ON")
+                if version == 7:
+                    conn.execute("ALTER TABLE messages DROP COLUMN date_trusted")
+                conn.execute(f"PRAGMA user_version = {version}")
+                conn.execute(
+                    "INSERT INTO accounts(account_id, alias, email_hash, created_at) VALUES (1, 'personal', 'abc', 1)"
+                )
+                conn.execute(
+                    "INSERT INTO threads(thread_pk, account_id, gmail_thread_id, msg_count, image_only) VALUES (1, 1, 't', 1, 0)"
+                )
+                conn.execute(
+                    """
+                    INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at)
+                    VALUES (1, 'mbox:Enviado', 'Enviado', 'user', 0)
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO messages(
+                      msg_pk, account_id, gmail_message_id, thread_pk, internal_date, from_hdr,
+                      subject, body_text, is_from_me, raw_path, raw_sha256, provenance_hash, imported_at
+                    ) VALUES (1, 1, ?, 1, ?, 'Ada Fixture <ada@example.com>', 'synthetic',
+                              'Can you confirm?', 0, ?, 'a', 'a', 1)
+                    """,
+                    (
+                        gmail_hex("1501", decimal_only=True),
+                        HEADER_STAMP,
+                        f"mbox:{path.resolve()}#0",
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+                    VALUES (1, 1, 'mbox:Enviado', 0)
+                    """
+                )
+                conn.commit()
+                migrate(conn)
+                apply_rules(conn, now=AS_OF, config=load_rules(RULES))
+                self.assertEqual(_sent_outcome(conn), imported)
+            finally:
+                conn.close()
+
+    def test_a_from_line_inside_the_body_is_not_a_separator(self) -> None:
+        number = 8801
+        receipt = "Fri Mar 01 12:00:00 +0000 2024"
+        path = self.home / "body.mbox"
+        path.write_text(
+            _block(
+                number,
+                "Sent",
+                "Ada Fixture <ada@example.com>",
+                f"note\nFrom {number}@xxx {receipt}\nstill",
+            ),
+            encoding="utf-8",
+        )
+        raw = path.read_bytes()
+        offset = raw.index(f"From {number}@xxx ".encode())
+        self.assertGreater(offset, 0)
+        account = int(self.conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        self.conn.execute(
+            "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (?, 'mid', 1, 0)",
+            (account,),
+        )
+        thread_pk = int(self.conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        self.conn.execute(
+            """
+            INSERT INTO messages(
+              account_id, gmail_message_id, thread_pk, internal_date, is_from_me, date_trusted,
+              raw_path, raw_sha256, provenance_hash, imported_at
+            ) VALUES (?, ?, ?, 111, 0, 0, ?, 'mid', 'mid', 1)
+            """,
+            (
+                account,
+                gmail_hex(str(number), decimal_only=True),
+                thread_pk,
+                f"mbox:{path.resolve()}#{offset}",
+            ),
+        )
+        self.conn.commit()
+        repair_takeout(self.conn, rewrite_unprovable=True)
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT internal_date, date_trusted FROM messages WHERE gmail_message_id = ?",
+            (gmail_hex(str(number), decimal_only=True),),
+        ).fetchone()
+        self.assertEqual((int(row[0]), int(row[1])), (111, 0))
 
     def _labels(self, number: int) -> list[str]:
         return [

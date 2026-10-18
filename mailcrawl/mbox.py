@@ -445,6 +445,8 @@ def _open_mbox_row(raw_path: object, gmail_message_id: str) -> tuple[Path, bytes
     try:
         if not path.is_file():
             return None
+        if not _mbox_boundary(path, offset):
+            return None
         separator = _read_mbox_separator(path, offset)
         if _separator_id(separator) != gmail_message_id:
             return None
@@ -460,6 +462,16 @@ def _mbox_ref(raw_path: str) -> tuple[Path, int] | None:
     if not sep or not offset_text.isdigit() or len(offset_text) > 12:
         return None
     return Path(path_text), int(offset_text)
+
+
+def _mbox_boundary(path: Path, offset: int) -> bool:
+    if offset == 0:
+        return True
+    size = min(offset, 4)
+    with path.open("rb") as handle:
+        handle.seek(offset - size)
+        prev = handle.read(size)
+    return prev.endswith(b"\n\n") or prev.endswith(b"\r\n\r\n")
 
 
 def _read_mbox_separator(path: Path, offset: int) -> bytes:
