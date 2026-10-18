@@ -1172,9 +1172,11 @@ class TimeFactsTest(unittest.TestCase):
                 conn.execute(
                     "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (1, 't', 5, 0)"
                 )
+                header_id = gmail_hex("1760000000000000005", decimal_only=True)
+                receipt_id = gmail_hex("1760000000000000009", decimal_only=True)
                 rows = (
-                    ("header", header_stamp, f"mbox:{mbox.resolve()}#0"),
-                    ("receipt", receipt_stamp, f"mbox:{mbox.resolve()}#{second}"),
+                    (header_id, header_stamp, f"mbox:{mbox.resolve()}#0"),
+                    (receipt_id, receipt_stamp, f"mbox:{mbox.resolve()}#{second}"),
                     ("missing", header_stamp, "mbox:/tmp/does-not-exist-mailcrawl.mbox#0"),
                     ("eml-header", header_stamp, str(eml.resolve())),
                     ("eml-receipt", receipt_stamp, str(other.resolve())),
@@ -1213,9 +1215,9 @@ class TimeFactsTest(unittest.TestCase):
                     }
 
                 got = flags()
-                self.assertEqual(got["header"], (0, receipt_stamp, 1))
-                self.assertEqual(got["receipt"], (0, receipt_stamp, 1))
-                self.assertEqual(got["missing"], (0, header_stamp, 0))
+                self.assertEqual(got[header_id], (0, receipt_stamp, 1))
+                self.assertEqual(got[receipt_id], (0, receipt_stamp, 1))
+                self.assertEqual(got["missing"], (0, header_stamp, 1))
                 self.assertEqual(got["eml-header"], (0, header_stamp, 0))
                 self.assertEqual(got["eml-receipt"], (0, receipt_stamp, 0))
                 conn.execute("PRAGMA user_version = 7")
@@ -1233,7 +1235,7 @@ class TimeFactsTest(unittest.TestCase):
                 ]
                 expected = []
                 for message_id, mine, stamp, raw_path in kept:
-                    if message_id == "header":
+                    if message_id == header_id:
                         stamp = receipt_stamp
                     expected.append((message_id, mine, stamp, raw_path))
                 self.assertEqual(after, expected)

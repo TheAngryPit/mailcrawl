@@ -1,6 +1,6 @@
 """SQLite tables for one account archive."""
 
-USER_VERSION = 9
+USER_VERSION = 10
 
 TABLES = (
     "accounts",

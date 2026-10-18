@@ -401,33 +401,32 @@ def _separator_id(separator: bytes) -> str | None:
 @dataclass(frozen=True)
 class MboxFacts:
     kind: str
-    inbound: bool
+    receipt: tuple[int, int] | None = None
 
 
-def mbox_facts(raw_path: object) -> MboxFacts:
-    """``takeout`` when the separator would be accepted, ``plain`` when the file is not, ``unread`` when it cannot be opened."""
-    opened = _open_mbox_row(raw_path)
+def mbox_facts(raw_path: object, gmail_message_id: str) -> MboxFacts:
+    """``takeout`` or ``plain`` when this row's separator is at the offset.
+
+    ``unread`` when the file is missing or the separator belongs to another Gmail id.
+    An unread row is left unchanged.
+    """
+    opened = _open_mbox_row(raw_path, gmail_message_id)
     if opened is None:
-        return MboxFacts("unread", False)
+        return MboxFacts("unread")
     _path, separator, head = opened
     if head.startswith(separator):
         head = head[len(separator) :]
     _kept, takeout = _strip_takeout(head, separator)
     kind = "takeout" if takeout.labels is not None else "plain"
-    return MboxFacts(kind, _arrived_from_outside(head))
+    return MboxFacts(kind, _separator_receipt(separator))
 
 
-def takeout_block(raw_path: object) -> bool:
+def takeout_block(raw_path: object, gmail_message_id: str) -> bool:
     """True when this row's separator and leading block would be accepted at import."""
-    return mbox_facts(raw_path).kind == "takeout"
+    return mbox_facts(raw_path, gmail_message_id).kind == "takeout"
 
 
-def stored_receipt(raw_path: object) -> tuple[int, int] | None:
-    """Receipt stamp and trust from the mbox separator, or None when it cannot be proved."""
-    opened = _open_mbox_row(raw_path)
-    if opened is None:
-        return None
-    _path, separator, _head = opened
+def _separator_receipt(separator: bytes) -> tuple[int, int] | None:
     rest = _SEPARATOR_REST.match(separator)
     fallback = rest.group(1).decode("utf-8", "replace") if rest else None
     receipt = parse_date(fallback) if fallback else None
@@ -436,7 +435,7 @@ def stored_receipt(raw_path: object) -> tuple[int, int] | None:
     return chosen_stamp(receipt, None, as_of(None))
 
 
-def _open_mbox_row(raw_path: object) -> tuple[Path, bytes, bytes] | None:
+def _open_mbox_row(raw_path: object, gmail_message_id: str) -> tuple[Path, bytes, bytes] | None:
     if not isinstance(raw_path, str) or not raw_path.startswith(RAW_PATH):
         return None
     ref = _mbox_ref(raw_path)
@@ -447,6 +446,8 @@ def _open_mbox_row(raw_path: object) -> tuple[Path, bytes, bytes] | None:
         if not path.is_file():
             return None
         separator = _read_mbox_separator(path, offset)
+        if _separator_id(separator) != gmail_message_id:
+            return None
         head = _read_head(path, offset)
     except OSError:
         return None
@@ -465,50 +466,6 @@ def _read_mbox_separator(path: Path, offset: int) -> bytes:
     with path.open("rb") as handle:
         handle.seek(offset)
         return handle.readline(4096)
-
-
-_FROM_HOST = re.compile(rb"(?i)\bfrom\s+(\S+)")
-
-
-def _arrived_from_outside(head: bytes) -> bool:
-    if _header_values(head, "delivered-to"):
-        return True
-    for value in _header_values(head, "authentication-results"):
-        folded = value.lower()
-        if b"spf=" in folded or b"dkim=" in folded or b"dmarc=" in folded:
-            return True
-    for value in _header_values(head, "received"):
-        found = _FROM_HOST.search(value)
-        if found is not None and not _google_hop(found.group(1)):
-            return True
-    return False
-
-
-def _google_hop(host: bytes) -> bool:
-    token = host.strip(b"[]()").lower().rstrip(b".")
-    return token in (b"google.com", b"gmail.com") or token.endswith(
-        (b".google.com", b".gmail.com")
-    )
-
-
-def _header_values(head: bytes, name: str) -> list[bytes]:
-    wanted = name.encode()
-    values: list[bytes] = []
-    current: bytearray | None = None
-    for line in head.splitlines():
-        if line[:1] in (b" ", b"\t"):
-            if current is not None:
-                current += b" " + line.strip()
-            continue
-        if current is not None:
-            values.append(bytes(current))
-            current = None
-        key, sep, rest = line.partition(b":")
-        if sep and key.strip().lower() == wanted:
-            current = bytearray(rest.strip())
-    if current is not None:
-        values.append(bytes(current))
-    return values
 
 
 def _read_head(path: Path, offset: int) -> bytes:

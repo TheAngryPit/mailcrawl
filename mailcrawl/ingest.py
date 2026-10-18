@@ -43,10 +43,7 @@ class ImportResult:
         n_error: int,
         n_refused: int = 0,
         n_reconciled: int = 0,
-        takeout_sent: str = "",
         takeout_unmapped: tuple[str, ...] = (),
-        takeout_skipped: tuple[tuple[str, int], ...] = (),
-        takeout_warnings: tuple[str, ...] = (),
     ) -> None:
         self.n_seen = n_seen
         self.n_new = n_new
@@ -54,10 +51,7 @@ class ImportResult:
         self.n_error = n_error
         self.n_refused = n_refused
         self.n_reconciled = n_reconciled
-        self.takeout_sent = takeout_sent
         self.takeout_unmapped = takeout_unmapped
-        self.takeout_skipped = takeout_skipped
-        self.takeout_warnings = takeout_warnings
 
 
 def load_catalogue_entries(path: Path | None, alias: str) -> dict[str, dict[str, str]]:
@@ -98,7 +92,6 @@ def import_mbox(
     taxonomy_path: Path | None,
     account_email: str,
     label_map: dict[str, str] | None = None,
-    owners: frozenset[str] | None = None,
 ) -> ImportResult:
     account_id = _account_id(conn, alias)
     mapping = checked_label_map(label_map)
@@ -133,11 +126,8 @@ def import_mbox(
         catalogue=load_catalogue_entries(taxonomy_path, alias),
         account_email=account_email,
     )
-    report = repair_takeout(conn, label_map, owners=owners)
-    result.takeout_sent = report.sent
+    report = repair_takeout(conn, label_map)
     result.takeout_unmapped = report.unmapped
-    result.takeout_skipped = report.skipped
-    result.takeout_warnings = report.warnings
     conn.commit()
     return result
 
@@ -447,14 +437,24 @@ def _upsert_message(
     else:
         return "conflict", kept_sha
     msg_pk = int(existing["msg_pk"])
-    conn.execute(
-        """
-        UPDATE messages
-        SET is_from_me = ?, internal_date = ?, date_trusted = ?
-        WHERE msg_pk = ?
-        """,
-        (is_from_me, message.internal_date, message.date_trusted, msg_pk),
-    )
+    if source == "mbox":
+        conn.execute(
+            """
+            UPDATE messages
+            SET is_from_me = ?, internal_date = ?, date_trusted = ?, raw_path = ?
+            WHERE msg_pk = ?
+            """,
+            (is_from_me, message.internal_date, message.date_trusted, message.raw_path, msg_pk),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE messages
+            SET is_from_me = ?, internal_date = ?, date_trusted = ?
+            WHERE msg_pk = ?
+            """,
+            (is_from_me, message.internal_date, message.date_trusted, msg_pk),
+        )
     _replace_labels(conn, account_id, msg_pk, message, source)
     current = str(existing["gmail_thread_id"])
     incoming = message.gmail_thread_id

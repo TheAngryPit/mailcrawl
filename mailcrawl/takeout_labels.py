@@ -26,7 +26,6 @@ LABEL_SOURCES = (
     "https://support.google.com/mail/answer/3094499",
 )
 
-MIN_SENT_SUPPORT = 20
 
 LABELS: dict[str, str] = {
     'categoria fóruns': 'CATEGORY_FORUMS',
@@ -413,7 +412,11 @@ def checked_label_map(label_map: dict[str, str] | None) -> dict[str, str]:
     allowed = set(LABELS.values())
     cleaned: dict[str, str] = {}
     for name, label_id in label_map.items():
-        if not isinstance(name, str) or not isinstance(label_id, str) or label_id not in allowed:
+        if not isinstance(name, str) or not isinstance(label_id, str):
+            raise UsageError("takeout label_map needs a known system id")
+        if system_id(label_id) == "SENT" or label_key(label_id) == "sent":
+            raise UsageError(f"add {name} to the Takeout label table via PR")
+        if label_id not in allowed:
             raise UsageError("takeout label_map needs a known system id")
         key = label_key(name)
         if key in cleaned:
@@ -423,18 +426,11 @@ def checked_label_map(label_map: dict[str, str] | None) -> dict[str, str]:
 
 
 def resolved_label(name: str, mapping: dict[str, str]) -> str | None:
-    """A non-SENT config entry wins, then a known system name.
-
-    A label_map SENT target on an unknown name stays unmapped here. Repair
-    grants that id only when From matches the account or an owner alias.
-    """
+    """A config entry wins, then a known system name."""
     override = mapping.get(label_key(name))
-    if override is not None and override != "SENT":
+    if override is not None:
         return override
-    system = system_id(name)
-    if system is not None:
-        return system
-    return None
+    return system_id(name)
 
 
 def system_id(name: str) -> str | None:
@@ -447,22 +443,4 @@ def system_id(name: str) -> str | None:
         return None
     return LABELS.get(collapsed)
 
-
-def sent_candidates(counts: dict[str, tuple[int, int]], *, sent_known: bool) -> tuple[str, ...]:
-    """Names that might mean Sent. The caller reports them and does not apply them.
-
-    ``counts`` maps a label name to ``(messages, messages whose From address
-    hashes to the account)``. One message from any other address excludes the
-    name. ``sent_known`` means this account already has SENT from the table
-    or from ``label_map``.
-    """
-    if sent_known:
-        return ()
-    found: list[str] = []
-    for name in sorted(counts):
-        total, owned = counts[name]
-        if total < MIN_SENT_SUPPORT or owned != total:
-            continue
-        found.append(name)
-    return tuple(found)
 

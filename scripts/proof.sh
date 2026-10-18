@@ -249,7 +249,7 @@ try:
     if body != "This body is fake fixture text.":
         raise SystemExit("cleaned body is not the kept sentence")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 9:
+    if version != 10:
         raise SystemExit(f"user_version {version}")
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table in ("decisions", "sender_decisions", "thread_mutes"):
@@ -573,7 +573,7 @@ conn = sqlite3.connect(path)
 conn.row_factory = sqlite3.Row
 try:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 9:
+    if version != 10:
         raise SystemExit(f"user_version {version}")
     flags = {
         row["subject"]: row["image_only"]

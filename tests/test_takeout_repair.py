@@ -128,7 +128,6 @@ class TakeoutRepairTest(unittest.TestCase):
             account_email="ada@example.com",
         )
         self.assertEqual(result.n_new, 6)
-        self.assertEqual(result.takeout_sent, "")
         self.assertEqual(
             self._labels(1701),
             ["CATEGORY_UPDATES", "SENT", "mbox:Projetos", "pseudo:opened"],
@@ -199,18 +198,13 @@ class TakeoutRepairTest(unittest.TestCase):
             taxonomy_path=None,
             account_email="ada@example.com",
         )
-        self.assertEqual(found.takeout_sent, "")
-        self.assertEqual(found.takeout_warnings, ())
         self.assertIn("Postausgang", found.takeout_unmapped)
-        self.assertIsNone(self._cursor("takeout_sent"))
-        self.assertEqual(self._cursor("owner_flag"), "kept")
         self.assertEqual(self._labels(1819), ["mbox:Postausgang"])
         self.assertEqual(self._row(1819)["is_from_me"], 0)
         self.assertEqual(self._row(1800)["is_from_me"], 0)
         again = repair_takeout(self.conn)
         self.conn.commit()
-        self.assertEqual(again.sent, "")
-        self.assertIsNone(self._cursor("takeout_sent"))
+        self.assertIn("Postausgang", again.unmapped)
 
         short = connect(init_account(self.home, "vcl", "ada@example.com"))
         try:
@@ -230,7 +224,7 @@ class TakeoutRepairTest(unittest.TestCase):
                 taxonomy_path=None,
                 account_email="ada@example.com",
             )
-            self.assertEqual(missed.takeout_sent, "")
+            self.assertIn("Postausgang", missed.takeout_unmapped)
             self.assertEqual(
                 [
                     row[0]
@@ -245,14 +239,6 @@ class TakeoutRepairTest(unittest.TestCase):
                 ],
                 ["mbox:Postausgang"],
             )
-            kept = short.execute(
-                "SELECT value FROM cursors WHERE stream = 'owner_flag'"
-            ).fetchone()
-            self.assertEqual(kept[0], "kept")
-            sent_note = short.execute(
-                "SELECT value FROM cursors WHERE stream = 'takeout_sent'"
-            ).fetchone()
-            self.assertIsNone(sent_note)
             mines = [int(row[0]) for row in short.execute("SELECT is_from_me FROM messages")]
             self.assertEqual(mines, [0] * 10)
         finally:
@@ -274,6 +260,17 @@ class TakeoutRepairTest(unittest.TestCase):
                 account_email="ada@example.com",
                 label_map={"FooSent": "NOT_A_LABEL"},
             )
+        with self.assertRaises(UsageError) as sent:
+            import_mbox(
+                self.conn,
+                alias="personal",
+                mbox_path=path,
+                labels_path=None,
+                taxonomy_path=None,
+                account_email="ada@example.com",
+                label_map={"FooSent": "SENT"},
+            )
+        self.assertEqual(str(sent.exception), "add FooSent to the Takeout label table via PR")
         result = import_mbox(
             self.conn,
             alias="personal",
@@ -281,12 +278,11 @@ class TakeoutRepairTest(unittest.TestCase):
             labels_path=None,
             taxonomy_path=None,
             account_email="ada@example.com",
-            label_map={"FooSent": "SENT"},
+            label_map={"FooSent": "INBOX"},
         )
-        self.assertEqual(result.takeout_sent, "override:foosent")
-        self.assertEqual(self._labels(1601), ["SENT"])
-        self.assertEqual(self._row(1601)["is_from_me"], 1)
-        self.assertEqual(self._cursor("takeout_sent"), "override:foosent")
+        self.assertEqual(result.n_new, 1)
+        self.assertEqual(self._labels(1601), ["INBOX"])
+        self.assertEqual(self._row(1601)["is_from_me"], 0)
 
     def test_v8_migration_restores_enviado_and_keeps_an_account_with_no_sent(self) -> None:
         mbox = self.home / "old.mbox"
@@ -335,18 +331,18 @@ class TakeoutRepairTest(unittest.TestCase):
                 INSERT INTO messages(
                   msg_pk, account_id, gmail_message_id, thread_pk, internal_date, is_from_me,
                   raw_path, raw_sha256, provenance_hash, imported_at
-                ) VALUES (1, 1, 'sent-old', 1, ?, 0, ?, 'a', 'a', 1)
+                ) VALUES (1, 1, ?, 1, ?, 0, ?, 'a', 'a', 1)
                 """,
-                (HEADER_STAMP, f"mbox:{mbox.resolve()}#0"),
+                (gmail_hex("1501", decimal_only=True), HEADER_STAMP, f"mbox:{mbox.resolve()}#0"),
             )
             conn.execute(
                 """
                 INSERT INTO messages(
                   msg_pk, account_id, gmail_message_id, thread_pk, internal_date, is_from_me,
                   raw_path, raw_sha256, provenance_hash, imported_at
-                ) VALUES (2, 2, 'club-old', 2, ?, 1, ?, 'b', 'b', 1)
+                ) VALUES (2, 2, ?, 2, ?, 1, ?, 'b', 'b', 1)
                 """,
-                (HEADER_STAMP, f"mbox:{club.resolve()}#0"),
+                (gmail_hex("1502", decimal_only=True), HEADER_STAMP, f"mbox:{club.resolve()}#0"),
             )
             conn.execute(
                 "INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at) VALUES (1, 1, 'mbox:Enviado', 0)"
@@ -380,15 +376,14 @@ class TakeoutRepairTest(unittest.TestCase):
                 return flags, labels, notes, version
 
             got = snapshot()
-            self.assertEqual(got[0]["sent-old"], (1, RECEIPT_STAMP, 1))
-            self.assertEqual(got[0]["club-old"], (1, RECEIPT_STAMP, 1))
+            self.assertEqual(got[0][gmail_hex("1501", decimal_only=True)], (0, RECEIPT_STAMP, 1))
+            self.assertEqual(got[0][gmail_hex("1502", decimal_only=True)], (1, RECEIPT_STAMP, 1))
             self.assertEqual(got[1], [(1, "SENT"), (2, "mbox:Club")])
             digest = hashlib.sha256(b"").hexdigest()
             self.assertEqual(
                 got[2],
                 [
                     (1, "takeout_label_map", digest),
-                    (2, "owner_flag", "kept"),
                     (2, "takeout_label_map", digest),
                 ],
             )
@@ -476,9 +471,9 @@ class TakeoutRepairTest(unittest.TestCase):
                 INSERT INTO messages(
                   account_id, gmail_message_id, thread_pk, internal_date, from_hdr, is_from_me,
                   raw_path, raw_sha256, provenance_hash, imported_at
-                ) VALUES (1, 'sent-old', 1, ?, 'Ada Fixture <ada@example.com>', 0, ?, 'sent', 'prov', 1)
+                ) VALUES (1, ?, 1, ?, 'Ada Fixture <ada@example.com>', 0, ?, 'sent', 'prov', 1)
                 """,
-                (RECEIPT_STAMP, f"mbox:{takeout.resolve()}#0"),
+                (gmail_hex("1501", decimal_only=True), RECEIPT_STAMP, f"mbox:{takeout.resolve()}#0"),
             )
             sent_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
             conn.execute(
@@ -497,29 +492,26 @@ class TakeoutRepairTest(unittest.TestCase):
                     "SELECT gmail_label_id FROM message_labels ORDER BY gmail_label_id"
                 )
             ]
-            self.assertEqual(labels, ["SENT"])
+            self.assertEqual(labels.count("SENT"), 1)
+            self.assertEqual(labels.count("mbox:Outbox"), 22)
+            self.assertNotIn("mbox:Enviado", labels)
             mines = [int(row[0]) for row in conn.execute("SELECT is_from_me FROM messages ORDER BY msg_pk")]
-            self.assertEqual(mines, [0] * 22 + [1])
-            note = conn.execute(
-                "SELECT value FROM cursors WHERE stream = 'takeout_sent'"
-            ).fetchone()
-            self.assertTrue(note is None or not str(note[0]).startswith("proposed:"))
-            granted = repair_takeout(conn, {"Outbox": "SENT"})
-            conn.commit()
-            self.assertEqual(granted.sent, "override:outbox")
-            self.assertEqual(granted.skipped, ())
+            self.assertEqual(mines, [0] * 23)
+            with self.assertRaises(UsageError) as caught:
+                repair_takeout(conn, {"Outbox": "SENT"})
+            self.assertEqual(str(caught.exception), "add Outbox to the Takeout label table via PR")
             self.assertEqual(
                 [
                     str(row[0])
                     for row in conn.execute(
-                        "SELECT gmail_label_id FROM message_labels ORDER BY gmail_label_id"
+                        "SELECT gmail_label_id FROM message_labels WHERE gmail_label_id = 'SENT'"
                     )
                 ],
                 ["SENT"],
             )
             self.assertEqual(
                 [int(row[0]) for row in conn.execute("SELECT is_from_me FROM messages ORDER BY msg_pk")],
-                [0] * 22 + [1],
+                [0] * 23,
             )
             self.assertNotIn(
                 "last_msg_from_me",
@@ -848,13 +840,6 @@ RECENT = "Thu Oct 15 10:00:00 +0000 2026"
 RECENT_HEADER = "Thu, 15 Oct 2026 10:00:00 +0000"
 
 
-def _hop(number: int, header: str) -> str:
-    return _recent(number, "Caixa", "Ada Fixture <ada@example.com>", "inbound").replace(
-        "X-Gmail-Labels: Caixa\n",
-        "X-Gmail-Labels: Caixa\n" + header,
-    )
-
-
 def _recent(number: int, labels: str, sender: str, body: str, thrid: int | None = None) -> str:
     thread = f"X-GM-THRID: {thrid}\n" if thrid is not None else ""
     return (
@@ -899,7 +884,6 @@ class SentPoisonTest(unittest.TestCase):
             taxonomy_path=None,
             account_email="ada@example.com",
         )
-        self.assertEqual(result.takeout_sent, "")
         self.assertIn("Thư rác", result.takeout_unmapped)
         self.assertEqual(self._labels(3000), ["SENT"])
         self.assertEqual(self._mine(3000), 1)
@@ -929,54 +913,17 @@ class SentPoisonTest(unittest.TestCase):
         )
         self.assertEqual(status.returncode, 0, status.stderr)
         reported = json.loads(status.stdout)
-        self.assertEqual(reported["takeout_sent"], "")
-        self.assertEqual(reported["takeout_skipped"], [])
-        self.assertEqual(reported["takeout_warnings"], [])
-        self.assertIn("Thư rác", reported["takeout_unmapped"])
+        self.assertEqual(reported["takeout_unmapped"], ["Thư rác"])
 
-    def test_a_mixed_user_label_is_not_proposed_or_applied(self) -> None:
-        parts = [
-            _recent(number, "Clientes", "Ada Fixture <ada@example.com>", "note")
-            for number in range(4000, 4019)
-        ]
-        parts.append(_recent(4019, "Clientes", "Bao Fixture <bao@example.com>", "note"))
-        path = self.home / "clientes.mbox"
-        path.write_text("".join(parts), encoding="utf-8")
-        result = import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=path,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-        )
-        self.assertEqual(result.takeout_sent, "")
-        self.assertIn("Clientes", result.takeout_unmapped)
-        self.assertEqual(self._labels(4000), ["mbox:Clientes"])
-        self.assertEqual(self._mine(4019), 0)
-        mapped = import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=path,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-            label_map={"Clientes": "SENT"},
-        )
-        self.assertEqual(mapped.takeout_sent, "override:clientes")
-        self.assertEqual(mapped.takeout_skipped, (("Clientes", 1),))
-        self.assertEqual(self._labels(4000), ["SENT"])
-        self.assertEqual(self._mine(4000), 1)
-        self.assertEqual(self._labels(4019), ["mbox:Clientes"])
-        self.assertEqual(self._mine(4019), 0)
-
-    def test_an_all_owner_unknown_label_is_only_proposed(self) -> None:
-        parts = [
-            _recent(number, "Postausgang", "Ada Fixture <ada@example.com>", "note")
-            for number in range(4100, 4120)
-        ]
+    def test_an_unknown_name_stays_unmapped(self) -> None:
         path = self.home / "out.mbox"
-        path.write_text("".join(parts), encoding="utf-8")
+        path.write_text(
+            "".join(
+                _recent(number, "Postausgang", "Ada Fixture <ada@example.com>", "out")
+                for number in range(1800, 1820)
+            ),
+            encoding="utf-8",
+        )
         result = import_mbox(
             self.conn,
             alias="personal",
@@ -985,29 +932,58 @@ class SentPoisonTest(unittest.TestCase):
             taxonomy_path=None,
             account_email="ada@example.com",
         )
-        self.assertEqual(result.takeout_sent, "proposed:Postausgang")
-        self.assertEqual(result.takeout_warnings, ("Postausgang",))
-        self.assertEqual(self._labels(4100), ["mbox:Postausgang"])
-        self.assertEqual(self._mine(4100), 0)
-        self.assertIn("Postausgang", result.takeout_unmapped)
+        self.assertEqual(result.takeout_unmapped, ("Postausgang",))
+        self.assertEqual(self._labels(1800), ["mbox:Postausgang"])
+        self.assertEqual(self._mine(1800), 0)
+
+    def test_a_sent_target_is_rejected_for_every_spelling(self) -> None:
+        path = self.home / "spell.mbox"
+        path.write_text(
+            _recent(1601, "FooSent", "Ada Fixture <ada@example.com>", "one"),
+            encoding="utf-8",
+        )
+        for target in ("SENT", "sent", "Sent", "Enviado"):
+            with self.assertRaises(UsageError) as caught:
+                import_mbox(
+                    self.conn,
+                    alias="personal",
+                    mbox_path=path,
+                    labels_path=None,
+                    taxonomy_path=None,
+                    account_email="ada@example.com",
+                    label_map={"FooSent": target},
+                )
+            self.assertEqual(str(caught.exception), "add FooSent to the Takeout label table via PR")
+        self.assertIsNone(self.conn.execute("SELECT msg_pk FROM messages").fetchone())
+
+    def test_label_map_rejects_names_that_normalize_together(self) -> None:
+        path = self.home / "dup.mbox"
+        path.write_text(
+            _block(1701, "FooSent", "Ada Fixture <ada@example.com>", "one"),
+            encoding="utf-8",
+        )
+        with self.assertRaises(UsageError) as caught:
+            import_mbox(
+                self.conn,
+                alias="personal",
+                mbox_path=path,
+                labels_path=None,
+                taxonomy_path=None,
+                account_email="ada@example.com",
+                label_map={"Foo Sent": "INBOX", "foo:sent": "STARRED"},
+            )
+        self.assertEqual(str(caught.exception), "takeout label_map repeats a name")
+        self.assertIsNone(self.conn.execute("SELECT msg_pk FROM messages").fetchone())
 
     def test_same_label_map_does_not_reread_the_mbox(self) -> None:
         first = "Thu Jan 02 10:00:00 +0000 2020"
         second = "Thu Feb 02 10:00:00 +0000 2020"
         path = self.home / "once.mbox"
         path.write_text(
-            f"From 1601@example.com {first}\n"
-            "X-Gmail-Labels: FooSent\n"
-            "From: Bao Fixture <bao@example.com>\n"
-            "To: Ada Fixture <ada@example.com>\n"
-            "Subject: synthetic\n"
-            f"Date: {HEADER}\n"
-            "Message-ID: <once@example.com>\n"
-            "\n"
-            "note\n",
+            _block(1601, "FooSent", "Bao Fixture <bao@example.com>", "note"),
             encoding="utf-8",
         )
-        mapping = {"FooSent": "SENT"}
+        mapping = {"FooSent": "INBOX"}
         import_mbox(
             self.conn,
             alias="personal",
@@ -1017,17 +993,11 @@ class SentPoisonTest(unittest.TestCase):
             account_email="ada@example.com",
             label_map=mapping,
         )
+        self.assertEqual(self._labels(1601), ["INBOX"])
         self.conn.close()
         path.write_text(path.read_text(encoding="utf-8").replace(first, second), encoding="utf-8")
         again = connect(self.home / "personal.db")
         try:
-            stamp = int(
-                again.execute(
-                    "SELECT internal_date FROM messages WHERE gmail_message_id = ?",
-                    (gmail_hex("1601", decimal_only=True),),
-                ).fetchone()[0]
-            )
-            self.assertEqual(stamp, calendar.timegm((2020, 1, 2, 10, 0, 0)))
             repair_takeout(again, mapping)
             stamp = int(
                 again.execute(
@@ -1035,140 +1005,10 @@ class SentPoisonTest(unittest.TestCase):
                     (gmail_hex("1601", decimal_only=True),),
                 ).fetchone()[0]
             )
-            self.assertEqual(stamp, calendar.timegm((2020, 1, 2, 10, 0, 0)))
+            self.assertEqual(stamp, RECEIPT_STAMP)
         finally:
             again.close()
         self.conn = connect(self.home / "personal.db")
-
-    def test_sent_map_skips_non_owners_and_reverts_without_that_file(self) -> None:
-        spam = self.home / "spam.mbox"
-        spam.write_text(
-            "".join(
-                _recent(number, "Thư rác", "Ada Fixture <ada@example.com>", "spam")
-                for number in range(5000, 5025)
-            ),
-            encoding="utf-8",
-        )
-        proposed = import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=spam,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-        )
-        self.assertEqual(proposed.takeout_sent, "proposed:Thư rác")
-        self.assertEqual(proposed.takeout_warnings, ("Thư rác",))
-        self.assertEqual(self._mine(5000), 0)
-        self.assertEqual(self._labels(5000), ["mbox:Thư rác"])
-        later = self.home / "later.mbox"
-        later.write_text(
-            _recent(5025, "Thư rác", "Mal Fixture <mal@example.com>", "spam")
-            + _recent(5026, "Thư rác", "Mal Fixture <mal@example.com>", "spam")
-            + _recent(5027, "Thư rác", "Pat Fixture <pat@example.com>", "note"),
-            encoding="utf-8",
-        )
-        owners = frozenset({"pat@example.com"})
-        mapping = {"Thư rác": "SENT"}
-        mapped = import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=later,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-            label_map=mapping,
-            owners=owners,
-        )
-        self.assertEqual(mapped.takeout_skipped, (("Thư rác", 2),))
-        self.assertEqual(self._labels(5000), ["SENT"])
-        self.assertEqual(self._mine(5000), 1)
-        self.assertEqual(self._labels(5024), ["SENT"])
-        self.assertEqual(self._mine(5027), 1)
-        self.assertEqual(self._labels(5025), ["mbox:Thư rác"])
-        self.assertEqual(self._mine(5025), 0)
-        self.assertEqual(self._mine(5026), 0)
-        kept = calendar.timegm((2026, 10, 15, 10, 0, 0))
-        self.assertEqual(self._stamp(5000), kept)
-        spam.write_text(
-            spam.read_text(encoding="utf-8").replace(RECENT, "Thu Jan 02 10:00:00 +0000 2020"),
-            encoding="utf-8",
-        )
-        extra = self.home / "extra.mbox"
-        extra.write_text(
-            _recent(5028, "Thư rác", "Ada Fixture <ada@example.com>", "later"),
-            encoding="utf-8",
-        )
-        import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=extra,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-            label_map=mapping,
-            owners=owners,
-        )
-        self.assertEqual(self._stamp(5000), kept)
-        self.assertEqual(self._mine(5028), 1)
-        self.assertEqual(self._labels(5028), ["SENT"])
-        config = self.home / "config.toml"
-        config.write_text(
-            "\n".join(
-                [
-                    "[accounts.personal]",
-                    'email = "ada@example.com"',
-                    'owners = ["pat@example.com"]',
-                    "",
-                    "[takeout.personal.label_map]",
-                    '"Thư rác" = "SENT"',
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-        status = run_mailcrawl(
-            self.home,
-            "--json",
-            "--home",
-            str(self.home),
-            "--config",
-            str(config),
-            "takeout",
-            "status",
-            "--account",
-            "personal",
-        )
-        self.assertEqual(status.returncode, 0, status.stderr)
-        reported = json.loads(status.stdout)
-        self.assertEqual(reported["takeout_skipped"], [{"count": 2, "label": "Thư rác"}])
-        self.assertEqual(reported["takeout_warnings"], [])
-        club = self.home / "club.mbox"
-        club.write_text(
-            _recent(5099, "Club", "Ada Fixture <ada@example.com>", "note"),
-            encoding="utf-8",
-        )
-        cleared = import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=club,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-        )
-        self.assertEqual(cleared.takeout_skipped, ())
-        for number in (*range(5000, 5029),):
-            self.assertEqual(self._labels(number), ["mbox:Thư rác"], number)
-            self.assertEqual(self._mine(number), 0, number)
-        self.assertEqual(self._labels(5099), ["mbox:Club"])
-        granted = repair_takeout(self.conn, mapping, owners=owners)
-        self.conn.commit()
-        self.assertEqual(granted.skipped, (("Thư rác", 2),))
-        self.assertEqual(self._mine(5000), 1)
-        self.assertEqual(self._mine(5027), 1)
-        self.assertEqual(self._mine(5028), 1)
-        self.assertEqual(self._mine(5025), 0)
-        self.assertEqual(self._labels(5025), ["mbox:Thư rác"])
 
     def test_gog_label_ids_are_not_remapped_to_sent(self) -> None:
         path = self.home / "bob.mbox"
@@ -1206,100 +1046,28 @@ class SentPoisonTest(unittest.TestCase):
             (msg_pk, account),
         )
         self.conn.commit()
-        repair_takeout(self.conn, {"Enviados": "SENT"}, rewrite_unprovable=True)
+        repair_takeout(self.conn, rewrite_unprovable=True)
         self.conn.commit()
         self.assertEqual(self._labels(6000), ["Label_9", "mbox:Club"])
         self.assertEqual(self._mine(6000), 0)
+        with self.assertRaises(UsageError):
+            repair_takeout(self.conn, {"Enviados": "SENT"})
+        self.assertEqual(self._labels(6000), ["Label_9", "mbox:Club"])
 
-    def test_label_map_rejects_names_that_normalize_together(self) -> None:
-        path = self.home / "dup.mbox"
-        path.write_text(
-            _block(1701, "FooSent", "Ada Fixture <ada@example.com>", "one"),
-            encoding="utf-8",
+    def test_reexport_to_the_same_path_keeps_each_message(self) -> None:
+        path = self.home / "All mail Including Spam and Trash.mbox"
+        front_receipt = "Fri Mar 01 12:00:00 +0000 2024"
+        client_receipt = "Sat Jun 06 08:00:00 +0000 2021"
+        front_stamp = calendar.timegm((2024, 3, 1, 12, 0, 0))
+        client_stamp = calendar.timegm((2021, 6, 6, 8, 0, 0))
+        sent = _block(2401, "Sent", "Ada Fixture <ada@example.com>", "sent body")
+        client = _block(2402, "Inbox", "Bao Fixture <bao@example.com>", "client body").replace(
+            RECEIPT, client_receipt
         )
-        with self.assertRaises(UsageError) as caught:
-            import_mbox(
-                self.conn,
-                alias="personal",
-                mbox_path=path,
-                labels_path=None,
-                taxonomy_path=None,
-                account_email="ada@example.com",
-                label_map={"Foo Sent": "SENT", "foo:sent": "INBOX"},
-            )
-        self.assertEqual(str(caught.exception), "takeout label_map repeats a name")
-        self.assertIsNone(self.conn.execute("SELECT msg_pk FROM messages").fetchone())
-
-    def test_reimport_keeps_a_sent_grant(self) -> None:
-        path = self.home / "caixa.mbox"
-        path.write_text(
-            _recent(7000, "Caixa", "Ada Fixture <ada@example.com>", "note"),
-            encoding="utf-8",
+        front = _block(2400, "Inbox", "Cam Fixture <cam@example.com>", "front").replace(
+            RECEIPT, front_receipt
         )
-        mapping = {"Caixa": "SENT"}
-        kwargs = dict(
-            alias="personal",
-            mbox_path=path,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-            label_map=mapping,
-        )
-        import_mbox(self.conn, **kwargs)
-        self.assertEqual(self._labels(7000), ["SENT"])
-        self.assertEqual(self._mine(7000), 1)
-        again = import_mbox(self.conn, **kwargs)
-        self.assertEqual(again.n_dup, 1)
-        self.assertEqual(self._labels(7000), ["SENT"])
-        self.assertEqual(self._mine(7000), 1)
-        self.assertEqual(self._observed(7000, "SENT"), calendar.timegm((2026, 10, 15, 10, 0, 0)))
-
-    def test_an_overlapping_export_keeps_the_grant(self) -> None:
-        first = self.home / "first.mbox"
-        first.write_text(
-            _recent(7100, "Caixa", "Ada Fixture <ada@example.com>", "one"),
-            encoding="utf-8",
-        )
-        second = self.home / "second.mbox"
-        second.write_text(
-            _recent(7100, "Caixa", "Ada Fixture <ada@example.com>", "one")
-            + _recent(7101, "Caixa", "Ada Fixture <ada@example.com>", "two"),
-            encoding="utf-8",
-        )
-        mapping = {"Caixa": "SENT"}
-        import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=first,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-            label_map=mapping,
-        )
-        overlapped = import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=second,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-            label_map=mapping,
-        )
-        self.assertEqual(overlapped.n_dup, 1)
-        self.assertEqual(overlapped.n_new, 1)
-        self.assertEqual(self._labels(7100), ["SENT"])
-        self.assertEqual(self._mine(7100), 1)
-        self.assertEqual(self._labels(7101), ["SENT"])
-        self.assertEqual(self._mine(7101), 1)
-
-    def test_dropping_one_sent_key_keeps_the_other(self) -> None:
-        path = self.home / "two.mbox"
-        path.write_text(
-            _recent(7200, "Caixa", "Ada Fixture <ada@example.com>", "a")
-            + _recent(7201, "Saida", "Ada Fixture <ada@example.com>", "b"),
-            encoding="utf-8",
-        )
-        both = {"Caixa": "SENT", "Saida": "SENT"}
+        path.write_text(sent + client, encoding="utf-8")
         import_mbox(
             self.conn,
             alias="personal",
@@ -1307,99 +1075,245 @@ class SentPoisonTest(unittest.TestCase):
             labels_path=None,
             taxonomy_path=None,
             account_email="ada@example.com",
-            label_map=both,
         )
-        self.assertEqual(self._labels(7200), ["SENT"])
-        self.assertEqual(self._labels(7201), ["SENT"])
-        kept = import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=path,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-            label_map={"Saida": "SENT"},
-        )
-        self.assertEqual(kept.takeout_skipped, ())
-        self.assertEqual(self._labels(7201), ["SENT"])
-        self.assertEqual(self._mine(7201), 1)
-        self.assertEqual(self._labels(7200), ["mbox:Caixa"])
-        self.assertEqual(self._mine(7200), 0)
-        self.assertEqual(self._observed(7200, "mbox:Caixa"), calendar.timegm((2026, 10, 15, 10, 0, 0)))
-
-    def test_inbound_headers_are_not_granted_and_takeout_sent_still_is(self) -> None:
-        path = self.home / "hops.mbox"
-        path.write_text(
-            _recent(7300, "Caixa", "Ada Fixture <ada@example.com>", "sent")
-            + _hop(7301, "Delivered-To: ada@example.com\n")
-            + _hop(
-                7302,
-                "Received: from mail.evil.example (mail.evil.example [203.0.113.9]) by mx.google.com with ESMTPS id x\n",
-            )
-            + _hop(
-                7303,
-                "Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=ada@example.com\n",
-            )
-            + _hop(7304, "Received: by 2002:a05:6402:4e0:b0:4a:8f:3a with SMTP id abc\n")
-            + _hop(7305, "Received: from mail-sor-f41.google.com by mx.google.com with ESMTPS id y\n"),
-            encoding="utf-8",
-        )
-        mapped = import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=path,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-            label_map={"Caixa": "SENT"},
-        )
-        self.assertEqual(mapped.takeout_skipped, (("Caixa", 3),))
-        for number in (7300, 7304, 7305):
-            self.assertEqual(self._labels(number), ["SENT"], number)
-            self.assertEqual(self._mine(number), 1, number)
-        for number in (7301, 7302, 7303):
-            self.assertEqual(self._labels(number), ["mbox:Caixa"], number)
-            self.assertEqual(self._mine(number), 0, number)
-
-    def test_a_restored_user_label_keeps_the_receipt_time(self) -> None:
-        path = self.home / "both.mbox"
-        path.write_text(
-            _recent(7400, "Enviado,Caixa", "Ada Fixture <ada@example.com>", "both"),
-            encoding="utf-8",
-        )
-        import_mbox(
-            self.conn,
-            alias="personal",
-            mbox_path=path,
-            labels_path=None,
-            taxonomy_path=None,
-            account_email="ada@example.com",
-            label_map={"Caixa": "SENT"},
-        )
-        self.assertEqual(self._labels(7400), ["SENT"])
-        repair_takeout(self.conn, {})
+        sent_path = str(self._row(2401)["raw_path"])
+        path.write_text(front + sent + client, encoding="utf-8")
+        repair_takeout(self.conn, rewrite_unprovable=True)
         self.conn.commit()
-        self.assertEqual(self._labels(7400), ["SENT", "mbox:Caixa"])
-        self.assertEqual(self._mine(7400), 1)
-        self.assertEqual(self._observed(7400, "mbox:Caixa"), calendar.timegm((2026, 10, 15, 10, 0, 0)))
+        self.assertEqual(self._labels(2401), ["SENT"])
+        self.assertEqual(self._mine(2401), 1)
+        self.assertEqual(int(self._row(2401)["internal_date"]), RECEIPT_STAMP)
+        self.assertEqual(int(self._row(2401)["date_trusted"]), 1)
+        self.assertEqual(int(self._row(2402)["internal_date"]), client_stamp)
+        self.assertEqual(int(self._row(2402)["date_trusted"]), 1)
+        again = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual(again.n_dup, 2)
+        self.assertEqual(again.n_new, 1)
+        self.assertNotEqual(str(self._row(2401)["raw_path"]), sent_path)
+        self.assertTrue(str(self._row(2401)["raw_path"]).endswith(f"#{len(front.encode())}"))
+        repair_takeout(self.conn, rewrite_unprovable=True)
+        self.conn.commit()
+        self.assertEqual(self._labels(2401), ["SENT"])
+        self.assertEqual(self._mine(2401), 1)
+        self.assertEqual(int(self._row(2401)["internal_date"]), RECEIPT_STAMP)
+        self.assertEqual(int(self._row(2402)["internal_date"]), client_stamp)
+        self.assertEqual(int(self._row(2402)["date_trusted"]), 1)
+        self.assertEqual(int(self._row(2400)["internal_date"]), front_stamp)
+        self.assertNotEqual(int(self._row(2402)["internal_date"]), front_stamp)
 
-    def _observed(self, number: int, label_id: str) -> int:
+    def test_offset_alignment_does_not_copy_another_message(self) -> None:
+        path = self.home / "All mail Including Spam and Trash.mbox"
+        sent = _block(8800, "Sent", "Ada Fixture <ada@example.com>", "clean").encode()
+        path.write_bytes(b"x" * 240 + sent)
+        account = int(self.conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        self.conn.execute(
+            "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (?, 'forged-thread', 1, 0)",
+            (account,),
+        )
+        thread_pk = int(self.conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        self.conn.execute(
+            """
+            INSERT INTO messages(
+              account_id, gmail_message_id, thread_pk, internal_date, from_hdr, subject,
+              is_from_me, date_trusted, raw_path, raw_sha256, provenance_hash, imported_at
+            ) VALUES (?, 'forged-inbound', ?, 111, 'Ada Fixture <ada@example.com>', 'Re: Contrato',
+                      0, 0, ?, 'forged', 'forged', 1)
+            """,
+            (account, thread_pk, f"mbox:{path.resolve()}#240"),
+        )
+        msg_pk = int(self.conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        self.conn.execute(
+            """
+            INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at)
+            VALUES (?, 'INBOX', 'INBOX', 'system', 0)
+            """,
+            (account,),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+            VALUES (?, ?, 'INBOX', 111)
+            """,
+            (msg_pk, account),
+        )
+        self.conn.commit()
+        repair_takeout(self.conn, rewrite_unprovable=True)
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT is_from_me, internal_date, date_trusted FROM messages WHERE gmail_message_id = 'forged-inbound'"
+        ).fetchone()
+        self.assertEqual((int(row[0]), int(row[1]), int(row[2])), (0, 111, 0))
+        labels = [
+            item[0]
+            for item in self.conn.execute(
+                "SELECT gmail_label_id FROM message_labels WHERE msg_pk = ?",
+                (msg_pk,),
+            )
+        ]
+        self.assertEqual(labels, ["INBOX"])
+
+    def test_a_missing_mbox_leaves_the_row_unchanged(self) -> None:
+        account = int(self.conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        self.conn.execute(
+            "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (?, 'gone', 1, 0)",
+            (account,),
+        )
+        thread_pk = int(self.conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        self.conn.execute(
+            """
+            INSERT INTO messages(
+              account_id, gmail_message_id, thread_pk, internal_date, is_from_me, date_trusted,
+              raw_path, raw_sha256, provenance_hash, imported_at
+            ) VALUES (?, 'gone-msg', ?, 111, 0, 1, ?, 'gone', 'gone', 1)
+            """,
+            (account, thread_pk, "mbox:/tmp/does-not-exist-mailcrawl.mbox#240"),
+        )
+        msg_pk = int(self.conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        self.conn.execute(
+            """
+            INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at)
+            VALUES (?, 'mbox:Enviado', 'Enviado', 'user', 0)
+            """,
+            (account,),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+            VALUES (?, ?, 'mbox:Enviado', 111)
+            """,
+            (msg_pk, account),
+        )
+        self.conn.commit()
+        repair_takeout(self.conn, rewrite_unprovable=True)
+        self.conn.commit()
         row = self.conn.execute(
             """
-            SELECT observed_at FROM message_labels
-            JOIN messages ON messages.msg_pk = message_labels.msg_pk
-            WHERE gmail_message_id = ? AND gmail_label_id = ?
-            """,
-            (gmail_hex(str(number), decimal_only=True), label_id),
+            SELECT is_from_me, internal_date, date_trusted
+            FROM messages WHERE gmail_message_id = 'gone-msg'
+            """
         ).fetchone()
-        return int(row[0])
+        self.assertEqual((int(row[0]), int(row[1]), int(row[2])), (0, 111, 1))
+        self.assertEqual(
+            [
+                item[0]
+                for item in self.conn.execute(
+                    "SELECT gmail_label_id FROM message_labels WHERE msg_pk = ?",
+                    (msg_pk,),
+                )
+            ],
+            ["mbox:Enviado"],
+        )
 
-    def _stamp(self, number: int) -> int:
-        row = self.conn.execute(
-            "SELECT internal_date FROM messages WHERE gmail_message_id = ?",
-            (gmail_hex(str(number), decimal_only=True),),
-        ).fetchone()
-        return int(row[0])
+    def test_v7_forged_from_is_cleared_and_v8_keeps_the_stored_flag(self) -> None:
+        def plant(version: int) -> sqlite3.Connection:
+            path = self.home / f"v{version}.db"
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            conn.executescript(SCHEMA_SQL)
+            conn.execute("PRAGMA foreign_keys = ON")
+            if version == 7:
+                conn.execute("ALTER TABLE messages DROP COLUMN date_trusted")
+            conn.execute(f"PRAGMA user_version = {version}")
+            conn.execute(
+                "INSERT INTO accounts(account_id, alias, email_hash, created_at) VALUES (1, 'personal', 'abc', 1)"
+            )
+            conn.execute(
+                "INSERT INTO threads(thread_pk, account_id, gmail_thread_id, msg_count, image_only) VALUES (1, 1, 'contrato', 2, 0)"
+            )
+            conn.execute(
+                """
+                INSERT INTO messages(
+                  msg_pk, account_id, gmail_message_id, thread_pk, internal_date, from_hdr,
+                  subject, is_from_me, raw_sha256, provenance_hash, imported_at
+                ) VALUES (1, 1, 'bob-request', 1, 111, 'Bob Fixture <bob@example.com>',
+                          'Contrato', 0, 'a', 'a', 1)
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO messages(
+                  msg_pk, account_id, gmail_message_id, thread_pk, internal_date, from_hdr,
+                  subject, is_from_me, raw_sha256, provenance_hash, imported_at
+                ) VALUES (2, 1, 'forged-reply', 1, 222, 'Ada Fixture <ada@example.com>',
+                          'Re: Contrato', 1, 'b', 'b', 1)
+                """
+            )
+            conn.commit()
+            return conn
+
+        old = plant(7)
+        try:
+            migrate(old)
+            reply = old.execute(
+                "SELECT is_from_me FROM messages WHERE subject = 'Re: Contrato'"
+            ).fetchone()
+            request = old.execute(
+                "SELECT is_from_me FROM messages WHERE gmail_message_id = 'bob-request'"
+            ).fetchone()
+            self.assertEqual(int(reply[0]), 0)
+            self.assertEqual(int(request[0]), 0)
+        finally:
+            old.close()
+        kept = plant(8)
+        try:
+            migrate(kept)
+            reply = kept.execute(
+                "SELECT is_from_me FROM messages WHERE subject = 'Re: Contrato'"
+            ).fetchone()
+            self.assertEqual(int(reply[0]), 1)
+        finally:
+            kept.close()
+
+    def test_dropping_the_retired_column_can_be_retried(self) -> None:
+        path = self.home / "retry.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.executescript(SCHEMA_SQL)
+            conn.execute("PRAGMA user_version = 9")
+            conn.execute("ALTER TABLE threads ADD COLUMN last_msg_from_me INTEGER")
+            conn.execute(
+                """
+                CREATE TABLE takeout_label_override (
+                  msg_pk INTEGER NOT NULL,
+                  label_key TEXT NOT NULL,
+                  previous_id TEXT NOT NULL,
+                  applied_id TEXT NOT NULL,
+                  replaced INTEGER NOT NULL,
+                  PRIMARY KEY (msg_pk, label_key)
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO cursors(account_id, stream, value, updated_at) VALUES (1, 'takeout_sent', 'proposed:X', 0)"
+            )
+            conn.commit()
+            migrate(conn)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
+            names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            self.assertNotIn("last_msg_from_me", columns)
+            self.assertNotIn("takeout_label_override", names)
+            self.assertIsNone(
+                conn.execute("SELECT value FROM cursors WHERE stream = 'takeout_sent'").fetchone()
+            )
+            self.assertEqual(int(conn.execute("PRAGMA user_version").fetchone()[0]), USER_VERSION)
+            conn.execute("PRAGMA user_version = 9")
+            conn.commit()
+            migrate(conn)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(threads)")}
+            names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            self.assertNotIn("last_msg_from_me", columns)
+            self.assertNotIn("takeout_label_override", names)
+            self.assertEqual(int(conn.execute("PRAGMA user_version").fetchone()[0]), USER_VERSION)
+        finally:
+            conn.close()
 
     def _labels(self, number: int) -> list[str]:
         return [
@@ -1420,3 +1334,10 @@ class SentPoisonTest(unittest.TestCase):
             (gmail_hex(str(number), decimal_only=True),),
         ).fetchone()
         return int(row[0])
+
+    def _row(self, number: int):
+        return self.conn.execute(
+            "SELECT * FROM messages WHERE gmail_message_id = ?",
+            (gmail_hex(str(number), decimal_only=True),),
+        ).fetchone()
+

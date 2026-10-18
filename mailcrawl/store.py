@@ -63,6 +63,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         version = 8
     if version == 8:
         _migrate_v8(conn)
+        version = 9
+    if version == 9:
+        _migrate_v9(conn)
         return
     raise UnsupportedSchema(f"user_version {version}")
 
@@ -268,12 +271,39 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
         if "date_trusted" not in columns:
             conn.execute("ALTER TABLE messages ADD COLUMN date_trusted INTEGER NOT NULL DEFAULT 1")
+        if "is_from_me" in columns and "message_labels" in names:
+            conn.execute(
+                """
+                UPDATE messages
+                SET is_from_me = CASE WHEN EXISTS (
+                  SELECT 1 FROM message_labels
+                  WHERE message_labels.msg_pk = messages.msg_pk
+                    AND message_labels.gmail_label_id = 'SENT'
+                ) THEN 1 ELSE 0 END
+                """
+            )
     conn.execute("PRAGMA user_version = 8")
     conn.commit()
 
 
 def _migrate_v8(conn: sqlite3.Connection) -> None:
     repair_takeout(conn, rewrite_unprovable=True)
+    conn.execute("PRAGMA user_version = 9")
+    conn.commit()
+
+
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    names = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "threads" in names:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(threads)")}
+        if "last_msg_from_me" in columns:
+            conn.execute("ALTER TABLE threads DROP COLUMN last_msg_from_me")
+    if "takeout_label_override" in names:
+        conn.execute("DROP TABLE takeout_label_override")
+    if "cursors" in names:
+        conn.execute(
+            "DELETE FROM cursors WHERE stream IN ('takeout_sent', 'owner_flag')"
+        )
     conn.execute(f"PRAGMA user_version = {USER_VERSION}")
     conn.commit()
 
