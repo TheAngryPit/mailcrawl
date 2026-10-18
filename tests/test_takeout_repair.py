@@ -80,6 +80,7 @@ def _sent_outcome(conn: sqlite3.Connection) -> tuple[object, ...]:
 def _block(number: int, labels: str, sender: str, body: str) -> str:
     return (
         f"From {number}@example.com {RECEIPT}\n"
+        f"X-GM-THRID: {number}\n"
         f"X-Gmail-Labels: {labels}\n"
         f"From: {sender}\n"
         "To: Bao Fixture <bao@example.com>\n"
@@ -871,7 +872,7 @@ RECENT_HEADER = "Thu, 15 Oct 2026 10:00:00 +0000"
 
 
 def _recent(number: int, labels: str, sender: str, body: str, thrid: int | None = None) -> str:
-    thread = f"X-GM-THRID: {thrid}\n" if thrid is not None else ""
+    thread = f"X-GM-THRID: {number if thrid is None else thrid}\n"
     return (
         f"From {number}@example.com {RECENT}\n"
         f"{thread}"

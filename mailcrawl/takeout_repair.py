@@ -61,7 +61,7 @@ def repair_takeout(
     digest = _map_digest(mapping)
     current = not rewrite_unprovable and _map_is_current(conn, digest)
     if scope.can_remap():
-        _drop_rfc822_mbox_labels(conn)
+        _drop_unaccepted_mbox_labels(conn)
         if not current:
             _drop_plain_mbox_labels(conn)
             _remap_takeout_labels(conn, mapping)
@@ -81,7 +81,7 @@ def takeout_status(
     return _unmapped(conn, checked_label_map(label_map))
 
 
-def _drop_rfc822_mbox_labels(conn: sqlite3.Connection) -> None:
+def _drop_unaccepted_mbox_labels(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         DELETE FROM message_labels
@@ -91,6 +91,20 @@ def _drop_rfc822_mbox_labels(conn: sqlite3.Connection) -> None:
           )
         """
     )
+    if _has_table(conn, "threads"):
+        conn.execute(
+            """
+            DELETE FROM message_labels
+            WHERE gmail_label_id LIKE 'mbox:%'
+              AND msg_pk IN (
+                SELECT messages.msg_pk
+                FROM messages
+                JOIN threads ON threads.thread_pk = messages.thread_pk
+                WHERE messages.raw_path LIKE 'mbox:%'
+                  AND threads.gmail_thread_id LIKE 'mbox:%'
+              )
+            """
+        )
     _drop_orphan_mbox_labels(conn)
 
 

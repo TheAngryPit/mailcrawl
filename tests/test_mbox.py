@@ -131,13 +131,13 @@ class MboxImportTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            self.labels_of(HTML), ["STARRED", "UNREAD", "mbox:Etiqueta Nova", "pseudo:archived"]
+            self.labels_of(HTML), ["STARRED", "UNREAD", "pseudo:archived"]
         )
         self.assertEqual(self.labels_of(PARTS), ["SENT", "mbox:Projetos, Exemplo", "pseudo:archived"])
         self.assertEqual(self.row(PARTS)["gmail_thread_id"], PLAIN)
         self.assertIsNone(self.row("3e7"))
         kinds = dict(self.conn.execute("SELECT gmail_label_id, kind FROM labels").fetchall())
-        self.assertEqual(kinds["mbox:Etiqueta Nova"], "user")
+        self.assertNotIn("mbox:Etiqueta Nova", kinds)
         self.assertEqual(kinds["UNREAD"], "system")
         self.assertEqual((kinds["pseudo:opened"], kinds["pseudo:archived"]), ("system", "system"))
         self.assertNotIn("mbox:Opened", kinds)

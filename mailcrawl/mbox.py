@@ -336,9 +336,13 @@ def _message_key(takeout: _Takeout, separator: bytes, rfc822_id: str | None) -> 
         or gmail_hex(takeout.gmail_message_id, decimal_only=False)
         or _separator_id(separator)
     )
-    if found is None and rfc822_id and _bare_message_id(rfc822_id):
-        found = rfc822_key(rfc822_id)
-    return found
+    if found is not None:
+        return found
+    if _TAKEOUT_FROM.match(separator) is not None:
+        return None
+    if rfc822_id and _bare_message_id(rfc822_id):
+        return rfc822_key(rfc822_id)
+    return None
 
 
 def _strip_takeout(head: bytes, separator: bytes) -> tuple[bytes, _Takeout]:
@@ -392,6 +396,8 @@ def _decoded(value: str | None) -> str | None:
 
 
 def _separator_id(separator: bytes) -> str | None:
+    if _TAKEOUT_FROM.match(separator) is None:
+        return None
     found = _SEPARATOR_ID.match(separator)
     if found is None:
         return None
