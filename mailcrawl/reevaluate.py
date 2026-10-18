@@ -8,7 +8,7 @@ from dataclasses import replace
 
 from mailcrawl.decisions import DecisionDraft, insert_draft
 from mailcrawl.rules import _time_reason, supersede_current
-from mailcrawl.timefacts import TimePolicy, apply_time, thread_time_facts
+from mailcrawl.timefacts import TimePolicy, apply_time, present_time_closure, thread_time_facts
 
 TIME_DETAIL = "time"
 
@@ -19,6 +19,7 @@ def reevaluate_time(
     now: int,
     policy: TimePolicy | None = None,
     apply: bool,
+    review: bool = False,
 ) -> list[dict[str, str]]:
     """Apply time facts to current rule, knn, and model rows. Human and needs_review stay."""
     rows: list[dict[str, str]] = []
@@ -46,6 +47,7 @@ def reevaluate_time(
             "next_lane": lane,
             "next_state": state,
             "origin": origin,
+            "kind": revive_kind(current["evidence"]),
             "reason": "",
             "skipped": "",
             "state": state,
@@ -63,7 +65,7 @@ def reevaluate_time(
             rows.append(record)
             continue
         evidence = _stored_evidence(current["evidence"])
-        review = current["review_date"]
+        stored_review = current["review_date"]
         draft = DecisionDraft(
             next_state=state,
             lane=lane,
@@ -73,31 +75,40 @@ def reevaluate_time(
             source_detail=str(current["source_detail"]),
             evidence=evidence,
             priority=None if current["priority"] is None else int(current["priority"]),
-            review_date=None if review is None else int(review),
+            review_date=None if stored_review is None else int(stored_review),
             muted=int(current["muted"]),
         )
         adjusted = apply_time(draft, thread_time_facts(conn, thread_pk, now), policy)
         if adjusted is draft:
             rows.append(record)
             continue
-        record["next_state"] = adjusted.next_state
-        record["next_lane"] = adjusted.lane
+        shown = present_time_closure(adjusted, lane, review)
+        record["next_state"] = shown.next_state
+        record["next_lane"] = shown.lane
         record["reason"] = _time_reason(adjusted.evidence)
         same = (
-            adjusted.next_state == state
-            and adjusted.lane == lane
-            and adjusted.review_date == draft.review_date
+            shown.next_state == state
+            and shown.lane == lane
+            and shown.review_date == draft.review_date
         )
         if same:
             rows.append(record)
             continue
         record["changed"] = "1"
         if apply:
-            _supersede_time(conn, current, adjusted, now)
+            _supersede_time(conn, current, shown, now)
         rows.append(record)
     if apply:
         conn.commit()
     return rows
+
+
+def revive_kind(value: object) -> str:
+    for item in _stored_evidence(value):
+        kind = item.get("kind")
+        if item.get("type") == "revive" and kind in ("forgotten", "opportunity"):
+            return str(kind)
+    return ""
 
 
 def _stored_evidence(value: object) -> tuple[dict[str, object], ...]:

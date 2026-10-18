@@ -142,11 +142,23 @@ class RulesEngineTest(unittest.TestCase):
             when=NOW - 8 * DAY,
             labels=[("L6", "Example type/Account", "account_security")],
         )
+        known = self._thread(
+            "check the login",
+            when=NOW - 8 * DAY,
+            labels=[("L6", "Example type/Account", "account_security")],
+            sender_decision=("approved", "imbox", None),
+        )
         reply = self._thread("hello there", sender_decision=("approved", "imbox", 2))
         apply_rules(self.conn, now=NOW, config=self.config)
         self.assertEqual(self._current(fresh)["next_state"], "needs_review")
         self.assertEqual(self._current(fresh)["rule_id"], "4")
-        self.assertEqual(self._current(stale)["next_state"], "reference")
+        self.assertNotIn("time_closure", self._current(fresh)["evidence"])
+        self.assertEqual(self._current(stale)["next_state"], "needs_review")
+        self.assertEqual(self._current(stale)["lane"], "paper_trail")
+        self.assertIn("time_closure", self._current(stale)["evidence"])
+        self.assertEqual(self._current(known)["next_state"], "reference")
+        self.assertEqual(self._current(known)["lane"], "paper_trail")
+        self.assertNotIn("time_closure", self._current(known)["evidence"])
         self.assertEqual(self._current(reply)["next_state"], "reply")
         self.assertEqual(self._current(reply)["priority"], 2)
         self.assertEqual(self._current(reply)["rule_id"], "5")

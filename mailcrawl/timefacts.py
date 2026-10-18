@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import calendar
+import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from mailcrawl.clock import AS_OF_MAX, AS_OF_MIN, utc_parts
 from mailcrawl.decisions import DecisionDraft
@@ -14,6 +15,13 @@ from mailcrawl.time_cues import CUES, MONTHS
 
 TEXT_CAP = 8000
 _MAX_DATES = 8
+_CLOSURE_REASONS = frozenset(
+    {
+        "waiting is stale",
+        "last activity is old",
+        "unrecognized sender is not recent",
+    }
+)
 _CUE = 40
 STALE_DAYS = 90
 OLD_DAYS = 90
@@ -227,6 +235,48 @@ def apply_time(draft: DecisionDraft, facts: TimeFacts, policy: TimePolicy | None
         review_date=review_date,
         muted=draft.muted,
     )
+
+
+def present_time_closure(draft: DecisionDraft, previous_lane: str, review: bool) -> DecisionDraft:
+    if not _time_closes(draft):
+        return draft
+    stamped = _stamp_closure(draft)
+    if review:
+        return stamped
+    return replace(stamped, next_state="needs_review", lane=previous_lane)
+
+
+def _time_closes(draft: DecisionDraft) -> bool:
+    reasons: list[str] = []
+    for item in draft.evidence:
+        found = item.get("time_reason")
+        if isinstance(found, list):
+            reasons.extend(str(part) for part in found)
+    return (
+        draft.next_state in ("reference", "resolved")
+        and draft.lane == "paper_trail"
+        and any(reason in _CLOSURE_REASONS for reason in reasons)
+    )
+
+
+def carries_time_closure(evidence: object) -> bool:
+    if not isinstance(evidence, str) or not evidence:
+        return False
+    try:
+        parsed = json.loads(evidence)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(parsed, list):
+        return False
+    return any(isinstance(item, dict) and isinstance(item.get("time_closure"), dict) for item in parsed)
+
+
+def _stamp_closure(draft: DecisionDraft) -> DecisionDraft:
+    if not draft.evidence:
+        return draft
+    note = dict(draft.evidence[-1])
+    note["time_closure"] = {"lane": draft.lane, "state": draft.next_state}
+    return replace(draft, evidence=draft.evidence[:-1] + (note,))
 
 
 def _last_human(rows) -> str:

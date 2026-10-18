@@ -77,6 +77,16 @@ def _sent_outcome(conn: sqlite3.Connection) -> tuple[object, ...]:
     return (int(row[0]), int(row[1]), labels, str(decision[0]), str(decision[1]))
 
 
+def _mixed_mbox(path: Path, blank: bytes, number: int) -> tuple[bytes, int]:
+    first = _block(number - 1, "Inbox", "Bao Fixture <bao@example.com>", "YWJj").encode("utf-8")
+    raw = first[:-2] + b"\n" + blank + _block(
+        number, "Enviado", "Ada Fixture <ada@example.com>", "sent note"
+    ).encode("utf-8")
+    path.write_bytes(raw)
+    offset = raw.index(f"From {number}@xxx".encode())
+    return raw, offset
+
+
 def _block(number: int, labels: str, sender: str, body: str) -> str:
     return (
         f"From {number}@xxx {RECEIPT}\n"
@@ -692,20 +702,23 @@ class TimeReevaluateTest(unittest.TestCase):
                 "changed",
                 "skipped",
                 "reason",
+                "kind",
             },
         )
         by_thread = {row["gmail_thread_id"]: row for row in plan}
         self.assertEqual(by_thread["rule-thread"]["changed"], "1")
-        self.assertEqual(by_thread["rule-thread"]["next_state"], "resolved")
+        self.assertEqual(by_thread["rule-thread"]["next_state"], "needs_review")
+        self.assertEqual(by_thread["rule-thread"]["next_lane"], "imbox")
+        self.assertEqual(by_thread["rule-thread"]["kind"], "")
         self.assertEqual(by_thread["human-thread"]["skipped"], "human")
         self.assertEqual(by_thread["review-thread"]["skipped"], "needs_review")
         self.assertEqual(self._current("rule-thread"), ("rule", "reply", "rule-4"))
         applied = self._rules("--reevaluate", "--apply", "--csv", str(csv_path))
         self.assertEqual(applied["applied"], True)
         self.assertEqual(applied["changed"], 3)
-        self.assertEqual(self._current("rule-thread"), ("rule", "resolved", "time"))
-        self.assertEqual(self._current("knn-thread"), ("knn", "resolved", "time"))
-        self.assertEqual(self._current("model-thread"), ("model", "resolved", "time"))
+        self.assertEqual(self._current("rule-thread"), ("rule", "needs_review", "time"))
+        self.assertEqual(self._current("knn-thread"), ("knn", "needs_review", "time"))
+        self.assertEqual(self._current("model-thread"), ("model", "needs_review", "time"))
         self.assertEqual(self._rule("model-thread"), "5")
         self.assertEqual(self._current("human-thread"), ("human", "reply", "person"))
         self.assertEqual(self._current("review-thread"), ("rule", "needs_review", "rule-0"))
@@ -810,7 +823,7 @@ class TimeReevaluateTest(unittest.TestCase):
                     str(current["source_detail"]),
                     str(current["next_state"]),
                 ),
-                ("model", "time", "time", "reference"),
+                ("model", "time", "time", "needs_review"),
             )
             self.assertEqual(self._rule("model-thread"), "5")
         finally:
@@ -1563,6 +1576,82 @@ class SentPoisonTest(unittest.TestCase):
             (gmail_hex(str(number), decimal_only=True),),
         ).fetchone()
         self.assertEqual((int(row[0]), int(row[1])), (111, 0))
+
+    def test_a_mixed_blank_line_repairs_enviado_to_sent(self) -> None:
+        number = 8812
+        path = self.home / "mixed-lf-crlf.mbox"
+        raw, offset = _mixed_mbox(path, b"\r\n", number)
+        account = int(self.conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        message_id = gmail_hex(str(number), decimal_only=True)
+        self.conn.execute(
+            """
+            INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only)
+            VALUES (?, ?, 1, 0)
+            """,
+            (account, message_id),
+        )
+        thread_pk = int(self.conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        self.conn.execute(
+            """
+            INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at)
+            VALUES (?, 'mbox:Enviado', 'Enviado', 'user', 0)
+            """,
+            (account,),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO messages(
+              account_id, gmail_message_id, thread_pk, internal_date, from_hdr,
+              subject, body_text, is_from_me, date_trusted, raw_path, raw_sha256,
+              provenance_hash, imported_at
+            ) VALUES (?, ?, ?, 111, 'Ada Fixture <ada@example.com>', 'synthetic',
+                      'sent note', 0, 0, ?, 'mix', 'mix', 1)
+            """,
+            (account, message_id, thread_pk, f"mbox:{path.resolve()}#{offset}"),
+        )
+        msg_pk = int(self.conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        self.conn.execute(
+            """
+            INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+            VALUES (?, ?, 'mbox:Enviado', 0)
+            """,
+            (msg_pk, account),
+        )
+        self.conn.commit()
+        self.conn.execute("DELETE FROM cursors WHERE stream = 'takeout_label_map'")
+        self.conn.commit()
+        repair_takeout(self.conn)
+        self.conn.commit()
+        self.assertIn("SENT", self._labels(number))
+        self.assertNotIn("mbox:Enviado", self._labels(number))
+        self.assertEqual(int(self._row(number)["is_from_me"]), 1)
+        imported = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual(imported.n_new, 1)
+        self.assertTrue(str(self._row(number - 1)["raw_path"]).endswith("#0"))
+        self.assertTrue(str(self._row(number)["raw_path"]).endswith(f"#{offset}"))
+        other = self.home / "mixed-cr-crlf.mbox"
+        other_raw, other_offset = _mixed_mbox(other, b"\r\r\n", 8822)
+        other_import = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=other,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual(other_import.n_new, 2)
+        self.assertIn("SENT", self._labels(8822))
+        self.assertTrue(str(self._row(8822)["raw_path"]).endswith(f"#{other_offset}"))
+        self.assertGreater(other_offset, 0)
+        self.assertTrue(other_raw[:other_offset].endswith(b"\n\r\r\n"))
+        self.assertTrue(raw[:offset].endswith(b"\n\r\n"))
 
     def test_a_numeric_plain_sender_loses_mbox_labels_without_the_file(self) -> None:
         recent = AS_OF - 16 * 86400

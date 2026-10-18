@@ -20,6 +20,7 @@ from mailcrawl.configfile import (
     embedder_name,
     allow_override,
     inference_config,
+    llm_review,
     inference_device,
     local_llm,
     rules_path,
@@ -404,6 +405,7 @@ def _rules(args: argparse.Namespace) -> int:
                 now=now,
                 policy=time_policy(config_path(args.config)),
                 apply=bool(args.apply),
+                review=llm_review(config_path(args.config)),
             )
             _write_reevaluate(Path(args.csv), rows)
             changed = sum(1 for row in rows if row["changed"] == "1")
@@ -430,6 +432,7 @@ def _rules(args: argparse.Namespace) -> int:
             security_senders=security_senders,
             test_recipients=test_recipients,
             policy=time_policy(config_path(args.config)),
+            review=llm_review(config_path(args.config)),
         )
     finally:
         conn.close()
@@ -495,6 +498,7 @@ def _dry_run(args: argparse.Namespace) -> int:
             test_recipients=test_recipients,
             advisor=StubAdvisor() if args.advise else None,
             policy=time_policy(config_path(args.config)),
+            review=llm_review(config_path(args.config)),
         )
 
     _emit(args, {**_counted(args, report), "ok": True})
@@ -506,7 +510,10 @@ def _as_of(args: argparse.Namespace) -> int:
 
 
 def _time_args(args: argparse.Namespace) -> dict[str, object]:
-    return {"policy": time_policy(config_path(args.config))}
+    return {
+        "policy": time_policy(config_path(args.config)),
+        "review": llm_review(config_path(args.config)),
+    }
 
 
 def _identity(
@@ -754,6 +761,7 @@ def _write_reevaluate(path: Path, rows: list[dict[str, str]]) -> None:
         "changed",
         "skipped",
         "reason",
+        "kind",
     )
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
@@ -789,6 +797,7 @@ def _review_scope(args: argparse.Namespace):
         state=args.state,
         since=args.since,
         limit=args.limit,
+        time_closures=llm_review(config_path(args.config)),
     )
 
 

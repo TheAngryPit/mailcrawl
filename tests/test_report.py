@@ -100,6 +100,8 @@ class StatsDryRunTest(unittest.TestCase):
                 "needs_review_else": 0,
                 "needs_review_rule0": 1,
                 "ok": True,
+                "revive_forgotten": 0,
+                "revive_opportunity": 0,
                 "senders": 2,
                 "taxonomy_warnings": 0,
                 "threads": 2,

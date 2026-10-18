@@ -565,6 +565,31 @@ class VectorCliTest(unittest.TestCase):
             },
         )
 
+    def test_fake_encode_does_not_import_an_installed_torch(self) -> None:
+        png = bytes.fromhex(
+            "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
+            "0000000c4944415408d763f8cfc000000301010018dd8db40000000049454e44ae426082"
+        )
+        previous = sys.modules.pop("torch", None)
+
+        class Recorder:
+            def encode(self, batch, **kwargs):
+                return [[0.0] * NATIVE_DIM]
+
+        embedder = GemmaEmbedder()
+        embedder._loaded = Recorder()
+        try:
+            vectors = invoke(
+                "embeddings",
+                lambda: embedder.embed_images([png]),
+                {"embeddings": True},
+            )
+            self.assertEqual(vectors, [[0.0] * NATIVE_DIM])
+            self.assertNotIn("torch", sys.modules)
+        finally:
+            if previous is not None:
+                sys.modules["torch"] = previous
+
     def test_non_rgb_images_are_converted_before_encode(self) -> None:
         from PIL import Image
 

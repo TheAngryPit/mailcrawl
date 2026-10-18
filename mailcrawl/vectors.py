@@ -25,7 +25,13 @@ from mailcrawl.decisions import (
 from mailcrawl.inference import BoundaryError, enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
 from mailcrawl.threads import image_gate, opened_limit_reason, pillow_limits
-from mailcrawl.timefacts import TimePolicy, apply_time, thread_time_facts
+from mailcrawl.timefacts import (
+    TimePolicy,
+    apply_time,
+    carries_time_closure,
+    present_time_closure,
+    thread_time_facts,
+)
 
 NATIVE_DIM = 768
 CLASSIFICATION_PREFIX = "task: classification | query: "
@@ -473,11 +479,7 @@ def _encode_guarded(model, payload, device: str, *, image: bool):
 
 def _optional_torch():
     enter_model()
-    try:
-        import torch
-    except ImportError:
-        return None
-    return torch
+    return sys.modules.get("torch")
 
 
 def _empty_device_cache(torch, requested: str) -> None:
@@ -617,6 +619,7 @@ def knn_decide(
     now: int,
     *,
     policy: TimePolicy | None = None,
+    review: bool = False,
 ) -> sqlite3.Row | None:
     if "embeddings" not in enabled_points(config) or embedder is None:
         return None
@@ -635,7 +638,7 @@ def knn_decide(
         if other_pk == thread_pk:
             continue
         decision = current_decision(conn, other_pk)
-        if decision is None:
+        if decision is None or carries_time_closure(decision["evidence"]):
             continue
         ranked.append((distance, decision))
     if not ranked:
@@ -665,7 +668,8 @@ def knn_decide(
     def timed() -> DecisionDraft:
         draft = produce()
         facts = thread_time_facts(conn, thread_pk, now)
-        return apply_time(draft, facts, policy)
+        adjusted = apply_time(draft, facts, policy)
+        return present_time_closure(adjusted, draft.lane, review)
 
     return decide_open(conn, thread_pk, now, timed)
 
@@ -677,10 +681,11 @@ def knn_account(
     now: int,
     *,
     policy: TimePolicy | None = None,
+    review: bool = False,
 ) -> tuple[int, int, int]:
     eligible = eligible_thread_pks(conn)
     decided = 0
-    review = 0
+    pending = 0
     for thread_pk in eligible:
         decision = knn_decide(
             conn,
@@ -689,12 +694,13 @@ def knn_account(
             config,
             now,
             policy=policy,
+            review=review,
         )
         if decision is None or decision["next_state"] == "needs_review":
-            review += 1
+            pending += 1
         else:
             decided += 1
-    return len(eligible), decided, review
+    return len(eligible), decided, pending
 
 
 def _hash_vector(text: str, dim: int) -> list[float]:
