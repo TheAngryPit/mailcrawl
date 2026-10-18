@@ -24,6 +24,12 @@ class OldTaxonomyBackfillTest(unittest.TestCase):
         self.old_taxonomy = os.environ.get("MAILCRAWL_TAXONOMY")
         os.environ["HOME"] = str(self.home)
         os.environ.pop("MAILCRAWL_TAXONOMY", None)
+        cfg = self.home / ".config" / "mailcrawl"
+        cfg.mkdir(parents=True)
+        (cfg / "config.toml").write_text(
+            f'[rules]\npath = "{ROOT / "testdata" / "rules" / "rules-v0.json"}"\n',
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         if self.old_home is None:

@@ -89,7 +89,7 @@ def parsed_record(
         size_bytes=size_bytes,
         in_reply_to=headers.get("in-reply-to"),
         references_hdr=headers.get("references"),
-        auth_results=headers.get("authentication-results"),
+        auth_results=header_block(parsed, "authentication-results"),
         date_trusted=date_trusted,
     )
 
@@ -161,6 +161,16 @@ def is_attachment(part: Message) -> bool:
     if disposition == "inline" and filename:
         return True
     return disposition is None and bool(filename)
+
+
+def header_block(message: EmailMessage, name: str) -> str | None:
+    values = message.get_all(name)
+    if not values:
+        return None
+    parts = [str(value).strip() for value in values if str(value).strip()]
+    if not parts:
+        return None
+    return "\n".join(parts)
 
 
 def header_text(message: EmailMessage, name: str) -> str | None:

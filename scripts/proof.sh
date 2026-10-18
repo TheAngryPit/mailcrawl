@@ -237,6 +237,7 @@ fake_out="$(
 echo "${fake_out}" | tee "${PROOF_DIR}/search-fake.log"
 DB_PATH="${DB}" QUOTED_JSON="${quoted_out}" FAKE_JSON="${fake_out}" python3 <<'PY' || fail "cleaned body still indexes the quote"
 import json, os, sqlite3
+from mailcrawl.schema import USER_VERSION
 quoted = json.loads(os.environ["QUOTED_JSON"])
 fake = json.loads(os.environ["FAKE_JSON"])
 if quoted.get("hits"):
@@ -254,7 +255,7 @@ try:
     if body != "This body is fake fixture text.":
         raise SystemExit("cleaned body is not the kept sentence")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 10:
+    if version != USER_VERSION:
         raise SystemExit(f"user_version {version}")
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table in ("decisions", "sender_decisions", "thread_mutes"):
@@ -466,7 +467,7 @@ stats_out="$(
 )"
 dry_out="$(
   cd "${REPO_ROOT}"
-  python3 -m mailcrawl --json dry-run --account vcl --now 1700000000
+  python3 -m mailcrawl --json dry-run --account vcl --now 1700000000 --rules testdata/rules/rules-v0.json
 )"
 echo "${stats_out}" | tee "${PROOF_DIR}/stats.log"
 echo "${dry_out}" | tee "${PROOF_DIR}/dry-run.log"
@@ -573,12 +574,13 @@ PHASE2_DATA="${PROOF_HOME}/phase2-data"
 ) | tee "${PROOF_DIR}/phase2-import.log"
 python3 - "${PHASE2_DATA}/vcl.db" <<'PY' | tee "${PROOF_DIR}/phase2-keyword.log"
 import sqlite3, sys
+from mailcrawl.schema import USER_VERSION
 path = sys.argv[1]
 conn = sqlite3.connect(path)
 conn.row_factory = sqlite3.Row
 try:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 10:
+    if version != USER_VERSION:
         raise SystemExit(f"user_version {version}")
     flags = {
         row["subject"]: row["image_only"]

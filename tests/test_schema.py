@@ -96,10 +96,10 @@ class SchemaV1Test(unittest.TestCase):
     def test_later_user_version_fails_closed(self) -> None:
         conn = sqlite3.connect(":memory:")
         try:
-            conn.execute("PRAGMA user_version = 11")
+            conn.execute("PRAGMA user_version = 12")
             with self.assertRaises(UnsupportedSchema):
                 migrate(conn)
-            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 11)
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 12)
             names = {
                 row[0]
                 for row in conn.execute(

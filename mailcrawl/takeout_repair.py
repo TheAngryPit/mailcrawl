@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from mailcrawl.mbox import mbox_facts, takeout_block
+from mailcrawl.owner import recompute_from_me
 from mailcrawl.takeout_labels import checked_label_map, resolved_label
 
 
@@ -52,6 +53,7 @@ def repair_takeout(
     label_map: dict[str, str] | None = None,
     *,
     rewrite_unprovable: bool = False,
+    aliases: frozenset[str] = frozenset(),
 ) -> TakeoutReport:
     """Remap mbox labels on an accepted Takeout block. A missing or shifted file is left alone."""
     scope = _RepairScope.load(conn)
@@ -65,7 +67,7 @@ def repair_takeout(
         if not current:
             _drop_plain_mbox_labels(conn)
             _remap_takeout_labels(conn, mapping)
-            _set_is_from_me_from_sent(conn)
+            recompute_from_me(conn, aliases, apply=True)
     if not current and scope.can_refresh_dates():
         _refresh_dates(conn, scope, rewrite_unprovable=rewrite_unprovable)
     if not current:
@@ -106,23 +108,6 @@ def _drop_unaccepted_mbox_labels(conn: sqlite3.Connection) -> None:
             """
         )
     _drop_orphan_mbox_labels(conn)
-
-
-def _set_is_from_me_from_sent(conn: sqlite3.Connection) -> None:
-    if "is_from_me" not in {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}:
-        return
-    if not _has_table(conn, "message_labels"):
-        return
-    conn.execute(
-        """
-        UPDATE messages
-        SET is_from_me = CASE WHEN EXISTS (
-          SELECT 1 FROM message_labels
-          WHERE message_labels.msg_pk = messages.msg_pk
-            AND message_labels.gmail_label_id = 'SENT'
-        ) THEN 1 ELSE 0 END
-        """
-    )
 
 
 def _drop_plain_mbox_labels(conn: sqlite3.Connection) -> None:

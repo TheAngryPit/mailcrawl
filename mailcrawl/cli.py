@@ -1,4 +1,4 @@
-"""JSON CLI for init, import, search, rules, stats, dry-run, backfill, embed, knn, jev, bench, review, and decide."""
+"""JSON CLI for init, import, search, rules, stats, dry-run, from-me, backfill, embed, knn, jev, bench, review, and decide."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from mailcrawl.configfile import (
     allow_override,
     inference_config,
     llm_review,
+    owner_addresses,
     inference_device,
     local_llm,
     rules_path,
@@ -31,6 +32,7 @@ from mailcrawl.configfile import (
 from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
+from mailcrawl.owner import recompute_from_me
 from mailcrawl.inference import enabled_points
 from mailcrawl.jev import jev_decide, open_client, score_grey_band
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
@@ -99,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
             return _review(args)
         if args.command == "decide":
             return _decide(args)
+        if args.command == "from-me":
+            return _from_me(args)
     except ExportRejected:
         _emit(args, {"error": "unsupported_schema", "ok": False})
         return 3
@@ -178,6 +182,10 @@ def _parser() -> argparse.ArgumentParser:
     counts = sub.add_parser("stats")
     counts.add_argument("--account", required=True)
     counts.add_argument("--taxonomy")
+
+    mine = sub.add_parser("from-me")
+    mine.add_argument("--account", required=True)
+    mine.add_argument("--apply", action="store_true")
 
     preview = sub.add_parser("dry-run")
     preview.add_argument("--account", required=True)
@@ -280,14 +288,17 @@ def _import(args: argparse.Namespace) -> int:
     try:
         result: ImportResult
         if args.import_command == "gog-export":
+            aliases = owner_addresses(cfg, alias)
             result = import_gog_export(
                 conn,
                 alias=alias,
                 export_dir=Path(args.dir),
                 taxonomy_path=catalogue,
                 account_email=email,
+                aliases=aliases,
             )
         elif args.import_command == "mbox":
+            aliases = owner_addresses(cfg, alias)
             result = import_mbox(
                 conn,
                 alias=alias,
@@ -296,6 +307,7 @@ def _import(args: argparse.Namespace) -> int:
                 labels_path=Path(args.labels) if args.labels else None,
                 taxonomy_path=catalogue,
                 account_email=email,
+                aliases=aliases,
             )
         else:
             raise UsageError("unknown import command")
@@ -472,9 +484,24 @@ def _stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _from_me(args: argparse.Namespace) -> int:
+    alias = canonical_alias(args.account)
+    cfg = config_path(args.config)
+    conn = _account_db(args)
+    try:
+        report = recompute_from_me(conn, owner_addresses(cfg, alias), apply=bool(args.apply))
+    finally:
+        conn.close()
+    _emit(args, {"account": alias, **report.public()})
+    return 0
+
+
 def _dry_run(args: argparse.Namespace) -> int:
     now = _as_of(args)
-    config = None if not args.rules else load_rules(Path(args.rules))
+    rules_file = _rules_file(args)
+    if not rules_file.is_file():
+        raise UsageError("rules file is missing")
+    config = load_rules(rules_file)
     export_path, sample, seed = _export_args(args)
     owners, domains, security_senders, test_recipients = _identity(args)
 

@@ -66,6 +66,9 @@ def migrate(conn: sqlite3.Connection) -> None:
         version = 9
     if version == 9:
         _migrate_v9(conn)
+        version = 10
+    if version == 10:
+        _migrate_v10(conn)
         return
     raise UnsupportedSchema(f"user_version {version}")
 
@@ -293,6 +296,16 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
         conn.execute(
             "DELETE FROM cursors WHERE stream IN ('takeout_sent', 'owner_flag')"
         )
+    conn.execute("PRAGMA user_version = 10")
+    conn.commit()
+
+
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    names = {str(row[0]) for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    if "messages" in names:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
+        if "from_me_origin" not in columns:
+            conn.execute("ALTER TABLE messages ADD COLUMN from_me_origin TEXT")
     conn.execute(f"PRAGMA user_version = {USER_VERSION}")
     conn.commit()
 

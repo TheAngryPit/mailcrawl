@@ -1,0 +1,260 @@
+"""Decide whether a message is the owner's, and recompute that flag."""
+
+from __future__ import annotations
+
+import sqlite3
+import unicodedata
+from dataclasses import dataclass
+from typing import Literal
+
+from mailcrawl.contract import GMAIL_LABEL_SQL
+from mailcrawl.textnorm import parse_address
+
+Origin = Literal["sent", "alias"]
+_SENT = "SENT"
+_AUTHSERV = "mx.google.com"
+_HAS_SENT = f"""
+EXISTS (
+  SELECT 1 FROM message_labels
+  LEFT JOIN labels
+    ON labels.account_id = message_labels.account_id
+   AND labels.gmail_label_id = message_labels.gmail_label_id
+  WHERE message_labels.msg_pk = messages.msg_pk
+    AND message_labels.gmail_label_id = ?
+    AND (labels.gmail_label_id IS NULL OR {GMAIL_LABEL_SQL})
+)
+"""
+
+
+@dataclass(frozen=True)
+class FromMe:
+    origin: Origin | None
+    untrusted: bool
+
+    @property
+    def mine(self) -> bool:
+        return self.origin is not None
+
+
+@dataclass(frozen=True)
+class FromMeReport:
+    sent: int
+    alias: int
+    untrusted: int
+    changed: int
+    unchanged: int
+    applied: bool
+
+    def public(self) -> dict[str, object]:
+        return {
+            "alias": self.alias,
+            "applied": self.applied,
+            "changed": self.changed,
+            "ok": True,
+            "sent": self.sent,
+            "unchanged": self.unchanged,
+            "untrusted": self.untrusted,
+        }
+
+
+def classify_from_me(
+    *,
+    has_sent: bool,
+    from_header: str | None,
+    auth_results: str | None,
+    aliases: frozenset[str],
+) -> FromMe:
+    if has_sent:
+        return FromMe("sent", False)
+    _name, address, domain = parse_address(from_header)
+    if address is None or domain is None or _fold(address) not in aliases:
+        return FromMe(None, False)
+    if _gmail_aligned(auth_results, domain):
+        return FromMe("alias", False)
+    return FromMe(None, True)
+
+
+def recompute_from_me(
+    conn: sqlite3.Connection,
+    aliases: frozenset[str],
+    *,
+    apply: bool,
+) -> FromMeReport:
+    columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}
+    if "from_me_origin" not in columns:
+        return _sent_only(conn, apply)
+    rows = conn.execute(
+        f"""
+        SELECT messages.msg_pk, messages.from_hdr, messages.auth_results,
+               messages.is_from_me, messages.from_me_origin,
+               {_HAS_SENT} AS has_sent
+        FROM messages
+        """,
+        (_SENT,),
+    ).fetchall()
+    sent = alias = untrusted = changed = unchanged = 0
+    updates: list[tuple[int, str | None, int]] = []
+    for row in rows:
+        verdict = classify_from_me(
+            has_sent=bool(row[5]),
+            from_header=None if row[1] is None else str(row[1]),
+            auth_results=None if row[2] is None else str(row[2]),
+            aliases=aliases,
+        )
+        if verdict.origin == "sent":
+            sent += 1
+        elif verdict.origin == "alias":
+            alias += 1
+        if verdict.untrusted:
+            untrusted += 1
+        stored_origin = None if row[4] is None else str(row[4])
+        same = int(row[3] or 0) == int(verdict.mine) and stored_origin == verdict.origin
+        if same:
+            unchanged += 1
+            continue
+        changed += 1
+        updates.append((int(verdict.mine), verdict.origin, int(row[0])))
+    if apply and updates:
+        own = not conn.in_transaction
+        if own:
+            conn.execute("BEGIN")
+        try:
+            conn.executemany(
+                "UPDATE messages SET is_from_me = ?, from_me_origin = ? WHERE msg_pk = ?",
+                updates,
+            )
+            if own:
+                conn.commit()
+        except Exception:
+            if own:
+                conn.rollback()
+            raise
+    return FromMeReport(sent, alias, untrusted, changed, unchanged, apply)
+
+
+def _sent_only(conn: sqlite3.Connection, apply: bool) -> FromMeReport:
+    if not apply:
+        return FromMeReport(0, 0, 0, 0, 0, False)
+    tables = {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "is_from_me" not in {str(row[1]) for row in conn.execute("PRAGMA table_info(messages)")}:
+        return FromMeReport(0, 0, 0, 0, 0, True)
+    if "message_labels" not in tables or "labels" not in tables:
+        return FromMeReport(0, 0, 0, 0, 0, True)
+    conn.execute(
+        f"""
+        UPDATE messages
+        SET is_from_me = CASE WHEN {_HAS_SENT} THEN 1 ELSE 0 END
+        """,
+        (_SENT,),
+    )
+    return FromMeReport(0, 0, 0, 0, 0, True)
+
+
+def _gmail_aligned(auth_results: str | None, domain: str) -> bool:
+    """Trust the first Authentication-Results block only.
+
+    Gmail prepends its own result. A later block can repeat ``mx.google.com``
+    and still be the sender's header.
+    """
+    if not auth_results:
+        return False
+    wanted = _fold(domain).rstrip(".")
+    if not wanted:
+        return False
+    blocks = _blocks(auth_results)
+    if not blocks:
+        return False
+    clauses = _clauses(_strip_comments(blocks[0]))
+    if not clauses or _authserv(clauses[0]) != _AUTHSERV:
+        return False
+    for clause in clauses[1:]:
+        if _passes(clause, "dmarc", "header.from", wanted):
+            return True
+        if _passes(clause, "dkim", "header.i", wanted) or _passes(clause, "dkim", "header.d", wanted):
+            return True
+    return False
+
+
+def _blocks(text: str) -> list[str]:
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in text.splitlines() or [text]:
+        if current and line[:1] not in ("", " ", "\t"):
+            blocks.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append(current)
+    return [" ".join("".join(part).split()) for part in blocks if "".join(part).strip()]
+
+
+def _clauses(text: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
+    quote = False
+    for char in text:
+        if char == '"':
+            quote = not quote
+            buf.append(char)
+            continue
+        if char == ";" and not quote:
+            parts.append("".join(buf).strip())
+            buf = []
+            continue
+        buf.append(char)
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _authserv(clause: str) -> str:
+    token = clause.strip().split(None, 1)[0] if clause.strip() else ""
+    return _fold(token.split("@", 1)[0].rstrip(";"))
+
+
+def _passes(clause: str, method: str, prop: str, wanted: str) -> bool:
+    text = " ".join(clause.split())
+    folded = _fold(text)
+    prefix = method + "="
+    if not folded.startswith(prefix):
+        return False
+    result = folded[len(prefix):].split(None, 1)[0].rstrip(";")
+    if result != "pass":
+        return False
+    marker = prop + "="
+    index = folded.find(marker)
+    if index < 0:
+        return False
+    raw = folded[index + len(marker):].split(None, 1)[0].rstrip(";")
+    return _domain_of(raw) == wanted
+
+
+def _domain_of(value: str) -> str:
+    token = value.strip().rstrip(".").lstrip("@")
+    if "@" in token:
+        token = token.rsplit("@", 1)[1]
+    return _fold(token).rstrip(".")
+
+
+def _strip_comments(text: str) -> str:
+    kept: list[str] = []
+    depth = 0
+    for char in text:
+        if char == "(":
+            depth += 1
+            continue
+        if char == ")" and depth:
+            depth -= 1
+            continue
+        if depth == 0:
+            kept.append(char)
+    return "".join(kept)
+
+
+def _fold(value: str) -> str:
+    return unicodedata.normalize("NFC", value).casefold()

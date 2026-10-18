@@ -594,7 +594,7 @@ sys.exit(0 if doc.get("updated") == 0 else 1)
 
   local stats_out dry_out
   stats_out="$(mailcrawl_in "$home" --json stats --account vcl)"
-  dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl --now 1700000000)"
+  dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl --rules "$REPO_ROOT/testdata/rules/rules-v0.json" --now 1700000000)"
   printf '%s\n%s\n' "$stats_out" "$dry_out"
   STATS_JSON="$stats_out" DRY_JSON="$dry_out" python3 - <<'PY' || {
 import json, os, sys
@@ -628,7 +628,7 @@ PY
     --account vcl \
     --rules "$REPO_ROOT/testdata/rules/rules-v0.json" \
     --now 1700000000 >/dev/null
-  dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl --now 1700000000)"
+  dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl --rules "$REPO_ROOT/testdata/rules/rules-v0.json" --now 1700000000)"
   printf '%s\n%s\n' "$stats_out" "$dry_out"
   if printf '%s%s' "$stats_out" "$dry_out" | grep -q secretbodyqx; then
     log "stats dry-run: output included message text"
@@ -735,8 +735,8 @@ PY
   local rules_out base_rules_out dry_out base_dry_out
   rules_out="$(mailcrawl_in "$home" --json rules --account personal --rules "$REPO_ROOT/testdata/rules/rules-v0.json" --now 1767700000)"
   base_rules_out="$(mailcrawl_in "$home" --json rules --account vcl --rules "$REPO_ROOT/testdata/rules/rules-v0.json" --now 1767700000)"
-  dry_out="$(mailcrawl_in "$home" --json dry-run --account personal)"
-  base_dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl)"
+  dry_out="$(mailcrawl_in "$home" --json dry-run --account personal --rules "$REPO_ROOT/testdata/rules/rules-v0.json")"
+  base_dry_out="$(mailcrawl_in "$home" --json dry-run --account vcl --rules "$REPO_ROOT/testdata/rules/rules-v0.json")"
   printf '%s\n%s\n%s\n%s\n' "$rules_out" "$base_rules_out" "$dry_out" "$base_dry_out"
   if [[ "$rules_out" != "$base_rules_out" || "$dry_out" != "$base_dry_out" ]]; then
     log "mbox import: pseudo-labels changed rules or dry-run output"
@@ -930,7 +930,7 @@ JSON
   local stats_out dry_out
   mailcrawl_in "$home" --json import gog-export --account personal --dir "$export_dir" >/dev/null
   stats_out="$(mailcrawl_in "$home" --json stats --account personal)"
-  dry_out="$(mailcrawl_in "$home" --json dry-run --account personal)"
+  dry_out="$(mailcrawl_in "$home" --json dry-run --account personal --rules "$REPO_ROOT/testdata/rules/rules-v0.json")"
   printf '%s\n%s\n' "$stats_out" "$dry_out"
   if printf '%s%s' "$stats_out" "$dry_out" | grep -q 'synthetic taxonomy body'; then
     log "default taxonomy: output included message text"
@@ -1131,14 +1131,14 @@ if key is None or key[0] != "CATEGORY_PROMOTIONS":
     sys.exit(key)
 PY
   local map_dry example_dry
-  map_dry="$(mailcrawl_in "$home" --json dry-run --account personal --taxonomy "$map")"
+  map_dry="$(mailcrawl_in "$home" --json dry-run --account personal --rules "$REPO_ROOT/testdata/rules/rules-v0.json" --taxonomy "$map")"
   printf '%s' "$map_dry" | python3 -c '
 import json, sys
 doc = json.load(sys.stdin)
 ok = doc.get("inactive_reason") == "gmail_default" and doc.get("inactive_rules") == ["2", "2-read", "3", "4"]
 sys.exit(0 if ok else 1)
 ' || { log "default taxonomy: gmail map activated content rules"; return 1; }
-  example_dry="$(mailcrawl_in "$home" --json dry-run --account personal --taxonomy "$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json")"
+  example_dry="$(mailcrawl_in "$home" --json dry-run --account personal --rules "$REPO_ROOT/testdata/rules/rules-v0.json" --taxonomy "$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json")"
   printf '%s' "$example_dry" | python3 -c '
 import json, sys
 doc = json.load(sys.stdin)

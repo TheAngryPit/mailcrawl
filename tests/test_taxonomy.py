@@ -56,6 +56,12 @@ class DefaultTaxonomyTest(unittest.TestCase):
         os.environ["HOME"] = str(self.home)
         os.environ.pop("MAILCRAWL_TAXONOMY", None)
         self.stdout: list[str] = []
+        cfg = self.home / ".config" / "mailcrawl"
+        cfg.mkdir(parents=True)
+        (cfg / "config.toml").write_text(
+            f'[rules]\npath = "{ROOT / "testdata" / "rules" / "rules-v0.json"}"\n',
+            encoding="utf-8",
+        )
 
     def tearDown(self) -> None:
         if self.old_home is None:
@@ -572,7 +578,7 @@ class DefaultTaxonomyTest(unittest.TestCase):
             [_message(1, ["L1"])],
         )
         home_file = self.home / ".config" / "mailcrawl" / "taxonomy.json"
-        home_file.parent.mkdir(parents=True)
+        home_file.parent.mkdir(parents=True, exist_ok=True)
         home_file.write_text(
             json.dumps({"default": {"correspondence": ["Example/Synthetic"]}}),
             encoding="utf-8",
