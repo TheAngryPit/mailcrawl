@@ -17,7 +17,13 @@ from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import invoke
 from mailcrawl.jev import MODEL_ID, FakeJev, jev_decide
 from mailcrawl.paths import UsageError
-from mailcrawl.review import apply_agent_decision, parse_agent_decision, undo_decisions
+from mailcrawl.review import (
+    ReviewScope,
+    apply_agent_decision,
+    parse_agent_decision,
+    review_queue,
+    undo_decisions,
+)
 from mailcrawl.contract import CONTRACT_V0
 from mailcrawl.ingest import import_gog_export, import_mbox
 from mailcrawl.mbox import gmail_hex
@@ -407,6 +413,189 @@ class TimeFactsTest(unittest.TestCase):
                 self.assertEqual(stored["next_state"], "reply")
                 self.assertEqual(stored["lane"], "imbox")
                 self.assertNotIn("time_closure", stored["evidence"])
+
+    def test_knn_time_closure_of_a_revive_copy_is_queued_and_decided(self) -> None:
+        if __import__("importlib").util.find_spec("sqlite_vec") is None:
+            self.skipTest("sqlite-vec is not installed")
+        old = _stamp(2025, 2, 10)
+        with self._db() as conn:
+            self._message(conn, 1, "other@example.com", 0, old, "Revived", "same words")
+            self._message(conn, 2, "other@example.com", 0, old, "Copy", "same words")
+            self._message(conn, 3, "other@example.com", 0, old, "Copy", "same words")
+            self._held_closure(conn, 1)
+            apply_agent_decision(
+                conn,
+                parse_agent_decision(
+                    {
+                        "action": "revive",
+                        "kind": "forgotten",
+                        "reason": "still owed",
+                        "source_detail": "model-c",
+                        "state": "reply",
+                        "thread_id": "thread-1",
+                    }
+                ),
+                AS_OF,
+            )
+            flags = {"embeddings": True}
+            invoke("embeddings", lambda: embed_threads(conn, FakeEmbedder(), flags), flags)
+            kept_copy = knn_decide(conn, 2, FakeEmbedder(), flags, AS_OF, review=True)
+            revived_copy = knn_decide(conn, 3, FakeEmbedder(), flags, AS_OF, review=True)
+            self.assertEqual(str(kept_copy["rule_id"]), "knn")
+            self.assertEqual(str(kept_copy["next_state"]), "reference")
+            self.assertEqual(str(kept_copy["lane"]), "paper_trail")
+            self.assertIn("time_closure", str(kept_copy["evidence"]))
+            queued = {
+                item.thread_id: item.document()
+                for item in review_queue(
+                    conn,
+                    "personal",
+                    ReviewScope(time_closures=True),
+                    as_of=AS_OF,
+                )
+            }
+            narrow = {
+                item.thread_id: item.document()
+                for item in review_queue(
+                    conn,
+                    "personal",
+                    ReviewScope(state="reply", time_closures=True),
+                    as_of=AS_OF,
+                )
+            }
+            for thread_id in ("thread-2", "thread-3"):
+                self.assertEqual(queued[thread_id]["time_closure"]["state"], "reference")
+                self.assertEqual(queued[thread_id]["time_closure"]["lane"], "paper_trail")
+                self.assertEqual(queued[thread_id]["time_closure"]["reason"], "time_closure")
+                self.assertEqual(narrow[thread_id]["time_closure"]["state"], "reference")
+            kept, kept_changed = apply_agent_decision(
+                conn,
+                parse_agent_decision(
+                    {"action": "keep", "source_detail": "model-b", "thread_id": "thread-2"}
+                ),
+                AS_OF,
+            )
+            revived, revived_changed = apply_agent_decision(
+                conn,
+                parse_agent_decision(
+                    {
+                        "action": "revive",
+                        "kind": "opportunity",
+                        "reason": "worth a reply",
+                        "source_detail": "model-d",
+                        "state": "action",
+                        "thread_id": "thread-3",
+                    }
+                ),
+                AS_OF,
+            )
+            self.assertTrue(kept_changed)
+            self.assertEqual(str(kept["next_state"]), "reference")
+            self.assertEqual(str(kept["lane"]), "paper_trail")
+            self.assertEqual(str(kept["origin"]), "model")
+            self.assertTrue(revived_changed)
+            self.assertEqual(str(revived["next_state"]), "action")
+            self.assertEqual(str(revived["lane"]), "imbox")
+            self.assertEqual(str(revived_copy["origin"]), "knn")
+
+    def test_knn_held_closure_of_a_revive_copy_accepts_keep(self) -> None:
+        if __import__("importlib").util.find_spec("sqlite_vec") is None:
+            self.skipTest("sqlite-vec is not installed")
+        old = _stamp(2025, 2, 10)
+        with self._db() as conn:
+            self._message(conn, 1, "other@example.com", 0, old, "Revived", "same words")
+            self._message(conn, 2, "other@example.com", 0, old, "Copy", "same words")
+            self._held_closure(conn, 1)
+            apply_agent_decision(
+                conn,
+                parse_agent_decision(
+                    {
+                        "action": "revive",
+                        "kind": "forgotten",
+                        "reason": "still owed",
+                        "source_detail": "model-c",
+                        "state": "reply",
+                        "thread_id": "thread-1",
+                    }
+                ),
+                AS_OF,
+            )
+            flags = {"embeddings": True}
+            invoke("embeddings", lambda: embed_threads(conn, FakeEmbedder(), flags), flags)
+            stored = knn_decide(conn, 2, FakeEmbedder(), flags, AS_OF, review=False)
+            self.assertEqual(str(stored["rule_id"]), "knn")
+            self.assertEqual(str(stored["next_state"]), "needs_review")
+            self.assertEqual(str(stored["lane"]), "imbox")
+            queued = {
+                item.thread_id: item.document()
+                for item in review_queue(
+                    conn,
+                    "personal",
+                    ReviewScope(),
+                    as_of=AS_OF,
+                )
+            }
+            self.assertEqual(queued["thread-2"]["state"], "needs_review")
+            self.assertEqual(queued["thread-2"]["time_closure"]["state"], "reference")
+            self.assertEqual(queued["thread-2"]["time_closure"]["lane"], "paper_trail")
+            self.assertEqual(queued["thread-2"]["time_closure"]["reason"], "time_closure")
+            kept, changed = apply_agent_decision(
+                conn,
+                parse_agent_decision(
+                    {"action": "keep", "source_detail": "model-b", "thread_id": "thread-2"}
+                ),
+                AS_OF,
+            )
+            self.assertTrue(changed)
+            self.assertEqual(str(kept["next_state"]), "reference")
+            self.assertEqual(str(kept["lane"]), "paper_trail")
+            self.assertEqual(str(kept["origin"]), "model")
+
+    def test_a_knn_closure_with_rule_id_harness_is_not_already_reviewed(self) -> None:
+        mark = json.dumps(
+            [
+                {
+                    "time": {"age_days": 200},
+                    "time_closure": {"lane": "paper_trail", "state": "reference"},
+                    "time_reason": ["last activity is old"],
+                }
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self._db() as conn:
+            self._message(conn, 1, "other@example.com", 0, _stamp(2025, 2, 10), "Copy", "same words")
+            conn.execute(
+                """
+                INSERT INTO decisions(
+                  thread_pk, next_state, lane, source, origin, source_detail,
+                  rule_id, rules_version, evidence, created_at
+                ) VALUES (1, 'reference', 'paper_trail', 'embedding-cluster', 'knn', 'fake-embedder', 'harness', 'review-v1', ?, ?)
+                """,
+                (mark, AS_OF),
+            )
+            conn.commit()
+            queued = {
+                item.thread_id: item.document()
+                for item in review_queue(
+                    conn,
+                    "personal",
+                    ReviewScope(state="noise", time_closures=True),
+                    as_of=AS_OF,
+                )
+            }
+            self.assertEqual(queued["thread-1"]["time_closure"]["state"], "reference")
+            self.assertEqual(queued["thread-1"]["time_closure"]["lane"], "paper_trail")
+            kept, changed = apply_agent_decision(
+                conn,
+                parse_agent_decision(
+                    {"action": "keep", "source_detail": "model-b", "thread_id": "thread-1"}
+                ),
+                AS_OF,
+            )
+            self.assertTrue(changed)
+            self.assertEqual(str(kept["next_state"]), "reference")
+            self.assertEqual(str(kept["lane"]), "paper_trail")
 
     def test_knn_does_not_copy_a_reply_onto_an_old_thread(self) -> None:
         if __import__("importlib").util.find_spec("sqlite_vec") is None:

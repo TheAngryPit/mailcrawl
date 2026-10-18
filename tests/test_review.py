@@ -2080,6 +2080,38 @@ class ReviveSurvivesTimeTest(unittest.TestCase):
             self.assertEqual(_stored(db, "stale-thread"), ("rule", "reference", "3"))
             self.assertEqual(_lane(db, "stale-thread"), "paper_trail")
 
+    def test_an_untrusted_date_imported_after_the_revive_is_queued(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home, config, db = _revived_closure(Path(tmp))
+            _add_message(
+                db,
+                "stale-thread",
+                calendar.timegm((1999, 1, 1, 0, 0, 0)),
+                "Bao Fixture <bao@example.com>",
+                "hello again",
+                date_trusted=0,
+                imported_at=_AS_OF + 60,
+            )
+            _mark_human(db, "stale-thread")
+            _rules_pass(home, config)
+            self.assertEqual(_stored(db, "stale-thread"), ("rule", "needs_review", "5"))
+            self.assertEqual(_lane(db, "stale-thread"), "imbox")
+            queued = _json(
+                home,
+                config,
+                "review",
+                "queue",
+                "--account",
+                "personal",
+                "--now",
+                str(_AS_OF),
+            )
+            item = {row["thread_id"]: row for row in queued["items"]}["stale-thread"]
+            self.assertEqual(item["state"], "needs_review")
+            self.assertEqual(item["time_closure"]["state"], "reference")
+            self.assertEqual(item["time_closure"]["lane"], "paper_trail")
+            self.assertEqual(item["time_closure"]["reason"], "time_closure")
+
 
 def _revived_closure(home: Path) -> tuple[Path, Path, Path]:
     config = _closure_config(home, False)
@@ -2167,6 +2199,27 @@ def _rules_pass(home: Path, config: Path) -> dict[str, object]:
     )
 
 
+def _mark_human(db: Path, thread_id: str) -> None:
+    conn = connect(db)
+    try:
+        account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO senders(account_id, address_norm, domain)
+            VALUES (?, 'bao@example.com', 'example.com')
+            """,
+            (account,),
+        )
+        sender_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            "UPDATE messages SET sender_id = ? WHERE thread_pk = ?",
+            (sender_id, _thread_pk(conn, thread_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _thread_pk(conn, thread_id: str) -> int:
     row = conn.execute(
         "SELECT thread_pk FROM threads WHERE gmail_thread_id = ?",
@@ -2175,7 +2228,16 @@ def _thread_pk(conn, thread_id: str) -> int:
     return int(row["thread_pk"])
 
 
-def _add_message(db: Path, thread_id: str, when: int, header: str, body: str) -> None:
+def _add_message(
+    db: Path,
+    thread_id: str,
+    when: int,
+    header: str,
+    body: str,
+    *,
+    date_trusted: int = 1,
+    imported_at: int = 1,
+) -> None:
     conn = connect(db)
     try:
         account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
@@ -2185,7 +2247,7 @@ def _add_message(db: Path, thread_id: str, when: int, header: str, body: str) ->
             INSERT INTO messages(
               account_id, gmail_message_id, thread_pk, internal_date, from_hdr,
               subject, body_text, is_from_me, date_trusted, raw_sha256, provenance_hash, imported_at
-            ) VALUES (?, ?, ?, ?, ?, 'synthetic subject', ?, 0, 1, ?, 'prov', 1)
+            ) VALUES (?, ?, ?, ?, ?, 'synthetic subject', ?, 0, ?, ?, 'prov', ?)
             """,
             (
                 account,
@@ -2194,7 +2256,9 @@ def _add_message(db: Path, thread_id: str, when: int, header: str, body: str) ->
                 when,
                 header,
                 body,
+                date_trusted,
                 f"sha-{thread_id}-{when}",
+                imported_at,
             ),
         )
         conn.execute(
