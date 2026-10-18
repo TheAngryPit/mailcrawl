@@ -1,0 +1,1058 @@
+{
+  "export_ids": [
+    "25bf6196bd10001",
+    "25bf6196bd10002",
+    "25bf6196bd10003",
+    "25bf6196bd10004",
+    "25bf6196bd10005",
+    "25bf6196bd10006",
+    "25bf6196bd10007",
+    "25bf6196bd10008",
+    "25bf6196bd10009",
+    "25bf6196bd1000a",
+    "25bf6196bd1000b",
+    "25bf6196bd1000c",
+    "25bf6196bd1000d",
+    "25bf6196bd1000e",
+    "25bf6196bd1000f",
+    "25bf6196bd10010",
+    "e2e-alias",
+    "e2e-ar-rtl",
+    "e2e-de-billing",
+    "e2e-en-newsletter",
+    "e2e-en-old-ask",
+    "e2e-es-receipt",
+    "e2e-forged",
+    "e2e-from-me",
+    "e2e-header-injection",
+    "e2e-html-script",
+    "e2e-ja-notice",
+    "e2e-malformed",
+    "e2e-oversized",
+    "e2e-prompt-injection",
+    "e2e-pt-question",
+    "e2e-traversal"
+  ],
+  "final": {
+    "threads": [
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX",
+          "Label_e2e"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-en-newsletter@example.com>",
+        "origin": "rule",
+        "rule_id": "auto-ref",
+        "state": "reference",
+        "thread_id": "25bf6196bd10001"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-pt-question@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "25bf6196bd10002"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-es-receipt@example.com>",
+        "origin": "rule",
+        "rule_id": "3",
+        "state": "reference",
+        "thread_id": "25bf6196bd10003"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-de-billing@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "25bf6196bd10004"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-ja-notice@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "25bf6196bd10005"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-ar-rtl@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "25bf6196bd10006"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "forgotten",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-en-old-ask@example.com>",
+        "origin": "model",
+        "rule_id": "harness",
+        "state": "action",
+        "thread_id": "25bf6196bd10007"
+      },
+      {
+        "bcc": null,
+        "from_me": 1,
+        "from_me_origin": "sent",
+        "kind": "",
+        "labels": [
+          "SENT"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-from-me@example.com>",
+        "origin": "rule",
+        "rule_id": "6",
+        "state": "waiting",
+        "thread_id": "25bf6196bd10008"
+      },
+      {
+        "bcc": null,
+        "from_me": 1,
+        "from_me_origin": "alias",
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-alias@example.com>",
+        "origin": "rule",
+        "rule_id": "8",
+        "state": "resolved",
+        "thread_id": "25bf6196bd10009"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-forged@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "25bf6196bd1000a"
+      },
+      {
+        "bcc": "hidden@example.com",
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-header-injection@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "25bf6196bd1000b"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-oversized@example.com>",
+        "origin": "rule",
+        "rule_id": "auto-ref",
+        "state": "reference",
+        "thread_id": "25bf6196bd1000c"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-malformed@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "25bf6196bd1000d"
+      },
+      {
+        "attachments": [
+          "../../tmp/mailcrawl-e2e-escape"
+        ],
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-traversal@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "25bf6196bd1000e"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-html-script@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "25bf6196bd1000f"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-prompt-injection@example.com>",
+        "origin": "model",
+        "rule_id": "harness",
+        "state": "reply",
+        "thread_id": "25bf6196bd10010"
+      },
+      {
+        "bcc": null,
+        "from_me": 1,
+        "from_me_origin": "alias",
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-alias@example.com>",
+        "origin": "rule",
+        "rule_id": "8",
+        "state": "resolved",
+        "thread_id": "e2e-alias"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-ar-rtl@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "e2e-ar-rtl"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-de-billing@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "e2e-de-billing"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX",
+          "Label_e2e"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-en-newsletter@example.com>",
+        "origin": "rule",
+        "rule_id": "auto-ref",
+        "state": "reference",
+        "thread_id": "e2e-en-newsletter"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-en-old-ask@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reference",
+        "thread_id": "e2e-en-old-ask"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-es-receipt@example.com>",
+        "origin": "rule",
+        "rule_id": "3",
+        "state": "reference",
+        "thread_id": "e2e-es-receipt"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-forged@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "e2e-forged"
+      },
+      {
+        "bcc": null,
+        "from_me": 1,
+        "from_me_origin": "sent",
+        "kind": "",
+        "labels": [
+          "SENT"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-from-me@example.com>",
+        "origin": "rule",
+        "rule_id": "6",
+        "state": "waiting",
+        "thread_id": "e2e-from-me"
+      },
+      {
+        "bcc": "hidden@example.com",
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-header-injection@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "e2e-header-injection"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-html-script@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "e2e-html-script"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-ja-notice@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "e2e-ja-notice"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-malformed@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "e2e-malformed"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-oversized@example.com>",
+        "origin": "rule",
+        "rule_id": "auto-ref",
+        "state": "reference",
+        "thread_id": "e2e-oversized"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-prompt-injection@example.com>",
+        "origin": "model",
+        "rule_id": "harness",
+        "state": "reply",
+        "thread_id": "e2e-prompt-injection"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-pt-question@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "e2e-pt-question"
+      },
+      {
+        "attachments": [
+          "../../tmp/mailcrawl-e2e-escape"
+        ],
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-traversal@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "e2e-traversal"
+      }
+    ]
+  },
+  "imports": {
+    "mbox": {
+      "n_new": 16,
+      "n_refused": 1
+    },
+    "native": {
+      "n_new": 16,
+      "n_refused": 0
+    }
+  },
+  "queue_off": [
+    "25bf6196bd10002",
+    "25bf6196bd10004",
+    "25bf6196bd10005",
+    "25bf6196bd10006",
+    "25bf6196bd10007",
+    "25bf6196bd10010",
+    "e2e-ar-rtl",
+    "e2e-de-billing",
+    "e2e-en-old-ask",
+    "e2e-ja-notice",
+    "e2e-prompt-injection",
+    "e2e-pt-question"
+  ],
+  "queue_on": [
+    "25bf6196bd10002",
+    "25bf6196bd10004",
+    "25bf6196bd10005",
+    "25bf6196bd10006",
+    "25bf6196bd10007",
+    "25bf6196bd10010",
+    "e2e-ar-rtl",
+    "e2e-de-billing",
+    "e2e-en-old-ask",
+    "e2e-ja-notice",
+    "e2e-prompt-injection",
+    "e2e-pt-question"
+  ],
+  "revived": {
+    "threads": [
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX",
+          "Label_e2e"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-en-newsletter@example.com>",
+        "origin": "rule",
+        "rule_id": "auto-ref",
+        "state": "reference",
+        "thread_id": "25bf6196bd10001"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-pt-question@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "25bf6196bd10002"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-es-receipt@example.com>",
+        "origin": "rule",
+        "rule_id": "3",
+        "state": "reference",
+        "thread_id": "25bf6196bd10003"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-de-billing@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "25bf6196bd10004"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-ja-notice@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "25bf6196bd10005"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-ar-rtl@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "25bf6196bd10006"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "forgotten",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-en-old-ask@example.com>",
+        "origin": "model",
+        "rule_id": "harness",
+        "state": "action",
+        "thread_id": "25bf6196bd10007"
+      },
+      {
+        "bcc": null,
+        "from_me": 1,
+        "from_me_origin": "sent",
+        "kind": "",
+        "labels": [
+          "SENT"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-from-me@example.com>",
+        "origin": "rule",
+        "rule_id": "6",
+        "state": "waiting",
+        "thread_id": "25bf6196bd10008"
+      },
+      {
+        "bcc": null,
+        "from_me": 1,
+        "from_me_origin": "alias",
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-alias@example.com>",
+        "origin": "rule",
+        "rule_id": "8",
+        "state": "resolved",
+        "thread_id": "25bf6196bd10009"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-forged@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "25bf6196bd1000a"
+      },
+      {
+        "bcc": "hidden@example.com",
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-header-injection@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "25bf6196bd1000b"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-oversized@example.com>",
+        "origin": "rule",
+        "rule_id": "auto-ref",
+        "state": "reference",
+        "thread_id": "25bf6196bd1000c"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-malformed@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "25bf6196bd1000d"
+      },
+      {
+        "attachments": [
+          "../../tmp/mailcrawl-e2e-escape"
+        ],
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-traversal@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "25bf6196bd1000e"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-html-script@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "25bf6196bd1000f"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-prompt-injection@example.com>",
+        "origin": "model",
+        "rule_id": "harness",
+        "state": "reply",
+        "thread_id": "25bf6196bd10010"
+      },
+      {
+        "bcc": null,
+        "from_me": 1,
+        "from_me_origin": "alias",
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-alias@example.com>",
+        "origin": "rule",
+        "rule_id": "8",
+        "state": "resolved",
+        "thread_id": "e2e-alias"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-ar-rtl@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "e2e-ar-rtl"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-de-billing@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "e2e-de-billing"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX",
+          "Label_e2e"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-en-newsletter@example.com>",
+        "origin": "rule",
+        "rule_id": "auto-ref",
+        "state": "reference",
+        "thread_id": "e2e-en-newsletter"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "forgotten",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-en-old-ask@example.com>",
+        "origin": "model",
+        "rule_id": "harness",
+        "state": "action",
+        "thread_id": "e2e-en-old-ask"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-es-receipt@example.com>",
+        "origin": "rule",
+        "rule_id": "3",
+        "state": "reference",
+        "thread_id": "e2e-es-receipt"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-forged@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "e2e-forged"
+      },
+      {
+        "bcc": null,
+        "from_me": 1,
+        "from_me_origin": "sent",
+        "kind": "",
+        "labels": [
+          "SENT"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-from-me@example.com>",
+        "origin": "rule",
+        "rule_id": "6",
+        "state": "waiting",
+        "thread_id": "e2e-from-me"
+      },
+      {
+        "bcc": "hidden@example.com",
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-header-injection@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "e2e-header-injection"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-html-script@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "e2e-html-script"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-ja-notice@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "e2e-ja-notice"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-malformed@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "e2e-malformed"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "paper_trail",
+        "message_id": "<e2e-oversized@example.com>",
+        "origin": "rule",
+        "rule_id": "auto-ref",
+        "state": "reference",
+        "thread_id": "e2e-oversized"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-prompt-injection@example.com>",
+        "origin": "model",
+        "rule_id": "harness",
+        "state": "reply",
+        "thread_id": "e2e-prompt-injection"
+      },
+      {
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-pt-question@example.com>",
+        "origin": "model",
+        "rule_id": "time",
+        "state": "needs_review",
+        "thread_id": "e2e-pt-question"
+      },
+      {
+        "attachments": [
+          "../../tmp/mailcrawl-e2e-escape"
+        ],
+        "bcc": null,
+        "from_me": 0,
+        "from_me_origin": null,
+        "kind": "",
+        "labels": [
+          "INBOX"
+        ],
+        "lane": "imbox",
+        "message_id": "<e2e-traversal@example.com>",
+        "origin": "rule",
+        "rule_id": "5",
+        "state": "reply",
+        "thread_id": "e2e-traversal"
+      }
+    ]
+  }
+}

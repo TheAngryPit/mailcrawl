@@ -48,3 +48,39 @@ jobs:
       - name: Wheel install quickstart
         shell: bash
         run: scripts/wheel-install.sh
+
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the wheel and install it into a fresh venv
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d /tmp/mailcrawl-e2e-venv.XXXXXX)"
+          python3 -m venv "$work/build"
+          "$work/build/bin/python" -m pip install --disable-pip-version-check 'setuptools>=77'
+          "$work/build/bin/python" -m pip wheel --no-deps -w "$work/wheel" "$GITHUB_WORKSPACE"
+          python3 -m venv "$work/run"
+          "$work/run/bin/python" -m pip install --disable-pip-version-check --no-index --find-links "$work/wheel" mailcrawl
+          "$work/run/bin/python" -m pip install --disable-pip-version-check sqlite-vec
+          echo "$work/run/bin" >> "$GITHUB_PATH"
+
+      - name: Walk a new archive from /tmp
+        shell: bash
+        working-directory: /tmp
+        env:
+          REPO: ${{ github.workspace }}
+          http_proxy: http://127.0.0.1:9
+          https_proxy: http://127.0.0.1:9
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+        run: |
+          unset TYPESAFE_API_KEY JEV_API_KEY OPENAI_API_KEY ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN
+          bash "$REPO/scripts/e2e-journey.sh"
