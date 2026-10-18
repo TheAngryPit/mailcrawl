@@ -79,7 +79,7 @@ def _sent_outcome(conn: sqlite3.Connection) -> tuple[object, ...]:
 
 def _block(number: int, labels: str, sender: str, body: str) -> str:
     return (
-        f"From {number}@example.com {RECEIPT}\n"
+        f"From {number}@xxx {RECEIPT}\n"
         f"X-GM-THRID: {number}\n"
         f"X-Gmail-Labels: {labels}\n"
         f"From: {sender}\n"
@@ -874,7 +874,7 @@ RECENT_HEADER = "Thu, 15 Oct 2026 10:00:00 +0000"
 def _recent(number: int, labels: str, sender: str, body: str, thrid: int | None = None) -> str:
     thread = f"X-GM-THRID: {number if thrid is None else thrid}\n"
     return (
-        f"From {number}@example.com {RECENT}\n"
+        f"From {number}@xxx {RECENT}\n"
         f"{thread}"
         f"X-Gmail-Labels: {labels}\n"
         f"From: {sender}\n"
@@ -1533,7 +1533,7 @@ class SentPoisonTest(unittest.TestCase):
             encoding="utf-8",
         )
         raw = path.read_bytes()
-        offset = raw.index(f"From {number}@xxx ".encode())
+        offset = raw.index(f"From {number}@xxx {receipt}".encode())
         self.assertGreater(offset, 0)
         account = int(self.conn.execute("SELECT account_id FROM accounts").fetchone()[0])
         self.conn.execute(
@@ -1709,6 +1709,35 @@ class SentPoisonTest(unittest.TestCase):
             for row in self.conn.execute("SELECT gmail_thread_id FROM threads")
         ]
         self.assertTrue(all(item.startswith("mbox:") for item in threads))
+
+    def test_an_example_com_separator_stores_an_rfc822_id(self) -> None:
+        path = self.home / "example-plain.mbox"
+        path.write_text(
+            "From 123@example.com Thu Oct 01 12:00:00 +0000 2026\n"
+            "X-Gmail-Labels: Outbox\n"
+            "From: Bob Fixture <bob@example.com>\n"
+            "To: Bao Fixture <bao@example.com>\n"
+            "Subject: synthetic\n"
+            "Date: Thu, 01 Oct 2026 12:00:00 +0000\n"
+            "Message-ID: <plain-example@example.com>\n"
+            "\n"
+            "note\n",
+            encoding="utf-8",
+        )
+        result = import_mbox(
+            self.conn,
+            alias="personal",
+            mbox_path=path,
+            labels_path=None,
+            taxonomy_path=None,
+            account_email="ada@example.com",
+        )
+        self.assertEqual((result.n_new, result.n_refused), (1, 0))
+        stored = str(self.conn.execute("SELECT gmail_message_id FROM messages").fetchone()[0])
+        self.assertEqual(
+            stored,
+            "rfc822:" + hashlib.sha256(b"plain-example@example.com").hexdigest(),
+        )
 
     def test_an_invalid_takeout_separator_id_is_refused(self) -> None:
         path = self.home / "bad-id.mbox"

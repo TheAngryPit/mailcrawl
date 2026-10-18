@@ -307,7 +307,7 @@ class VectorSearchTest(unittest.TestCase):
     def test_image_only_thread_copies_a_fake_neighbour(self) -> None:
         png = _solid_png(32, 32)
         encoded = __import__("base64").b64encode(png).decode("ascii")
-        mbox = f"""From 1768000000000000401@example.com Thu Jan 15 12:00:00 +0000 2026
+        mbox = f"""From 1768000000000000401@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Text note
@@ -321,7 +321,7 @@ Content-Type: text/plain; charset="utf-8"
 
 alpha keyword text path stays on the classification prefix
 
-From 1768000000000000402@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000402@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Image reviewed
@@ -346,7 +346,7 @@ Content-Transfer-Encoding: base64
 {encoded}
 --imgbound--
 
-From 1768000000000000403@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000403@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Image target
@@ -371,7 +371,7 @@ Content-Transfer-Encoding: base64
 {encoded}
 --imgbound2--
 
-From 1768000000000000404@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000404@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Logo note

@@ -78,8 +78,13 @@ for path in root.joinpath("testdata").rglob("*"):
         continue
     text = path.read_text(encoding="utf-8")
     for match in email.finditer(text):
-        if match.group(1).lower() != "example.com":
-            bad.append(f"{path}: {match.group(0)}")
+        domain = match.group(1).lower()
+        local = match.group(0).split("@", 1)[0]
+        if domain == "example.com":
+            continue
+        if domain == "xxx" and local.isdigit():
+            continue
+        bad.append(f"{path}: {match.group(0)}")
 if bad:
     print("\n".join(bad))
     sys.exit(1)
@@ -750,7 +755,7 @@ PHASE3_DATA="${PROOF_HOME}/phase3-data"
 PHASE3_CFG="${PROOF_HOME}/phase3-config.toml"
 PHASE3_MBOX="${PROOF_HOME}/phase3.mbox"
 cat >"${PHASE3_MBOX}" <<'MBOX'
-From 1768000000000000201@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000201@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Alpha keyword
@@ -764,7 +769,7 @@ Content-Type: text/plain; charset="utf-8"
 
 alpha keyword
 
-From 1768000000000000202@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000202@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Vec only
@@ -778,7 +783,7 @@ Content-Type: text/plain; charset="utf-8"
 
 vec-only marker
 
-From 1768000000000000203@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000203@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Neighbour reviewed
@@ -792,7 +797,7 @@ Content-Type: text/plain; charset="utf-8"
 
 same neighbour text
 
-From 1768000000000000204@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000204@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Neighbour target
@@ -806,7 +811,7 @@ Content-Type: text/plain; charset="utf-8"
 
 same neighbour text
 
-From 1768000000000000205@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000205@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Far note
@@ -1037,7 +1042,7 @@ def solid_png(width, height):
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
 
 encoded = base64.b64encode(solid_png(32, 32)).decode("ascii")
-text = f"""From 1768000000000000401@example.com Thu Jan 15 12:00:00 +0000 2026
+text = f"""From 1768000000000000401@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Text note
@@ -1051,7 +1056,7 @@ Content-Type: text/plain; charset="utf-8"
 
 alpha keyword text path stays on the classification prefix
 
-From 1768000000000000402@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000402@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Image reviewed
@@ -1076,7 +1081,7 @@ Content-Transfer-Encoding: base64
 {encoded}
 --imgbound--
 
-From 1768000000000000403@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000403@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Image target
@@ -1199,7 +1204,7 @@ PHASE4_DATA="${PROOF_HOME}/phase4-data"
 PHASE4_CFG="${PROOF_HOME}/phase4-config.toml"
 PHASE4_MBOX="${PROOF_HOME}/phase4.mbox"
 cat >"${PHASE4_MBOX}" <<'MBOX'
-From 1768000000000000301@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000301@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Reply note
@@ -1213,7 +1218,7 @@ Content-Type: text/plain; charset="utf-8"
 
 please reply shared token shared token
 
-From 1768000000000000302@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000302@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Late note
@@ -1227,7 +1232,7 @@ Content-Type: text/plain; charset="utf-8"
 
 shared token answers-query
 
-From 1768000000000000303@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000303@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Grey note
@@ -1388,7 +1393,7 @@ def solid_png(width, height):
 
 encoded = base64.b64encode(solid_png(32, 32)).decode("ascii")
 Path(sys.argv[1]).write_text(
-    f"""From 1768000000000000701@example.com Thu Jan 15 12:00:00 +0000 2026
+    f"""From 1768000000000000701@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Alpha note
@@ -1402,7 +1407,7 @@ Content-Type: text/plain; charset="utf-8"
 
 alpha bench
 
-From 1768000000000000702@example.com Thu Jan 15 12:05:00 +0000 2026
+From 1768000000000000702@xxx Thu Jan 15 12:05:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Beta note
@@ -1416,7 +1421,7 @@ Content-Type: text/plain; charset="utf-8"
 
 beta bench
 
-From 1768000000000000703@example.com Thu Jan 15 12:10:00 +0000 2026
+From 1768000000000000703@xxx Thu Jan 15 12:10:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Scan note

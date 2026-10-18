@@ -99,7 +99,7 @@ Message identity. `gmail_message_id` is lowercase hex with no padding, the same 
 
 1. `X-GM-MSGID`, read as decimal.
 2. `X-Gmail-Message-ID`. An all-digit value is read as decimal. A value with hex letters, or a `0x` prefix, is read as hex.
-3. The decimal number before `@` on a Takeout `From ` separator. The host is `xxx`. Tests also accept `example.com`. A numeric local part at any other host is not a Gmail id.
+3. The decimal number before `@` on a Takeout `From ` separator. The host is `xxx`. A numeric local part at any other host is not a Gmail id.
 
 An id must be between 1 and 2^64 − 1. A Takeout separator whose number is outside that range is refused, and its `Message-ID` is not used as `rfc822:`. When no Gmail id parses on any other separator, the key is `rfc822:` plus the SHA-256 of the `Message-ID` header with surrounding spaces and angle brackets removed. When there is no `Message-ID` either, the message is refused and counted in `n_refused`. A refused message is never merged. The ledger records its byte offset and the reason.
 

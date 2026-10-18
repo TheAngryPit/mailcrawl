@@ -805,7 +805,7 @@ class TimeFactsTest(unittest.TestCase):
 
     def _mbox_sent(self, conn, path: Path) -> None:
         path.write_bytes(
-            b"From 1@example.com Sat Oct 10 12:00:00 +0000 2026\n"
+            b"From 1@xxx Sat Oct 10 12:00:00 +0000 2026\n"
             b"X-GM-THRID: 1\n"
             b"X-Gmail-Labels: Sent\n"
             b"Message-ID: <mbox-owner@example.com>\n"
@@ -814,7 +814,7 @@ class TimeFactsTest(unittest.TestCase):
             b"Subject: q\n\n"
             b"Can you confirm?\n"
             b"\n"
-            b"From 2@example.com Sat Oct 16 12:00:00 +0000 2026\n"
+            b"From 2@xxx Sat Oct 16 12:00:00 +0000 2026\n"
             b"X-GM-THRID: 2\n"
             b"X-Gmail-Labels: Inbox\n"
             b"Message-ID: <mbox-sent@example.com>\n"
