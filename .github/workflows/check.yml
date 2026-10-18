@@ -84,5 +84,9 @@ jobs:
           if unshare -rn true; then
             unshare -rn bash "$REPO/scripts/e2e-journey.sh"
           else
-            sudo --preserve-env=PATH,REPO unshare --net bash "$REPO/scripts/e2e-journey.sh"
+            uid="$(id -u)"
+            gid="$(id -g)"
+            sudo --preserve-env=PATH,REPO unshare --net \
+              setpriv --reuid="$uid" --regid="$gid" --init-groups \
+              bash "$REPO/scripts/e2e-journey.sh"
           fi
