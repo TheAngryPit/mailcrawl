@@ -236,6 +236,15 @@ class CompareTest(unittest.TestCase):
             self.assertNotEqual(actual, expected)
             self.assertNotEqual(CHECK.compare(actual, expected), "")
 
+    def test_from_me_false_exits(self) -> None:
+        actual = json.loads((ROOT / "testdata/e2e/expected.json").read_text())
+        expected = json.loads((ROOT / "testdata/e2e/expected.json").read_text())
+        for thread in expected["final"]["threads"]:
+            if thread.get("from_me") == 0:
+                thread["from_me"] = False
+                break
+        self.assertEqual(CHECK.compare(actual, expected), "final: differs\n")
+
     def test_journey_guards_name_bcc_and_the_undo_queue(self) -> None:
         kept = _thread(
             "e2e-traversal",
