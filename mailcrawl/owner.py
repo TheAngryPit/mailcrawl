@@ -169,7 +169,8 @@ def _gmail_aligned(auth_results: str | None, domain: str) -> bool:
     if not blocks:
         return False
     # An encoded word is not a Gmail result. Decoding it can forge a clause.
-    if "=?" in blocks[0]:
+    # A non-ASCII byte in this block is the same kind of damage.
+    if "=?" in blocks[0] or any(ord(char) > 127 for char in blocks[0]):
         return False
     clauses = _scan(blocks[0])
     if clauses is None or not clauses or clauses[0] != [(_AUTHSERV, "")]:

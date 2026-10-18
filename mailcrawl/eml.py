@@ -183,7 +183,9 @@ def header_block(message: EmailMessage, name: str) -> str | None:
 
 
 def _raw_header(value: str) -> str:
-    return value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    # raw_items keeps a lone 8-bit byte as a surrogate. SQLite rejects that.
+    text = value.encode("ascii", "surrogateescape").decode("utf-8", "replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def header_text(message: EmailMessage, name: str) -> str | None:
