@@ -48,8 +48,27 @@ _KEEP_KEYS = frozenset({"action", "source_detail", "thread_id"})
 _REVIVE_KEYS = frozenset({"action", "kind", "reason", "source_detail", "state", "thread_id"})
 _REVIVE_STATES = ("reply", "action")
 _CLOSURE_STATES = frozenset({"reference", "resolved"})
-_BIDI = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
-_ZERO_WIDTH = frozenset("\u200b\u200c\u200d\ufeff\u2060\u180e")
+# Inclusive spans of Default_Ignorable_Code_Point from Unicode 15.0.0
+# DerivedCoreProperties.txt. U+061C is in this table.
+_DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD),
+    (0x034F, 0x034F),
+    (0x061C, 0x061C),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x206F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
+    (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+)
 
 
 @dataclass(frozen=True)
@@ -242,10 +261,7 @@ def apply_agent_decision(
         if not _can_replace(current, override):
             return current, False
     else:
-        bound = _bind_closure(conn, current, decision, override)
-        if bound is None:
-            return current, False
-        decision = bound
+        decision = _bind_closure(conn, current, decision, override)
     if current is not None and _same_write(current, decision):
         return current, False
     draft = _draft(decision, now)
@@ -514,6 +530,8 @@ def _draft(decision: AgentDecision, now: int) -> DecisionDraft:
     evidence: tuple[dict[str, object], ...] = ()
     if decision.action == "revive":
         evidence = ({"kind": decision.kind, "text": decision.reason, "type": "revive"},)
+    elif decision.action == "keep":
+        evidence = ({"time_closure": {"lane": decision.lane, "state": decision.state}},)
     elif decision.reason:
         evidence = ({"text": decision.reason, "type": "reason"},)
     return DecisionDraft(
@@ -630,7 +648,7 @@ def _bind_closure(
     current: sqlite3.Row | None,
     decision: AgentDecision,
     override: bool,
-) -> AgentDecision | None:
+) -> AgentDecision:
     target = _closure_target(current)
     if target is None:
         confirmed = _confirmed(conn, current, decision)
@@ -640,7 +658,13 @@ def _bind_closure(
         if target is None:
             raise UsageError("a time closure is required")
         if not override:
-            return None
+            if decision.action == "keep":
+                bound = replace(decision, state=target[0], lane=target[1])
+            else:
+                bound = decision
+            if current is not None and _same_write(current, bound):
+                return bound
+            raise UsageError("override is required")
     if decision.action == "keep":
         return replace(decision, state=target[0], lane=target[1])
     return decision
@@ -702,6 +726,8 @@ def _closure_target(current: sqlite3.Row | None) -> tuple[str, str] | None:
     if current is None or current["source_detail"] is None:
         return None
     if str(current["origin"]) not in _QUEUE_ORIGINS:
+        return None
+    if current["rule_id"] is not None and str(current["rule_id"]) == _RULE_ID:
         return None
     marked = _marked_closure(current["evidence"])
     if marked is None:
@@ -798,11 +824,22 @@ def _excerpt(conn: sqlite3.Connection, thread_pk: int, max_tokens: int) -> str:
 
 
 def _harness_text(value: str) -> str:
-    return "".join(
-        char
-        for char in value
-        if unicodedata.category(char) != "Cc" and char not in _BIDI and char not in _ZERO_WIDTH
-    )
+    return "".join(char for char in value if not _hidden(char))
+
+
+def _hidden(char: str) -> bool:
+    if unicodedata.category(char) in {"Cc", "Cf"}:
+        return True
+    return _default_ignorable(ord(char))
+
+
+def _default_ignorable(code: int) -> bool:
+    for start, end in _DEFAULT_IGNORABLE:
+        if code < start:
+            return False
+        if code <= end:
+            return True
+    return False
 
 
 def _handles(conn: sqlite3.Connection, thread_pk: int) -> tuple[str, ...]:
@@ -885,6 +922,7 @@ def _queue_sql(scope: ReviewScope) -> tuple[str, list[object]]:
         params.append(_like_prefix(scope.label))
     closure = (
         "instr(decisions.evidence, '\"time_closure\":') > 0"
+        " AND coalesce(decisions.rule_id, '') != 'harness'"
         " AND ((decisions.next_state IN ('reference', 'resolved')"
         " AND decisions.lane = 'paper_trail')"
         " OR decisions.next_state = 'needs_review')"
