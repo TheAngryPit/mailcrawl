@@ -15,10 +15,12 @@ from unittest import mock
 
 from mailcrawl.cli import main
 from mailcrawl.configfile import allow_override, local_llm, write_account
+from mailcrawl.jev import FakeJev, jev_decide
 from mailcrawl.paths import UsageError
 from mailcrawl.review import ReviewScope, parse_agent_decision, review_queue, review_run
 from mailcrawl.rules import bundled_rules_path
 from mailcrawl.store import connect, init_account
+from mailcrawl.vectors import FakeEmbedder, knn_decide
 
 
 class ReviewHarnessTest(unittest.TestCase):
@@ -1984,6 +1986,224 @@ def _artifact(name: str, document: dict[str, object]) -> None:
         return
     dest = Path(root) / name
     dest.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+
+
+class ReviveSurvivesTimeTest(unittest.TestCase):
+    def test_reevaluate_apply_twice_leaves_the_revive_current(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home, config, db = _revived_closure(Path(tmp))
+            with _no_model():
+                first = _reevaluate(home, config, apply=True)
+                second = _reevaluate(home, config, apply=True)
+            self.assertEqual(first["changed"], 0)
+            self.assertEqual(second["changed"], 0)
+            self.assertEqual(_stored(db, "stale-thread"), ("model", "reply", "fixture-model"))
+            self.assertEqual(_lane(db, "stale-thread"), "imbox")
+            self.assertEqual(
+                json.loads(_evidence(db, "stale-thread")),
+                [{"kind": "forgotten", "text": "still owed", "type": "revive"}],
+            )
+            self.assertEqual(_decision_rows(db), 3)
+
+    def test_knn_leaves_a_harness_revive(self) -> None:
+        with TemporaryDirectory() as tmp:
+            _home, _config, db = _revived_closure(Path(tmp))
+            conn = connect(db)
+            try:
+                before = _decision_rows(db)
+                row = knn_decide(
+                    conn,
+                    _thread_pk(conn, "stale-thread"),
+                    FakeEmbedder(),
+                    {"embeddings": True},
+                    _AS_OF,
+                )
+                self.assertEqual(str(row["origin"]), "model")
+                self.assertEqual(str(row["next_state"]), "reply")
+                self.assertEqual(str(row["lane"]), "imbox")
+                self.assertEqual(str(row["rule_id"]), "harness")
+                self.assertEqual(
+                    json.loads(str(row["evidence"])),
+                    [{"kind": "forgotten", "text": "still owed", "type": "revive"}],
+                )
+            finally:
+                conn.close()
+            self.assertEqual(_decision_rows(db), before)
+
+    def test_jev_leaves_a_harness_revive(self) -> None:
+        with TemporaryDirectory() as tmp:
+            _home, _config, db = _revived_closure(Path(tmp))
+            conn = connect(db)
+            try:
+                before = _decision_rows(db)
+                row = jev_decide(
+                    conn,
+                    _thread_pk(conn, "stale-thread"),
+                    FakeJev(),
+                    {"jev-battery": True},
+                    _AS_OF,
+                )
+                self.assertEqual(str(row["origin"]), "model")
+                self.assertEqual(str(row["next_state"]), "reply")
+                self.assertEqual(str(row["lane"]), "imbox")
+                self.assertEqual(str(row["rule_id"]), "harness")
+                self.assertEqual(
+                    json.loads(str(row["evidence"])),
+                    [{"kind": "forgotten", "text": "still owed", "type": "revive"}],
+                )
+            finally:
+                conn.close()
+            self.assertEqual(_decision_rows(db), before)
+
+    def test_a_newer_message_lets_rules_replace_the_revive(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home, config, db = _revived_closure(Path(tmp))
+            _rules_pass(home, config)
+            self.assertEqual(_stored(db, "stale-thread"), ("model", "reply", "fixture-model"))
+            _add_message(
+                db,
+                "stale-thread",
+                _AS_OF - 100 * 86400,
+                "Bills <bills@example.com>",
+                "Your invoice is ready.",
+            )
+            _rules_pass(home, config)
+            self.assertEqual(_stored(db, "stale-thread"), ("model", "reply", "fixture-model"))
+            _add_message(
+                db,
+                "stale-thread",
+                _AS_OF + 60,
+                "Bills <bills@example.com>",
+                "Your invoice is ready.",
+            )
+            _rules_pass(home, config)
+            self.assertEqual(_stored(db, "stale-thread"), ("rule", "reference", "3"))
+            self.assertEqual(_lane(db, "stale-thread"), "paper_trail")
+
+
+def _revived_closure(home: Path) -> tuple[Path, Path, Path]:
+    config = _closure_config(home, False)
+    db = _closure_db(home)
+    conn = connect(db)
+    try:
+        account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        _thread(
+            conn,
+            account,
+            "stale-thread",
+            _AS_OF - 200 * 86400,
+            "reply",
+            ((0, "Bao Fixture <bao@example.com>"),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    with _no_model():
+        held = _reevaluate(home, config, apply=True)
+        queued = _json(
+            home,
+            config,
+            "review",
+            "queue",
+            "--account",
+            "personal",
+            "--now",
+            str(_AS_OF),
+        )
+    if held["changed"] != 1:
+        raise AssertionError(held)
+    by_id = {item["thread_id"]: item for item in queued["items"]}
+    closure = by_id["stale-thread"]["time_closure"]
+    if closure["state"] != "reference" or closure["lane"] != "paper_trail":
+        raise AssertionError(closure)
+    if "last activity is old" not in _evidence(db, "stale-thread"):
+        raise AssertionError(_evidence(db, "stale-thread"))
+    revived = _decide(
+        home,
+        config,
+        {
+            "action": "revive",
+            "kind": "forgotten",
+            "reason": "still owed",
+            "source_detail": "fixture-model",
+            "state": "reply",
+            "thread_id": "stale-thread",
+        },
+    )
+    if revived["decisions"][0]["state"] != "reply":
+        raise AssertionError(revived)
+    return home, config, db
+
+
+def _reevaluate(home: Path, config: Path, *, apply: bool) -> dict[str, object]:
+    args = [
+        "rules",
+        "--account",
+        "personal",
+        "--rules",
+        str(bundled_rules_path()),
+        "--now",
+        str(_AS_OF),
+        "--reevaluate",
+        "--csv",
+        str(home / "revive.csv"),
+    ]
+    if apply:
+        args.append("--apply")
+    return _json(home, config, *args)
+
+
+def _rules_pass(home: Path, config: Path) -> dict[str, object]:
+    return _json(
+        home,
+        config,
+        "rules",
+        "--account",
+        "personal",
+        "--rules",
+        str(bundled_rules_path()),
+        "--now",
+        str(_AS_OF),
+    )
+
+
+def _thread_pk(conn, thread_id: str) -> int:
+    row = conn.execute(
+        "SELECT thread_pk FROM threads WHERE gmail_thread_id = ?",
+        (thread_id,),
+    ).fetchone()
+    return int(row["thread_pk"])
+
+
+def _add_message(db: Path, thread_id: str, when: int, header: str, body: str) -> None:
+    conn = connect(db)
+    try:
+        account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        thread_pk = _thread_pk(conn, thread_id)
+        conn.execute(
+            """
+            INSERT INTO messages(
+              account_id, gmail_message_id, thread_pk, internal_date, from_hdr,
+              subject, body_text, is_from_me, date_trusted, raw_sha256, provenance_hash, imported_at
+            ) VALUES (?, ?, ?, ?, ?, 'synthetic subject', ?, 0, 1, ?, 'prov', 1)
+            """,
+            (
+                account,
+                f"m-{thread_id}-{when}",
+                thread_pk,
+                when,
+                header,
+                body,
+                f"sha-{thread_id}-{when}",
+            ),
+        )
+        conn.execute(
+            "UPDATE threads SET msg_count = msg_count + 1 WHERE thread_pk = ?",
+            (thread_pk,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
