@@ -11,7 +11,14 @@ from pathlib import Path
 from mailcrawl.cli import main
 from mailcrawl.configfile import account_identity, write_account
 from mailcrawl.paths import UsageError
-from mailcrawl.rules import RULES_VERSION, apply_rules, load_rules, preview_rules, supersede_current
+from mailcrawl.rules import (
+    RULES_VERSION,
+    apply_rules,
+    bundled_rules_path,
+    load_rules,
+    preview_rules,
+    supersede_current,
+)
 from mailcrawl.store import connect, init_account
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +41,9 @@ class RulesEngineTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.conn.close()
         self.tmp.cleanup()
+
+    def test_bundled_rules_match_the_testdata_copy(self) -> None:
+        self.assertEqual(bundled_rules_path().read_bytes(), RULES.read_bytes())
 
     def test_starred_forces_needs_review_without_the_body(self) -> None:
         thread = self._thread("secretbodyqx", labels=[("STARRED", "STARRED", None)])

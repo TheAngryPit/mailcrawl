@@ -283,6 +283,9 @@ def _apply_thread(
     policy=None,
     review: bool = False,
 ) -> None:
+    # reevaluate imports this module, so the import stays inside the function.
+    from mailcrawl.reevaluate import harness_revive, revive_holds
+
     facts = _load(
         conn,
         thread_pk,
@@ -296,13 +299,32 @@ def _apply_thread(
     current = conn.execute(
         """
         SELECT decision_id, thread_pk, next_state, rule_id, lane, priority,
-               review_date, muted, created_at, origin
+               review_date, muted, created_at, origin, evidence
         FROM decisions
         WHERE thread_pk = ? AND superseded_by IS NULL
         """,
         (thread_pk,),
     ).fetchone()
     if current is not None and str(current["origin"]) == "human":
+        return
+    if current is not None and revive_holds(conn, current):
+        return
+    if current is not None and harness_revive(current):
+        _supersede(
+            conn,
+            current,
+            _with_time(
+                conn,
+                thread_pk,
+                _classify(facts, now, config, test_recipients),
+                now,
+                config.rules_version,
+                policy,
+                review,
+            ),
+            now,
+            config.rules_version,
+        )
         return
     if current is not None:
         outcome = _transition(current, facts, now, config)

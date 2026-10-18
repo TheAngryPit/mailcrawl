@@ -9,7 +9,15 @@ python3 -m venv "$VENV"
 export PATH="$VENV/bin:$PATH"
 
 cd /tmp
-python3 -c 'import mailcrawl; print(mailcrawl.__file__)'
+location="$(python3 -c 'import mailcrawl; print(mailcrawl.__file__)')"
+printf '%s\n' "$location"
+case "$location" in
+  */site-packages/*) ;;
+  *)
+    echo "mailcrawl is not installed in site-packages" >&2
+    exit 1
+    ;;
+esac
 
 export ARCHIVE="$(mktemp -d)"
 export EXPORT="$ROOT/testdata/fixtures/gog-export/native"
