@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 import urllib.error
 from email.message import Message
@@ -14,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from mailcrawl.decisions import DecisionDraft, decide_once
-from mailcrawl.inference import BoundaryError, scan_source
+from mailcrawl.inference import BoundaryError, invoke, scan_source
 from mailcrawl.jev import (
     BATTERY,
     LOCAL_VERIFY,
@@ -554,6 +555,75 @@ class JevBatteryTest(unittest.TestCase):
                     else:
                         os.environ[name] = value
 
+    def test_redirect_drops_the_key_before_the_second_host(self) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        second_hits: list[str | None] = []
+        first_hits: list[str | None] = []
+
+        class Second(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                second_hits.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, fmt: str, *args: object) -> None:
+                return
+
+        class First(BaseHTTPRequestHandler):
+            location = ""
+
+            def do_POST(self) -> None:
+                first_hits.append(self.headers.get("Authorization"))
+                self.send_response(302)
+                self.send_header("Location", First.location)
+                self.end_headers()
+
+            def log_message(self, fmt: str, *args: object) -> None:
+                return
+
+        second = ThreadingHTTPServer(("127.0.0.1", 0), Second)
+        first = ThreadingHTTPServer(("127.0.0.1", 0), First)
+        First.location = f"http://127.0.0.1:{second.server_address[1]}/v1/systemone"
+        second_thread = threading.Thread(target=second.serve_forever, daemon=True)
+        first_thread = threading.Thread(target=first.serve_forever, daemon=True)
+        second_thread.start()
+        first_thread.start()
+        saved = {name: os.environ.get(name) for name in ("JEV_API_KEY", "TYPESAFE_API_KEY", "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")}
+        os.environ.pop("JEV_API_KEY", None)
+        os.environ["TYPESAFE_API_KEY"] = "redirect-secret"
+        os.environ["http_proxy"] = "http://127.0.0.1:9"
+        os.environ["https_proxy"] = "http://127.0.0.1:9"
+        os.environ["HTTP_PROXY"] = "http://127.0.0.1:9"
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:9"
+        os.environ["ALL_PROXY"] = "http://127.0.0.1:9"
+        try:
+            with patch(
+                "mailcrawl.jev._ENDPOINT",
+                f"http://127.0.0.1:{first.server_address[1]}/v1/systemone",
+            ):
+                with self.assertRaises(UsageError) as caught:
+                    invoke(
+                        "jev-battery",
+                        lambda: HttpJev().ask("synthetic", BATTERY),
+                        {"jev-battery": True},
+                    )
+            self.assertIn("redirect", str(caught.exception))
+            self.assertEqual(len(first_hits), 1)
+            self.assertEqual(first_hits[0], "Bearer redirect-secret")
+            self.assertEqual(second_hits, [])
+        finally:
+            first.shutdown()
+            second.shutdown()
+            first.server_close()
+            second.server_close()
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
     def test_http_429_retries_once_then_reviews(self) -> None:
         saved = {name: os.environ.get(name) for name in ("JEV_API_KEY", "TYPESAFE_API_KEY")}
         os.environ.pop("JEV_API_KEY", None)
@@ -578,7 +648,10 @@ class JevBatteryTest(unittest.TestCase):
             conn = connect(Path(tmp) / "personal.db")
             try:
                 ids = _seed(conn)
-                with patch("urllib.request.urlopen", urlopen), patch(
+                with patch(
+                    "urllib.request.build_opener",
+                    return_value=type("Opener", (), {"open": staticmethod(urlopen)})(),
+                ), patch(
                     "time.sleep",
                     side_effect=lambda seconds: slept.append(seconds),
                 ):
