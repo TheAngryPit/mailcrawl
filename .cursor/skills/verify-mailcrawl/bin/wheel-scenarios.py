@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Headless checks for the wheel install. Cwd stays empty. No network."""
 
 import calendar
@@ -324,6 +325,12 @@ def _untrusted_after_revive(home: Path) -> None:
 
 
 def _refuse_jev_redirect() -> None:
+    for code in (301, 302, 303, 307, 308):
+        _refuse_redirect(code)
+    print("redirects 301 302 303 307 308")
+
+
+def _refuse_redirect(code: int) -> None:
     second_hits: list[str | None] = []
 
     class Second(BaseHTTPRequestHandler):
@@ -338,9 +345,10 @@ def _refuse_jev_redirect() -> None:
 
     class First(BaseHTTPRequestHandler):
         location = ""
+        status = 302
 
         def do_POST(self) -> None:
-            self.send_response(302)
+            self.send_response(First.status)
             self.send_header("Location", First.location)
             self.end_headers()
 
@@ -349,6 +357,7 @@ def _refuse_jev_redirect() -> None:
 
     second = ThreadingHTTPServer(("127.0.0.1", 0), Second)
     first = ThreadingHTTPServer(("127.0.0.1", 0), First)
+    First.status = code
     First.location = f"http://127.0.0.1:{second.server_address[1]}/v1/systemone"
     Thread(target=second.serve_forever, daemon=True).start()
     Thread(target=first.serve_forever, daemon=True).start()
@@ -359,11 +368,11 @@ def _refuse_jev_redirect() -> None:
             invoke("jev-battery", lambda: HttpJev().ask("synthetic", BATTERY[:1]), {"jev-battery": True})
         except UsageError as exc:
             if "redirect" not in str(exc):
-                raise
+                raise SystemExit(f"{code} {exc}") from exc
         else:
-            raise SystemExit("jev followed a redirect")
+            raise SystemExit(f"jev followed redirect {code}")
         if second_hits:
-            raise SystemExit("redirect target was called")
+            raise SystemExit(f"redirect {code} reached the second host")
     finally:
         first.shutdown()
         second.shutdown()

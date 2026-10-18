@@ -26,7 +26,7 @@ This directory is the maintained source for verifying mailcrawl. Recipes exercis
 - Rules are runnable when `testdata/rules/rules-v0.json` exists. Doctor reports `rules v0: runnable` only in that case.
 - Stats and dry-run are runnable when that rules file exists. Doctor reports `stats dry-run: runnable` only in that case.
 - Default taxonomy is runnable when `testdata/catalogue/taxonomy.synthetic.json` exists. Doctor reports `default taxonomy: runnable` only in that case.
-- Wheel scenarios are runnable when `pyproject.toml` and `mailcrawl/rules-v0.json` exist. Doctor reports `wheel scenarios: runnable` only in that case. Each drive installs the wheel with `--no-index` and runs from an empty directory.
+- Wheel scenarios are runnable when `pyproject.toml`, `mailcrawl/rules-v0.json`, `pip`, and `venv` are available. Doctor does not require system setuptools. Each drive installs `setuptools>=77` into a scratch venv, then installs the wheel, and runs from an empty directory.
 
 ## Feature entry contract
 

@@ -30,6 +30,6 @@ Preconditions:
 
 ## Gotchas
 
-- The drive installs with `--no-index` and blocks proxies at `127.0.0.1:9`. It does not call a model.
+- The drive installs `setuptools>=77` into a scratch venv, then installs the wheel. Proxies point at `127.0.0.1:9`. It does not call a model.
 - The working directory stays empty. The archive is a temp home.
 - Cleanup removes the scratch virtualenv. Evidence stays in `$EVIDENCE_DIR`.

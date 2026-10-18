@@ -32,7 +32,9 @@ taxonomy_runnable() {
 }
 
 wheel_scenarios_runnable() {
-  [[ -f "$REPO_ROOT/pyproject.toml" && -f "$REPO_ROOT/mailcrawl/rules-v0.json" ]]
+  [[ -f "$REPO_ROOT/pyproject.toml" && -f "$REPO_ROOT/mailcrawl/rules-v0.json" ]] || return 1
+  python3 -m pip --version >/dev/null 2>&1 || return 1
+  python3 -m venv --help >/dev/null 2>&1 || return 1
 }
 
 ensure_wheel() {
@@ -45,11 +47,12 @@ ensure_wheel() {
   fi
   mkdir -p "$SCRATCH_DIR"
   rm -rf "$venv"
-  python3 -m venv --system-site-packages "$venv"
+  python3 -m venv "$venv"
   (
     cd /tmp
+    "$venv/bin/python" -m pip install --disable-pip-version-check 'setuptools>=77'
     "$venv/bin/python" -m pip install --disable-pip-version-check \
-      --no-index --no-deps --no-build-isolation "$REPO_ROOT"
+      --no-deps --no-build-isolation "$REPO_ROOT"
   )
 }
 
@@ -72,6 +75,8 @@ drive_wheel_scenario() {
       -u GH_TOKEN \
       -u GITHUB_TOKEN \
       -u GOOGLE_APPLICATION_CREDENTIALS \
+      -u TYPESAFE_API_KEY \
+      -u JEV_API_KEY \
       HOME="$empty" \
       http_proxy=http://127.0.0.1:9 \
       https_proxy=http://127.0.0.1:9 \
@@ -1252,9 +1257,9 @@ cmd_doctor() {
       log "default taxonomy: not runnable (missing testdata/catalogue/taxonomy.synthetic.json)"
     fi
     if wheel_scenarios_runnable; then
-      log "wheel scenarios: runnable"
+      log "wheel scenarios: runnable (scratch venv installs setuptools>=77)"
     else
-      log "wheel scenarios: not runnable (missing pyproject.toml or bundled rules)"
+      log "wheel scenarios: not runnable (need pyproject.toml, bundled rules, pip, and venv)"
     fi
     log "doctor ok"
   } | tee "$EVIDENCE_DIR/doctor.log"
@@ -1305,6 +1310,9 @@ cmd_drive() {
 
 cmd_cleanup() {
   rm -rf "$SCRATCH_DIR"
+  shopt -s nullglob
+  rm -rf /tmp/mailcrawl-wheel-*
+  shopt -u nullglob
   log "cleanup done (evidence kept at $EVIDENCE_DIR)"
 }
 
