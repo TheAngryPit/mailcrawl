@@ -488,19 +488,21 @@ def _from_me(args: argparse.Namespace) -> int:
     cfg = config_path(args.config)
     aliases = owner_addresses(cfg, alias)
     if not args.apply:
-        conn = _open_dry(data_dir(args.home) / f"{alias}.db")
+        db_path = data_dir(args.home) / f"{alias}.db"
+        warning = _wal_warning(db_path)
+        conn = _open_dry(db_path)
         try:
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version < USER_VERSION:
-                _emit(args, {"account": alias, "error": "needs migration", "ok": False})
+                _emit(args, _with_warning({"account": alias, "error": "needs migration", "ok": False}, warning))
                 return 2
             if version > USER_VERSION:
-                _emit(args, {"account": alias, "error": "unsupported_schema", "ok": False})
+                _emit(args, _with_warning({"account": alias, "error": "unsupported_schema", "ok": False}, warning))
                 return 3
             report = recompute_from_me(conn, aliases, apply=False)
         finally:
             conn.close()
-        _emit(args, {"account": alias, **report.public()})
+        _emit(args, _with_warning({"account": alias, **report.public()}, warning))
         return 0
     conn = _account_db(args)
     try:
@@ -785,6 +787,20 @@ def _taxonomy_warnings(conn, alias: str, catalogue: Path | None) -> list[str]:
     if catalogue is None:
         return []
     return missing_labels(load_taxonomy(catalogue), alias, present_label_names(conn))
+
+
+def _wal_warning(path: Path) -> str | None:
+    wal = Path(f"{path}-wal")
+    if wal.is_file() and wal.stat().st_size > 0:
+        return "wal may be stale"
+    return None
+
+
+def _with_warning(doc: dict[str, object], warning: str | None) -> dict[str, object]:
+    if warning is None:
+        return doc
+    print(warning, file=sys.stderr)
+    return {**doc, "warning": warning}
 
 
 def _open_dry(path: Path) -> sqlite3.Connection:

@@ -164,13 +164,26 @@ def is_attachment(part: Message) -> bool:
 
 
 def header_block(message: EmailMessage, name: str) -> str | None:
-    values = message.get_all(name)
-    if not values:
-        return None
-    parts = [str(value).strip() for value in values if str(value).strip()]
+    """Return the raw header text.
+
+    ``get_all`` decodes RFC 2047 encoded words. Authentication-Results is not
+    an unstructured header, and that decoding can close a comment early.
+    """
+    wanted = name.lower()
+    parts: list[str] = []
+    for key, value in message.raw_items():
+        if key.lower() != wanted:
+            continue
+        text = _raw_header(value)
+        if text:
+            parts.append(text)
     if not parts:
         return None
     return "\n".join(parts)
+
+
+def _raw_header(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def header_text(message: EmailMessage, name: str) -> str | None:

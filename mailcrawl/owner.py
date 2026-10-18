@@ -168,6 +168,9 @@ def _gmail_aligned(auth_results: str | None, domain: str) -> bool:
     blocks = _blocks(auth_results)
     if not blocks:
         return False
+    # An encoded word is not a Gmail result. Decoding it can forge a clause.
+    if "=?" in blocks[0]:
+        return False
     clauses = _scan(blocks[0])
     if clauses is None or not clauses or clauses[0] != [(_AUTHSERV, "")]:
         return False
@@ -183,7 +186,7 @@ def _gmail_aligned(auth_results: str | None, domain: str) -> bool:
         if not clause or clause[0] != ("dkim", "pass"):
             continue
         for key, value in clause[1:]:
-            if key != "header.d":
+            if key not in ("header.d", "header.i"):
                 continue
             if _domain_of(value) == wanted:
                 return True
