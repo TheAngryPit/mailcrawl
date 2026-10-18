@@ -26,6 +26,7 @@ This directory is the maintained source for verifying mailcrawl. Recipes exercis
 - Rules are runnable when `testdata/rules/rules-v0.json` exists. Doctor reports `rules v0: runnable` only in that case.
 - Stats and dry-run are runnable when that rules file exists. Doctor reports `stats dry-run: runnable` only in that case.
 - Default taxonomy is runnable when `testdata/catalogue/taxonomy.synthetic.json` exists. Doctor reports `default taxonomy: runnable` only in that case.
+- Wheel scenarios are runnable when `pyproject.toml`, `mailcrawl/rules-v0.json`, `pip`, and `venv` are available. Doctor does not require system setuptools. Each drive installs `setuptools>=77` into a scratch venv, then installs the wheel, and runs from an empty directory.
 
 ## Feature entry contract
 
@@ -39,8 +40,13 @@ Each feature file uses exactly four H2 sections: `Sub-features`, `How to get to 
 - [scaffold-headless-proof](./scaffold-headless-proof.md) — section 5 scaffold proof via `make check && scripts/proof.sh`.
 - [native-gog-import](./native-gog-import.md). Import a synthetic gog export that has no `export.json`.
 - [mbox-import](./mbox-import.md). Stream a synthetic Takeout mbox, reimport it, keep its `pseudo:` labels out of rules, and reconcile it with a gog export of the same messages.
-- [body-clean](./body-clean.md). Keep `body_text_raw`, index the cleaned `body_text`, and leave schema v2 empty of plans.
+- [body-clean](./body-clean.md). Keep `body_text_raw`, index the cleaned `body_text`, and leave the current schema empty of plans.
 - [attachment-parse](./attachment-parse.md). Extract text parts, skip a missing hash, and leave PDF, OCR, Office, and `ics` behind an interface.
 - [rules-v0](./rules-v0.md). Apply rules 0 to 8 and print counts. `rules_version` is `rules-v4`.
 - [stats-dry-run](./stats-dry-run.md). Print archive counts and would-be decision counts. Backfill an old archive. No plan file and no Gmail.
 - [default-taxonomy](./default-taxonomy.md). Apply generic category signals, accept one local override, and print empty categories.
+- [time-closure-review](./time-closure-review.md). Store a time closure while `llm_review` is on, and accept keep.
+- [owner-alias-from-me](./owner-alias-from-me.md). Trust an authenticated owner alias and count it with `from-me`.
+- [wheel-rules-jev](./wheel-rules-jev.md). Run bundled rules from the wheel and refuse a jev redirect.
+- [revive-hold](./revive-hold.md). Leave a harness revive in place until an untrusted import is newer.
+- [closure-stays-queued](./closure-stays-queued.md). Keep a stored time closure in the default queue after `llm_review` is turned off.

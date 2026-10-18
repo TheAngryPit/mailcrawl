@@ -145,7 +145,10 @@ def revive_holds(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
 def _stored_evidence(value: object) -> tuple[dict[str, object], ...]:
     if not isinstance(value, str) or not value:
         return ()
-    parsed = json.loads(value)
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return ()
     if not isinstance(parsed, list):
         return ()
     return tuple(item for item in parsed if isinstance(item, dict))

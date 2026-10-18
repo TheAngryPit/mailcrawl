@@ -1619,6 +1619,157 @@ class TimeClosureReviewTest(unittest.TestCase):
             again = _decide(home, config, _keep("noise-thread"))
             self.assertEqual(again["decisions"][0]["changed"], False)
 
+    def test_unparseable_evidence_stays_in_the_queue(self) -> None:
+        closure = {"lane": "paper_trail", "state": "reference"}
+        shapes = (
+            ("noise-thread", "needs_review", "imbox", "not-json"),
+            (
+                "object-thread",
+                "reference",
+                "paper_trail",
+                json.dumps({"time_closure": closure, "type": "x"}, sort_keys=True, separators=(",", ":")),
+            ),
+            (
+                "string-thread",
+                "reference",
+                "paper_trail",
+                json.dumps(["a", {"time_closure": closure}], sort_keys=True, separators=(",", ":")),
+            ),
+            (
+                "number-thread",
+                "reference",
+                "paper_trail",
+                json.dumps([1, {"time_closure": closure}], sort_keys=True, separators=(",", ":")),
+            ),
+            (
+                "null-thread",
+                "reference",
+                "paper_trail",
+                json.dumps([None, {"time_closure": closure}], sort_keys=True, separators=(",", ":")),
+            ),
+            (
+                "keep-thread",
+                "reference",
+                "paper_trail",
+                json.dumps([{"time_closure": closure}], sort_keys=True, separators=(",", ":")),
+            ),
+        )
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = _closure_config(home, False)
+            db = _closure_db(home)
+            _seed_closure(db)
+            conn = connect(db)
+            try:
+                account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+                for thread_id, state, lane, evidence in shapes:
+                    if thread_id != "noise-thread":
+                        _thread(
+                            conn,
+                            account,
+                            thread_id,
+                            _AS_OF - 86400,
+                            "reply",
+                            ((0, "Cam Fixture <cam@example.com>"),),
+                        )
+                    _install_harness(conn, thread_id, state, lane, evidence)
+                conn.commit()
+            finally:
+                conn.close()
+            for extra in ((), ("--origin", "model")):
+                queued = _json(
+                    home,
+                    config,
+                    "review",
+                    "queue",
+                    "--account",
+                    "personal",
+                    "--now",
+                    str(_AS_OF),
+                    *extra,
+                )
+                present = {row["thread_id"]: row for row in queued["items"]}
+                for thread_id, _state, _lane, _evidence in shapes:
+                    if thread_id == "keep-thread":
+                        self.assertNotIn(thread_id, present)
+                        continue
+                    self.assertEqual(present[thread_id]["state"], "needs_review", thread_id)
+            config.write_text(
+                config.read_text(encoding="utf-8") + "[review]\nllm_review = true\n",
+                encoding="utf-8",
+            )
+            enabled = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            enabled_ids = {row["thread_id"] for row in enabled["items"]}
+            self.assertIn("object-thread", enabled_ids)
+            self.assertIn("string-thread", enabled_ids)
+            self.assertNotIn("keep-thread", enabled_ids)
+
+    def test_queue_and_keep_agree_on_reason_and_revive_shapes(self) -> None:
+        shapes = (
+            (
+                "keep-only",
+                [{"time_closure": {"lane": "paper_trail", "state": "reference"}}],
+                False,
+            ),
+            (
+                "reason-null",
+                [{"time_closure": {"lane": "paper_trail", "state": "reference"}, "time_reason": None}],
+                True,
+            ),
+            (
+                "revive-forgotten",
+                [
+                    {
+                        "kind": "forgotten",
+                        "text": "owed",
+                        "time_closure": {"lane": "paper_trail", "state": "reference"},
+                        "type": "revive",
+                    }
+                ],
+                False,
+            ),
+            (
+                "revive-bare",
+                [{"time_closure": {"lane": "paper_trail", "state": "reference"}, "type": "revive"}],
+                True,
+            ),
+            (
+                "revive-null-kind",
+                [
+                    {
+                        "kind": None,
+                        "time_closure": {"lane": "paper_trail", "state": "reference"},
+                        "type": "revive",
+                    }
+                ],
+                True,
+            ),
+        )
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = _closure_config(home, False)
+            db = _closure_db(home)
+            _seed_closure(db)
+            conn = connect(db)
+            try:
+                account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+                for thread_id, evidence, _listed in shapes:
+                    _thread(conn, account, thread_id, _AS_OF - 86400, "reply", ((0, "Cam Fixture <cam@example.com>"),))
+                    _install_harness(
+                        conn,
+                        thread_id,
+                        "reference",
+                        "paper_trail",
+                        json.dumps(evidence, sort_keys=True, separators=(",", ":")),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            queued = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            present = {row["thread_id"] for row in queued["items"]}
+            for thread_id, _evidence, listed in shapes:
+                self.assertEqual(thread_id in present, listed, thread_id)
+
     def test_the_first_pass_holds_a_time_close_and_settles_sender_rules(self) -> None:
         with TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -1989,6 +2140,30 @@ def _seed_closure(db: Path) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _install_harness(conn, thread_id: str, state: str, lane: str, evidence: str) -> None:
+    thread_pk = int(
+        conn.execute("SELECT thread_pk FROM threads WHERE gmail_thread_id = ?", (thread_id,)).fetchone()[0]
+    )
+    old = int(
+        conn.execute(
+            "SELECT decision_id FROM decisions WHERE thread_pk = ? AND superseded_by IS NULL",
+            (thread_pk,),
+        ).fetchone()[0]
+    )
+    conn.execute("UPDATE decisions SET superseded_by = ? WHERE decision_id = ?", (old, old))
+    conn.execute(
+        """
+        INSERT INTO decisions(
+          thread_pk, next_state, lane, source, origin, source_detail,
+          rule_id, rules_version, evidence, created_at
+        ) VALUES (?, ?, ?, 'llm', 'model', 'fixture-model', 'harness', 'review-v1', ?, ?)
+        """,
+        (thread_pk, state, lane, evidence, _AS_OF),
+    )
+    new_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    conn.execute("UPDATE decisions SET superseded_by = ? WHERE decision_id = ?", (new_id, old))
 
 
 def _thread(conn, account: int, thread_id: str, when: int, state: str, people) -> None:

@@ -6,7 +6,7 @@ Import stores the phase 1 text in `body_text_raw` and the cleaned text in `body_
 
 - `raw-kept`. The v0 fixture message `fixture-001` keeps `> quoted line stays` and the `-- ` signature in `body_text_raw`.
 - `cleaned-indexed`. `body_text` for that message is `This body is fake fixture text.` `search quoted` returns no hits. `search fake` returns `fixture-001`.
-- `schema-v2`. The account database is `user_version` 7 and has `decisions`, `sender_decisions`, and `thread_mutes`. It has no `plans`, `proposals`, `embeddings`, or `clips`.
+- `schema`. The account database is `user_version` 11 and has `decisions`, `sender_decisions`, and `thread_mutes`. It has no `plans`, `proposals`, `embeddings`, or `clips`.
 - `html-blockquote-stays`. A synthetic HTML blockquote that does not use a `>` line stays searchable.
 
 ## How to get to it (user POV)
@@ -23,7 +23,7 @@ Preconditions:
 - `testdata/fixtures/gog-export/v0/export.json` exists.
 
 - Run `"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature body-clean`.
-- Expect exit 0. The log shows an empty `quoted` search, a `fake` hit for `fixture-001`, schema v2, and a hit for the HTML blockquote word.
+- Expect exit 0. The log shows an empty `quoted` search, a `fake` hit for `fixture-001`, `user_version` 11, and a hit for the HTML blockquote word.
 - When the v0 fixture is missing, the same command exits 2.
 
 ## Gotchas

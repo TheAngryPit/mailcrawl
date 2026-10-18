@@ -455,7 +455,14 @@ def _item(
     state = None if row["next_state"] is None else str(row["next_state"])
     lane = None if row["lane"] is None else str(row["lane"])
     closure = _closure_view(conn, row, facts, max_tokens)
-    if hold_settled and closure is not None and state in _CLOSURE_STATES and lane == "paper_trail":
+    marked = row["evidence"] is not None and '"time_closure":' in str(row["evidence"])
+    if (
+        hold_settled
+        and marked
+        and state in _CLOSURE_STATES
+        and lane == "paper_trail"
+        and not _handled_by_harness(row)
+    ):
         state = "needs_review"
     return ReviewItem(
         str(row["gmail_thread_id"]),
@@ -968,17 +975,24 @@ def _queue_sql(scope: ReviewScope) -> tuple[str, list[object]]:
         " decisions.origin = 'model'"
         " AND coalesce(decisions.rule_id, '') = 'harness'"
         " AND ("
-        " instr(decisions.evidence, '\"type\":\"revive\"') > 0"
+        " EXISTS ("
+        " SELECT 1 FROM json_each(decisions.evidence)"
+        " WHERE json_valid(decisions.evidence)"
+        " AND type = 'object'"
+        " AND json_extract(value, '$.type') = 'revive'"
+        " AND json_extract(value, '$.kind') IN ('forgotten', 'opportunity')"
+        " )"
         " OR ("
         " json_valid(decisions.evidence)"
         " AND json_type(decisions.evidence) = 'array'"
         " AND json_array_length(decisions.evidence) > 0"
         " AND NOT EXISTS ("
         " SELECT 1 FROM json_each(decisions.evidence)"
-        " WHERE json_type(value) != 'object'"
+        " WHERE json_valid(decisions.evidence)"
+        " AND (type != 'object'"
         " OR json_type(value, '$.time_closure') IS NOT 'object'"
-        " OR json_extract(value, '$.time_reason') IS NOT NULL"
-        " OR json_extract(value, '$.type') = 'revive'"
+        " OR json_type(value, '$.time_reason') IS NOT NULL"
+        " OR json_extract(value, '$.type') = 'revive')"
         " ))))"
         " AND ((decisions.next_state IN ('reference', 'resolved')"
         " AND decisions.lane = 'paper_trail')"

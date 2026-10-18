@@ -31,6 +31,64 @@ taxonomy_runnable() {
   [[ -f "$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json" ]]
 }
 
+wheel_scenarios_runnable() {
+  [[ -f "$REPO_ROOT/pyproject.toml" && -f "$REPO_ROOT/mailcrawl/rules-v0.json" ]] || return 1
+  python3 -m pip --version >/dev/null 2>&1 || return 1
+  python3 -m venv --help >/dev/null 2>&1 || return 1
+}
+
+ensure_wheel() {
+  local venv="$SCRATCH_DIR/venv"
+  if [[ -x "$venv/bin/python" ]] && (
+    cd /tmp
+    "$venv/bin/python" -c "import mailcrawl; raise SystemExit(0 if 'site-packages' in mailcrawl.__file__ else 1)"
+  ); then
+    return 0
+  fi
+  mkdir -p "$SCRATCH_DIR"
+  rm -rf "$venv"
+  python3 -m venv "$venv"
+  (
+    cd /tmp
+    "$venv/bin/python" -m pip install --disable-pip-version-check 'setuptools>=77'
+    "$venv/bin/python" -m pip install --disable-pip-version-check \
+      --no-deps --no-build-isolation "$REPO_ROOT"
+  )
+}
+
+drive_wheel_scenario() {
+  local name="$1"
+  if ! wheel_scenarios_runnable; then
+    log "$name: not runnable"
+    return 2
+  fi
+  mkdir -p "$SCRATCH_DIR"
+  ensure_wheel
+  local empty
+  empty="$(mktemp -d "$SCRATCH_DIR/empty.XXXXXX")"
+  (
+    cd "$empty"
+    env \
+      -u GOG_KEY \
+      -u OPENAI_API_KEY \
+      -u ANTHROPIC_API_KEY \
+      -u GH_TOKEN \
+      -u GITHUB_TOKEN \
+      -u GOOGLE_APPLICATION_CREDENTIALS \
+      -u TYPESAFE_API_KEY \
+      -u JEV_API_KEY \
+      HOME="$empty" \
+      http_proxy=http://127.0.0.1:9 \
+      https_proxy=http://127.0.0.1:9 \
+      HTTP_PROXY=http://127.0.0.1:9 \
+      HTTPS_PROXY=http://127.0.0.1:9 \
+      ALL_PROXY=http://127.0.0.1:9 \
+      "$SCRATCH_DIR/venv/bin/python" \
+      "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/wheel-scenarios.py" \
+      "$name"
+  )
+}
+
 attachment_parse_runnable() {
   body_clean_runnable && native_fixture_runnable
 }
@@ -279,7 +337,7 @@ try:
     if body != "This body is fake fixture text.":
         sys.exit("cleaned body is not the kept sentence")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
-    if version != 7:
+    if version != 11:
         sys.exit(f"user_version {version}")
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     for table in ("decisions", "sender_decisions", "thread_mutes"):
@@ -1198,6 +1256,11 @@ cmd_doctor() {
     else
       log "default taxonomy: not runnable (missing testdata/catalogue/taxonomy.synthetic.json)"
     fi
+    if wheel_scenarios_runnable; then
+      log "wheel scenarios: runnable (scratch venv installs setuptools>=77)"
+    else
+      log "wheel scenarios: not runnable (need pyproject.toml, bundled rules, pip, and venv)"
+    fi
     log "doctor ok"
   } | tee "$EVIDENCE_DIR/doctor.log"
 }
@@ -1225,6 +1288,11 @@ cmd_drive() {
       rules-v0) drive_rules_v0 || drive_code=$? ;;
       stats-dry-run) drive_stats_dry_run || drive_code=$? ;;
       default-taxonomy) drive_default_taxonomy || drive_code=$? ;;
+      time-closure-review) drive_wheel_scenario time-closure-review || drive_code=$? ;;
+      owner-alias-from-me) drive_wheel_scenario owner-alias-from-me || drive_code=$? ;;
+      wheel-rules-jev) drive_wheel_scenario wheel-rules-jev || drive_code=$? ;;
+      revive-hold) drive_wheel_scenario revive-hold || drive_code=$? ;;
+      closure-stays-queued) drive_wheel_scenario closure-stays-queued || drive_code=$? ;;
       *)
         log "unknown feature: $feature"
         drive_code=1
@@ -1242,6 +1310,9 @@ cmd_drive() {
 
 cmd_cleanup() {
   rm -rf "$SCRATCH_DIR"
+  shopt -s nullglob
+  rm -rf /tmp/mailcrawl-wheel-*
+  shopt -u nullglob
   log "cleanup done (evidence kept at $EVIDENCE_DIR)"
 }
 

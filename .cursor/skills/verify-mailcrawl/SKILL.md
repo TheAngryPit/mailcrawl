@@ -21,7 +21,7 @@ Native gog import, a directory with `labels.json` and `messages/index.jsonl` and
 
 Takeout mbox import streams a synthetic mbox, reimports it, and reconciles it with a gog export of two of its messages. See [mbox-import](./features/mbox-import.md).
 
-Body cleaning stores `body_text_raw`, indexes the cleaned `body_text`, and migrates to schema v2. See [body-clean](./features/body-clean.md).
+Body cleaning stores `body_text_raw` and indexes the cleaned `body_text`. See [body-clean](./features/body-clean.md).
 
 Attachment parsing extracts text parts and leaves every other type behind an interface. See [attachment-parse](./features/attachment-parse.md).
 
@@ -30,6 +30,8 @@ Rules 0 to 8 print counts and do not print message text. See [rules-v0](./featur
 `stats` and `dry-run` print counts. Dry-run evaluates rules and does not write decisions. See [stats-dry-run](./features/stats-dry-run.md).
 
 The default taxonomy applies generic signals and reads one local override. See [default-taxonomy](./features/default-taxonomy.md).
+
+A time closure stored with `llm_review` on stays in the default queue after the switch is turned off. See [closure-stays-queued](./features/closure-stays-queued.md). The same wheel install drives the closure review, an owner alias, bundled rules with a refused jev redirect, and a revive hold. Those drives use an empty working directory and loopback only.
 
 ## Launch
 
@@ -118,6 +120,12 @@ To drive the default taxonomy:
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature default-taxonomy
 ```
 
+To drive a wheel scenario, use one of `time-closure-review`, `owner-alias-from-me`, `wheel-rules-jev`, `revive-hold`, or `closure-stays-queued`:
+
+```bash
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature closure-stays-queued
+```
+
 ## Evidence
 
 Capture proof outside gitignored `proof/` so cleanup does not erase it.
@@ -156,6 +164,11 @@ test -f "$EVIDENCE_DIR/summary.txt" && test -f "$EVIDENCE_DIR/doctor.log"
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature rules-v0
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature stats-dry-run
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature default-taxonomy
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature time-closure-review
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature owner-alias-from-me
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature wheel-rules-jev
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature revive-hold
+"$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" drive --feature closure-stays-queued
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" cleanup
 ```
 
