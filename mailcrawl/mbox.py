@@ -10,7 +10,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import re
-import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 import email
@@ -25,6 +24,7 @@ from mailcrawl.contract import PSEUDO_LABEL, LabelRec, MessageRec
 from mailcrawl.eml import allow_headers, parsed_record
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.clock import as_of
+from mailcrawl.takeout_labels import resolved_label, system_id
 from mailcrawl.textnorm import chosen_stamp, parse_date
 
 PROVISIONAL = "mbox:"
@@ -34,7 +34,7 @@ RAW_PATH = "mbox:"
 _GMAIL_ID_MAX = 1 << 64
 _SEPARATOR_ID = re.compile(rb"^From (\d+)@\S*")
 _SEPARATOR_REST = re.compile(rb"^From \S+\s+(.*?)\s*$")
-_TAKEOUT_FROM = re.compile(rb"^From \d+@(?:xxx|example\.com)(?:\s|$)")
+_TAKEOUT_FROM = re.compile(rb"^From \d+@xxx(?:\s|$)")
 _ESCAPED_FROM = re.compile(rb"^>+From ")
 _TAKEOUT_HEADERS = ("x-gm-", "x-gmail-", "x-google-")
 _HEX = re.compile(r"[0-9a-f]+")
@@ -42,48 +42,6 @@ _MESSAGE_ID = re.compile(r"<([^<>\s]+)>")
 _BLANK = b"\r\n"
 _FEED_CHUNK = 1 << 16
 _READ = ("x-gm-msgid", "x-gm-thrid", "x-gmail-message-id", "x-gmail-labels")
-
-SYSTEM_LABELS: dict[str, str] = {
-    "inbox": "INBOX",
-    "caixa de entrada": "INBOX",
-    "sent": "SENT",
-    "sent mail": "SENT",
-    "enviados": "SENT",
-    "enviadas": "SENT",
-    "e-mails enviados": "SENT",
-    "starred": "STARRED",
-    "com estrela": "STARRED",
-    "important": "IMPORTANT",
-    "importante": "IMPORTANT",
-    "unread": "UNREAD",
-    "não lido": "UNREAD",
-    "não lidos": "UNREAD",
-    "não lida": "UNREAD",
-    "não lidas": "UNREAD",
-    "draft": "DRAFT",
-    "drafts": "DRAFT",
-    "rascunho": "DRAFT",
-    "rascunhos": "DRAFT",
-    "spam": "SPAM",
-    "trash": "TRASH",
-    "lixo": "TRASH",
-    "lixeira": "TRASH",
-    "reciclagem": "TRASH",
-    "chat": "CHAT",
-    "chats": "CHAT",
-    "category personal": "CATEGORY_PERSONAL",
-    "categoria pessoal": "CATEGORY_PERSONAL",
-    "category social": "CATEGORY_SOCIAL",
-    "categoria social": "CATEGORY_SOCIAL",
-    "categoria redes sociais": "CATEGORY_SOCIAL",
-    "category promotions": "CATEGORY_PROMOTIONS",
-    "categoria promoções": "CATEGORY_PROMOTIONS",
-    "category updates": "CATEGORY_UPDATES",
-    "categoria atualizações": "CATEGORY_UPDATES",
-    "category forums": "CATEGORY_FORUMS",
-    "categoria fóruns": "CATEGORY_FORUMS",
-}
-SYSTEM_LABELS.update({label_id.lower(): label_id for label_id in set(SYSTEM_LABELS.values())})
 
 PSEUDO_LABELS: dict[str, str] = {
     "opened": PSEUDO_LABEL + "opened",
@@ -142,7 +100,7 @@ def label_names(value: str | None) -> list[str]:
 
 
 def system_label(name: str) -> str | None:
-    return SYSTEM_LABELS.get(unicodedata.normalize("NFC", name).casefold())
+    return system_id(name)
 
 
 def thread_root(references: str | None, in_reply_to: str | None, own: str) -> str:
@@ -173,6 +131,7 @@ class MboxSource:
         known: dict[str, LabelRec],
         seed: tuple[LabelRec, ...] = (),
         stored: Callable[[str], bool] = lambda key: False,
+        label_map: dict[str, str] | None = None,
     ) -> None:
         if not path.is_file():
             raise ExportInvalid("missing_file", "mbox file is missing", 1)
@@ -180,6 +139,7 @@ class MboxSource:
         self._stored = stored
         self._known = dict(known)
         self._seed = seed
+        self._label_map = {} if label_map is None else label_map
         self._digest = hashlib.sha256()
         self._done = False
 
@@ -245,7 +205,7 @@ class MboxSource:
     def _labels(self, header: str | None) -> list[LabelRec]:
         found: list[LabelRec] = []
         for name in label_names(header):
-            label_id = system_label(name)
+            label_id = resolved_label(name, self._label_map)
             if label_id is not None:
                 found.append(LabelRec(label_id, label_id, "system"))
             elif name.casefold() in PSEUDO_LABELS:
@@ -376,9 +336,13 @@ def _message_key(takeout: _Takeout, separator: bytes, rfc822_id: str | None) -> 
         or gmail_hex(takeout.gmail_message_id, decimal_only=False)
         or _separator_id(separator)
     )
-    if found is None and rfc822_id and _bare_message_id(rfc822_id):
-        found = rfc822_key(rfc822_id)
-    return found
+    if found is not None:
+        return found
+    if _TAKEOUT_FROM.match(separator) is not None:
+        return None
+    if rfc822_id and _bare_message_id(rfc822_id):
+        return rfc822_key(rfc822_id)
+    return None
 
 
 def _strip_takeout(head: bytes, separator: bytes) -> tuple[bytes, _Takeout]:
@@ -432,19 +396,70 @@ def _decoded(value: str | None) -> str | None:
 
 
 def _separator_id(separator: bytes) -> str | None:
+    if _TAKEOUT_FROM.match(separator) is None:
+        return None
     found = _SEPARATOR_ID.match(separator)
     if found is None:
         return None
     return gmail_hex(found.group(1), decimal_only=True)
 
 
-def stored_date_trusted(raw_path: object, stored: int) -> int | None:
-    """Trust a stored stamp only when the raw source shows it is the receipt clock."""
-    if not isinstance(raw_path, str) or not raw_path:
+@dataclass(frozen=True)
+class MboxFacts:
+    kind: str
+    receipt: tuple[int, int] | None = None
+
+
+def mbox_facts(raw_path: object, gmail_message_id: str) -> MboxFacts:
+    """``takeout`` or ``plain`` when this row's separator is at the offset.
+
+    ``unread`` when the file is missing or the separator belongs to another Gmail id.
+    An unread row is left unchanged.
+    """
+    opened = _open_mbox_row(raw_path, gmail_message_id)
+    if opened is None:
+        return MboxFacts("unread")
+    _path, separator, head = opened
+    if head.startswith(separator):
+        head = head[len(separator) :]
+    _kept, takeout = _strip_takeout(head, separator)
+    kind = "takeout" if takeout.labels is not None else "plain"
+    return MboxFacts(kind, _separator_receipt(separator))
+
+
+def takeout_block(raw_path: object, gmail_message_id: str) -> bool:
+    """True when this row's separator and leading block would be accepted at import."""
+    return mbox_facts(raw_path, gmail_message_id).kind == "takeout"
+
+
+def _separator_receipt(separator: bytes) -> tuple[int, int] | None:
+    rest = _SEPARATOR_REST.match(separator)
+    fallback = rest.group(1).decode("utf-8", "replace") if rest else None
+    receipt = parse_date(fallback) if fallback else None
+    if receipt is None or receipt <= 0:
         return None
-    if raw_path.startswith(RAW_PATH):
-        return _mbox_row_trust(raw_path, stored)
-    return _header_only_trust(raw_path, stored)
+    return chosen_stamp(receipt, None, as_of(None))
+
+
+def _open_mbox_row(raw_path: object, gmail_message_id: str) -> tuple[Path, bytes, bytes] | None:
+    if not isinstance(raw_path, str) or not raw_path.startswith(RAW_PATH):
+        return None
+    ref = _mbox_ref(raw_path)
+    if ref is None:
+        return None
+    path, offset = ref
+    try:
+        if not path.is_file():
+            return None
+        if not _mbox_boundary(path, offset):
+            return None
+        separator = _read_mbox_separator(path, offset)
+        if _separator_id(separator) != gmail_message_id:
+            return None
+        head = _read_head(path, offset)
+    except OSError:
+        return None
+    return path, separator, head
 
 
 def _mbox_ref(raw_path: str) -> tuple[Path, int] | None:
@@ -455,37 +470,14 @@ def _mbox_ref(raw_path: str) -> tuple[Path, int] | None:
     return Path(path_text), int(offset_text)
 
 
-def _mbox_row_trust(raw_path: str, stored: int) -> int:
-    ref = _mbox_ref(raw_path)
-    if ref is None:
-        return 0
-    path, offset = ref
-    try:
-        if not path.is_file():
-            return 0
-        separator = _read_mbox_separator(path, offset)
-    except OSError:
-        return 0
-    rest = _SEPARATOR_REST.match(separator)
-    fallback = rest.group(1).decode("utf-8", "replace") if rest else None
-    receipt = parse_date(fallback) if fallback else None
-    if receipt is not None and receipt > 0 and stored == receipt:
-        return 1
-    return 0
-
-
-def _header_only_trust(raw_path: str, stored: int) -> int | None:
-    path = Path(raw_path)
-    try:
-        if not path.is_file():
-            return None
-        header = _date_header(_read_head(path, 0))
-    except OSError:
-        return None
-    stamp = parse_date(header) if header else None
-    if stamp is not None and stamp > 0 and stored == stamp:
-        return 0
-    return None
+def _mbox_boundary(path: Path, offset: int) -> bool:
+    if offset == 0:
+        return True
+    size = min(offset, 4)
+    with path.open("rb") as handle:
+        handle.seek(offset - size)
+        prev = handle.read(size)
+    return prev.endswith(b"\n\n") or prev.endswith(b"\r\n\r\n")
 
 
 def _read_mbox_separator(path: Path, offset: int) -> bytes:
@@ -506,22 +498,6 @@ def _read_head(path: Path, offset: int) -> bytes:
             chunks.append(line)
             size += len(line)
     return b"".join(chunks)
-
-
-def _date_header(head: bytes) -> str | None:
-    capturing = False
-    value = ""
-    for line in head.splitlines():
-        if line[:1] in (b" ", b"\t"):
-            if capturing:
-                value += " " + line.decode("utf-8", "replace").strip()
-            continue
-        capturing = False
-        name, colon, rest = line.partition(b":")
-        if colon and name.strip().lower() == b"date":
-            capturing = True
-            value = rest.decode("utf-8", "replace").strip()
-    return value or None
 
 
 def _internal_date(header: str | None, separator: bytes) -> tuple[int, int]:

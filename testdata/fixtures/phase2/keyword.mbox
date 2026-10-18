@@ -1,4 +1,4 @@
-From 1768000000000000001@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000001@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: =?utf-8?q?Reuni=C3=A3o?= da fatura
@@ -36,7 +36,7 @@ dGFydHhyZWYKNDQxCiUlRU9GCg==
 
 --===============0183278443745908157==--
 
-From 1768000000000000002@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000002@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Ada Fixture <ada@example.com>
 To: Bao Fixture <bao@example.com>
 Subject: Texto longo
@@ -69,7 +69,7 @@ eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=
 
 --===============2508169932170959502==--
 
-From 1768000000000000003@example.com Thu Jan 15 12:00:00 +0000 2026
+From 1768000000000000003@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Cam Fixture <cam@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: =?utf-8?q?S=C3=B3?= imagem

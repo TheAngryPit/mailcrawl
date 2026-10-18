@@ -131,13 +131,13 @@ class MboxImportTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            self.labels_of(HTML), ["STARRED", "UNREAD", "mbox:Etiqueta Nova", "pseudo:archived"]
+            self.labels_of(HTML), ["STARRED", "UNREAD", "pseudo:archived"]
         )
         self.assertEqual(self.labels_of(PARTS), ["SENT", "mbox:Projetos, Exemplo", "pseudo:archived"])
         self.assertEqual(self.row(PARTS)["gmail_thread_id"], PLAIN)
         self.assertIsNone(self.row("3e7"))
         kinds = dict(self.conn.execute("SELECT gmail_label_id, kind FROM labels").fetchall())
-        self.assertEqual(kinds["mbox:Etiqueta Nova"], "user")
+        self.assertNotIn("mbox:Etiqueta Nova", kinds)
         self.assertEqual(kinds["UNREAD"], "system")
         self.assertEqual((kinds["pseudo:opened"], kinds["pseudo:archived"]), ("system", "system"))
         self.assertNotIn("mbox:Opened", kinds)
@@ -274,7 +274,7 @@ class MboxImportTest(unittest.TestCase):
         with takeout.open("wb") as handle:
             for number, (takeout_text, gog_raw) in enumerate(cases, start=1):
                 handle.write(
-                    b"From %d@example.com Thu Jan 01 00:00:00 +0000 2026\r\n"
+                    b"From %d@xxx Thu Jan 01 00:00:00 +0000 2026\r\n"
                     b"X-GM-THRID: %d\r\nX-Gmail-Labels: Caixa de Entrada\r\n" % (number, number)
                 )
                 handle.write(takeout_text + b"\r\n")
@@ -356,7 +356,7 @@ class MboxImportTest(unittest.TestCase):
         with big.open("wb") as handle:
             for number in range(1, 301):
                 handle.write(
-                    b"From %d@example.com Thu Jan 01 00:00:00 +0000 2026\n"
+                    b"From %d@xxx Thu Jan 01 00:00:00 +0000 2026\n"
                     b"From: Ada Fixture <ada@example.com>\nSubject: big %d\n"
                     b"Date: Thu, 01 Jan 2026 00:00:00 +0000\n\n" % (number, number)
                 )
@@ -401,7 +401,7 @@ def write_attachment_mbox(path: Path, sizes_mb: list[int]) -> int:
     with path.open("wb") as handle:
         for number, size in enumerate(sizes_mb, start=1):
             head = (
-                b"From %d@example.com Thu Jan 01 00:00:00 +0000 2026\r\n"
+                b"From %d@xxx Thu Jan 01 00:00:00 +0000 2026\r\n"
                 b"X-GM-THRID: %d\r\nX-Gmail-Labels: Caixa de Entrada\r\n"
                 b"From: Ada Fixture <ada@example.com>\r\nSubject: anexo %d\r\n"
                 b"Message-ID: <rss-%d@example.com>\r\nDate: Thu, 01 Jan 2026 00:00:00 +0000\r\n"
@@ -585,7 +585,7 @@ class MboxParserTest(unittest.TestCase):
     def test_unparseable_values_never_raise(self) -> None:
         found = self.items(
             b"From \n\xff\xfe: \x00\nX-GM-MSGID:\nX-GM-THRID: -1\n\n\n"
-            b"From 7@example.com\nMessage-ID: <ok@example.com>\nDate: nonsense\n\nbody\n"
+            b"From 7@xxx\nMessage-ID: <ok@example.com>\nDate: nonsense\n\nbody\n"
         )
         self.assertIsInstance(found[0], Refused)
         last = found[-1]

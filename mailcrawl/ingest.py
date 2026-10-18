@@ -24,6 +24,8 @@ from mailcrawl.mbox import PROVISIONAL, RAW_PATH, MboxSource, Refused
 from mailcrawl.paths import UsageError
 from mailcrawl.taxonomy import axis_of, generic_category, load_taxonomy
 from mailcrawl.store import index_message
+from mailcrawl.takeout_labels import checked_label_map
+from mailcrawl.takeout_repair import repair_takeout
 from mailcrawl.textnorm import clean_body, parse_address, subject_norm
 from mailcrawl.threads import embeddable_image, mark_image_only
 from mailcrawl.version import mailcrawl_version, provenance_hash
@@ -41,6 +43,7 @@ class ImportResult:
         n_error: int,
         n_refused: int = 0,
         n_reconciled: int = 0,
+        takeout_unmapped: tuple[str, ...] = (),
     ) -> None:
         self.n_seen = n_seen
         self.n_new = n_new
@@ -48,6 +51,7 @@ class ImportResult:
         self.n_error = n_error
         self.n_refused = n_refused
         self.n_reconciled = n_reconciled
+        self.takeout_unmapped = takeout_unmapped
 
 
 def load_catalogue_entries(path: Path | None, alias: str) -> dict[str, dict[str, str]]:
@@ -87,8 +91,10 @@ def import_mbox(
     labels_path: Path | None,
     taxonomy_path: Path | None,
     account_email: str,
+    label_map: dict[str, str] | None = None,
 ) -> ImportResult:
     account_id = _account_id(conn, alias)
+    mapping = checked_label_map(label_map)
     seed = load_labels(labels_path) if labels_path is not None else ()
     known = {
         row["name"]: LabelRec(row["gmail_label_id"], row["name"], row["kind"])
@@ -102,13 +108,14 @@ def import_mbox(
         mbox_path,
         known,
         seed,
+        label_map=mapping,
         stored=lambda key: conn.execute(
             "SELECT 1 FROM messages WHERE account_id = ? AND gmail_message_id = ?",
             (account_id, key),
         ).fetchone()
         is not None,
     )
-    return _ingest(
+    result = _ingest(
         conn,
         account_id=account_id,
         alias=alias,
@@ -119,6 +126,10 @@ def import_mbox(
         catalogue=load_catalogue_entries(taxonomy_path, alias),
         account_email=account_email,
     )
+    report = repair_takeout(conn, label_map)
+    result.takeout_unmapped = report.unmapped
+    conn.commit()
+    return result
 
 
 def _account_id(conn: sqlite3.Connection, alias: str) -> int:
@@ -426,14 +437,24 @@ def _upsert_message(
     else:
         return "conflict", kept_sha
     msg_pk = int(existing["msg_pk"])
-    conn.execute(
-        """
-        UPDATE messages
-        SET is_from_me = ?, internal_date = ?, date_trusted = ?
-        WHERE msg_pk = ?
-        """,
-        (is_from_me, message.internal_date, message.date_trusted, msg_pk),
-    )
+    if source == "mbox":
+        conn.execute(
+            """
+            UPDATE messages
+            SET is_from_me = ?, internal_date = ?, date_trusted = ?, raw_path = ?
+            WHERE msg_pk = ?
+            """,
+            (is_from_me, message.internal_date, message.date_trusted, message.raw_path, msg_pk),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE messages
+            SET is_from_me = ?, internal_date = ?, date_trusted = ?
+            WHERE msg_pk = ?
+            """,
+            (is_from_me, message.internal_date, message.date_trusted, msg_pk),
+        )
     _replace_labels(conn, account_id, msg_pk, message, source)
     current = str(existing["gmail_thread_id"])
     incoming = message.gmail_thread_id
@@ -624,7 +645,7 @@ def _recompute_threads(conn: sqlite3.Connection, account_id: int) -> None:
         thread_pk = int(thread["thread_pk"])
         latest = conn.execute(
             """
-            SELECT subject, is_from_me FROM messages
+            SELECT subject FROM messages
             WHERE thread_pk = ?
             ORDER BY internal_date DESC, msg_pk DESC
             LIMIT 1
@@ -637,7 +658,6 @@ def _recompute_threads(conn: sqlite3.Connection, account_id: int) -> None:
               msg_count = (SELECT count(*) FROM messages WHERE thread_pk = ?),
               first_msg_at = (SELECT min(internal_date) FROM messages WHERE thread_pk = ?),
               last_msg_at = (SELECT max(internal_date) FROM messages WHERE thread_pk = ?),
-              last_msg_from_me = ?,
               subject_norm = ?
             WHERE thread_pk = ?
             """,
@@ -645,7 +665,6 @@ def _recompute_threads(conn: sqlite3.Connection, account_id: int) -> None:
                 thread_pk,
                 thread_pk,
                 thread_pk,
-                None if latest is None else latest["is_from_me"],
                 None if latest is None else subject_norm(latest["subject"]),
                 thread_pk,
             ),

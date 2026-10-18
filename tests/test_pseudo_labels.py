@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TAKEOUT = ROOT / "testdata/fixtures/mbox/takeout.mbox"
 RULES = load_rules(ROOT / "testdata/rules/rules-v0.json")
 NOW = 1767700000
-WRITERS = {"ingest.py", "store.py", "schema.py"}
+WRITERS = {"ingest.py", "store.py", "schema.py", "takeout_repair.py"}
 
 
 def without_pseudo_names(text: str) -> str:

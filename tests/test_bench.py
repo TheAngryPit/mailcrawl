@@ -54,7 +54,7 @@ _PNG = _solid_png(32, 32)
 
 def _mbox() -> str:
     encoded = base64.b64encode(_PNG).decode("ascii")
-    return f"""From 1768000000000000601@example.com Thu Jan 15 12:00:00 +0000 2026
+    return f"""From 1768000000000000601@xxx Thu Jan 15 12:00:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Alpha note
@@ -68,7 +68,7 @@ Content-Type: text/plain; charset="utf-8"
 
 alpha bench
 
-From 1768000000000000602@example.com Thu Jan 15 12:05:00 +0000 2026
+From 1768000000000000602@xxx Thu Jan 15 12:05:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Beta note
@@ -82,7 +82,7 @@ Content-Type: text/plain; charset="utf-8"
 
 beta bench
 
-From 1768000000000000603@example.com Thu Jan 15 12:10:00 +0000 2026
+From 1768000000000000603@xxx Thu Jan 15 12:10:00 +0000 2026
 From: Bao Fixture <bao@example.com>
 To: Ada Fixture <ada@example.com>
 Subject: Scan note

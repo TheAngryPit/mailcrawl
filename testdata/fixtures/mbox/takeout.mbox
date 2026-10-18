@@ -1,4 +1,4 @@
-From 1767225600000000001@example.com Thu Jan 01 09:00:00 +0000 2026
+From 1767225600000000001@xxx Thu Jan 01 09:00:00 +0000 2026
 X-GM-THRID: 1767225600000000001
 X-Gmail-Labels: Caixa de Entrada,Importante,Opened,"Projetos, Exemplo",Example/Synthetic,Categoria Atualizações
 X-Gmail-Original-Message-ID: <mbox-plain@example.com>
@@ -22,7 +22,7 @@ Content-Transfer-Encoding: 8bit
 A reunião do arquivo mboxtoken fica no índice.
 >From the minutes crlftoken.
 
-From 999@example.com Fri Jan 02 10:00:00 +0000 2026
+From 999@xxx Fri Jan 02 10:00:00 +0000 2026
 X-GM-MSGID: 1767348000000000002
 X-Gmail-Labels: Arquivada,Com estrela,Não lidas,Etiqueta Nova
 From: Cam Fixture <cam@example.com>
@@ -35,7 +35,7 @@ Content-Type: text/html; charset="utf-8"
 
 <p>Boletim <b>htmltoken</b></p>
 
-From 1767434400000000003@example.com Sat Jan 03 10:00:00 +0000 2026
+From 1767434400000000003@xxx Sat Jan 03 10:00:00 +0000 2026
 X-GM-THRID: 1767225600000000001
 X-Gmail-Labels: Sent,Archived,"Projetos, Exemplo"
 From: Ada Fixture <ada@example.com>

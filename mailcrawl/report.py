@@ -14,6 +14,7 @@ from mailcrawl.advise import MODEL_NAME, AdviceCase, Advisor
 from mailcrawl.clock import as_of
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.rules import RulesConfig, bundled_rules_path, load_rules, preview_rules
+from mailcrawl.timefacts import thread_time_facts
 from mailcrawl.taxonomy import (
     GMAIL_CATEGORIES,
     GMAIL_TABS,
@@ -130,6 +131,9 @@ def dry_run(
                     preview.thread_pk,
                     rule_id,
                     preview.lane,
+                    preview.next_state,
+                    preview.time_reason,
+                    stamp_now,
                     label_keys,
                     suggestion,
                 )
@@ -213,6 +217,12 @@ class _ExportRow(NamedTuple):
     suggested_rule: str
     suggested_lane: str
     suggested_confidence: str
+    state: str
+    last_human: str
+    age_days: str
+    date_trusted: str
+    past_deadline: str
+    reason: str
 
 
 def _export_row(
@@ -220,6 +230,9 @@ def _export_row(
     thread_pk: int,
     rule_id: str,
     lane: str,
+    state: str,
+    reason: str,
+    moment: int,
     label_keys: dict[str, tuple[str, ...]] | None,
     suggestion: tuple[str, str, str],
 ) -> _ExportRow:
@@ -227,6 +240,7 @@ def _export_row(
         "SELECT gmail_thread_id FROM threads WHERE thread_pk = ?",
         (thread_pk,),
     ).fetchone()
+    facts = thread_time_facts(conn, thread_pk, moment)
     return _ExportRow(
         str(thread_id[0]),
         rule_id,
@@ -235,6 +249,12 @@ def _export_row(
         suggestion[0],
         suggestion[1],
         suggestion[2],
+        state,
+        facts.last_human,
+        "" if facts.age_days is None else str(facts.age_days),
+        "1" if facts.date_trusted else "0",
+        "1" if facts.past_deadline else "0",
+        reason,
     )
 
 
@@ -299,6 +319,12 @@ def _write_decisions(path: Path, rows: list[_ExportRow]) -> int:
                 "suggested_rule",
                 "suggested_lane",
                 "suggested_confidence",
+                "state",
+                "last_human",
+                "age_days",
+                "date_trusted",
+                "past_deadline",
+                "reason",
             ]
         )
         writer.writerows(ordered)

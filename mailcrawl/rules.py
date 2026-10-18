@@ -124,6 +124,16 @@ class Preview:
     next_state: str
     rule_id: str
     lane: str
+    time_reason: str = ""
+
+
+def _time_reason(evidence: tuple[dict[str, object], ...]) -> str:
+    parts: list[str] = []
+    for item in evidence:
+        reasons = item.get("time_reason")
+        if isinstance(reasons, list):
+            parts.extend(str(part) for part in reasons)
+    return "|".join(parts)
 
 
 def preview_rules(
@@ -160,7 +170,9 @@ def preview_rules(
             config.rules_version,
             policy,
         )
-        found.append(Preview(thread_pk, outcome.next_state, outcome.rule_id, outcome.lane))
+        found.append(
+            Preview(thread_pk, outcome.next_state, outcome.rule_id, outcome.lane, _time_reason(outcome.evidence))
+        )
     return found
 
 

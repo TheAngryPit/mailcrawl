@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sqlite3
 import sys
@@ -22,6 +23,7 @@ from mailcrawl.configfile import (
     inference_device,
     local_llm,
     rules_path,
+    takeout_label_map,
     time_policy,
     write_account,
 )
@@ -31,6 +33,7 @@ from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
 from mailcrawl.inference import enabled_points
 from mailcrawl.jev import jev_decide, open_client, score_grey_band
 from mailcrawl.paths import UsageError, canonical_alias, config_path, data_dir
+from mailcrawl.reevaluate import TIME_DETAIL, reevaluate_time
 from mailcrawl.report import dry_run, stats
 from mailcrawl.review import (
     apply_agent_decision,
@@ -47,6 +50,7 @@ from mailcrawl.review import (
 from mailcrawl.rules import apply_rules, load_rules
 from mailcrawl.search import search_messages
 from mailcrawl.store import UnsupportedSchema, connect, init_account
+from mailcrawl.takeout_repair import takeout_status
 from mailcrawl.vectors import embed_threads, knn_account, knn_decide, open_embedder
 from mailcrawl.taxonomy import (
     active_categories,
@@ -70,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
             return _init(args)
         if args.command == "import":
             return _import(args)
+        if args.command == "takeout":
+            return _takeout(args)
         if args.command == "search":
             return _search(args)
         if args.command == "rules":
@@ -139,6 +145,11 @@ def _parser() -> argparse.ArgumentParser:
     mbox.add_argument("--labels")
     mbox.add_argument("--taxonomy")
 
+    takeout = sub.add_parser("takeout")
+    takeout_sub = takeout.add_subparsers(dest="takeout_command", required=True)
+    status = takeout_sub.add_parser("status")
+    status.add_argument("--account", required=True)
+
     search = sub.add_parser("search")
     search.add_argument("query")
     search.add_argument("--account", required=True)
@@ -159,6 +170,9 @@ def _parser() -> argparse.ArgumentParser:
     rules.add_argument("--account", required=True)
     rules.add_argument("--rules")
     rules.add_argument("--as-of", "--now", dest="now", type=int)
+    rules.add_argument("--reevaluate", action="store_true")
+    rules.add_argument("--apply", action="store_true")
+    rules.add_argument("--csv")
 
     counts = sub.add_parser("stats")
     counts.add_argument("--account", required=True)
@@ -277,6 +291,7 @@ def _import(args: argparse.Namespace) -> int:
                 conn,
                 alias=alias,
                 mbox_path=Path(args.file),
+                label_map=takeout_label_map(cfg, alias),
                 labels_path=Path(args.labels) if args.labels else None,
                 taxonomy_path=catalogue,
                 account_email=email,
@@ -299,8 +314,30 @@ def _import(args: argparse.Namespace) -> int:
             "n_refused": result.n_refused,
             "n_seen": result.n_seen,
             "ok": True,
+            "takeout_unmapped": list(result.takeout_unmapped),
             "taxonomy_warnings": len(absent),
         },
+    )
+    return 0
+
+
+def _takeout(args: argparse.Namespace) -> int:
+    if args.takeout_command != "status":
+        raise UsageError("unknown takeout command")
+    alias = canonical_alias(args.account)
+    cfg = config_path(args.config)
+    conn = _account_db(args)
+    try:
+        report = takeout_status(conn, takeout_label_map(cfg, alias))
+    finally:
+        conn.close()
+    _emit(
+        args,
+        {
+            "ok": True,
+            "takeout_unmapped": list(report.unmapped),
+        },
+        text=", ".join(report.unmapped) or "none",
     )
     return 0
 
@@ -349,6 +386,8 @@ def _rules(args: argparse.Namespace) -> int:
     db_path = data_dir(args.home) / f"{alias}.db"
     if not db_path.is_file():
         raise UsageError("account is not initialized")
+    if args.apply and not args.reevaluate:
+        raise UsageError("apply needs reevaluate")
     rules_file = _rules_file(args)
     if not rules_file.is_file():
         raise UsageError("rules file is missing")
@@ -357,6 +396,31 @@ def _rules(args: argparse.Namespace) -> int:
     owners, domains, security_senders, test_recipients = _identity(args)
     conn = connect(db_path)
     try:
+        if args.reevaluate:
+            if not args.csv:
+                raise UsageError("reevaluate needs a csv path")
+            rows = reevaluate_time(
+                conn,
+                now=now,
+                policy=time_policy(config_path(args.config)),
+                apply=bool(args.apply),
+            )
+            _write_reevaluate(Path(args.csv), rows)
+            changed = sum(1 for row in rows if row["changed"] == "1")
+            _emit(
+                args,
+                {
+                    "applied": bool(args.apply),
+                    "changed": changed,
+                    "csv": str(args.csv),
+                    "ok": True,
+                    "skipped_human": sum(1 for row in rows if row["skipped"] == "human"),
+                    "skipped_review": sum(1 for row in rows if row["skipped"] == "needs_review"),
+                    "source_detail": TIME_DETAIL,
+                    "unchanged": sum(1 for row in rows if row["changed"] == "0" and not row["skipped"]),
+                },
+            )
+            return 0
         report = apply_rules(
             conn,
             now=now,
@@ -677,6 +741,24 @@ def _account_db(args: argparse.Namespace) -> sqlite3.Connection:
     if not db_path.is_file():
         raise UsageError("account is not initialized")
     return connect(db_path)
+
+
+def _write_reevaluate(path: Path, rows: list[dict[str, str]]) -> None:
+    fields = (
+        "gmail_thread_id",
+        "origin",
+        "state",
+        "lane",
+        "next_state",
+        "next_lane",
+        "changed",
+        "skipped",
+        "reason",
+    )
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _init_aliases(args: argparse.Namespace) -> list[str]:

@@ -38,8 +38,13 @@ class ScaffoldFixtureTest(unittest.TestCase):
                 continue
             text = path.read_text(encoding="utf-8")
             for match in EMAIL.finditer(text):
-                if match.group(1).lower() != "example.com":
-                    offenders.append(f"{path.name}: {match.group(0)}")
+                domain = match.group(1).lower()
+                local = match.group(0).split("@", 1)[0]
+                if domain == "example.com":
+                    continue
+                if domain == "xxx" and local.isdigit():
+                    continue
+                offenders.append(f"{path.name}: {match.group(0)}")
         self.assertEqual(offenders, [])
 
     def test_v0_fixture_is_a_named_stub(self) -> None:

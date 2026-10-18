@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,6 +25,7 @@ from mailcrawl.rules import apply_rules, bundled_rules_path, load_rules
 from mailcrawl.schema import SCHEMA_SQL, USER_VERSION
 from mailcrawl.store import connect, init_account, migrate
 from mailcrawl.textnorm import parse_date
+from mailcrawl.time_cues import CUES, MONTHS
 from mailcrawl.timefacts import TEXT_CAP, TimeFacts, TimePolicy, apply_time, thread_time_facts
 from mailcrawl.vectors import FakeEmbedder, embed_threads, knn_decide
 
@@ -106,6 +108,64 @@ class TimeFactsTest(unittest.TestCase):
             facts = thread_time_facts(conn, 1, AS_OF)
         self.assertEqual(facts.found, ())
         self.assertLess(len(late[:TEXT_CAP]), len(late))
+
+    def test_non_latin_months_match_cldr_and_hindi_keeps_marks(self) -> None:
+        import unicodedata
+
+        source = json.loads((ROOT / "testdata" / "fixtures" / "cldr-months.json").read_text(encoding="utf-8"))
+        expected: dict[str, int] = {}
+        for names in source.values():
+            for index, name in enumerate(names, start=1):
+                folded = " ".join(unicodedata.normalize("NFC", name).casefold().split())
+                key = unicodedata.normalize("NFC", folded)
+                if key[:1].isdigit():
+                    continue
+                if all(ord(char) < 128 for char in key):
+                    continue
+                expected[key] = index
+        for key, month in expected.items():
+            self.assertEqual(MONTHS.get(key), month, key)
+        for key, month in MONTHS.items():
+            if all(ord(char) < 128 for char in key):
+                continue
+            self.assertEqual(unicodedata.normalize("NFC", key), key, key)
+            self.assertEqual(expected.get(key), month, key)
+        self.assertEqual(CUES.get("बैठक"), "meeting")
+        self.assertNotIn("बठक", CUES)
+
+    def test_cited_help_names_include_the_review_gaps(self) -> None:
+        from mailcrawl.takeout_labels import system_id
+
+        self.assertEqual(system_id("Recibidos"), "INBOX")
+        self.assertEqual(system_id("Notificaciones"), "CATEGORY_UPDATES")
+        self.assertEqual(system_id("Benachrichtigungen"), "CATEGORY_UPDATES")
+
+    def test_multilingual_cues_and_the_new_patterns_finish(self) -> None:
+        cases = (
+            (11, "plazo 15 de marzo de 2025", "deadline", (2025, 3, 15)),
+            (12, "échéance 15 mars 2025", "deadline", (2025, 3, 15)),
+            (13, "frist 15. märz 2020", "deadline", (2020, 3, 15)),
+            (14, "期限 2025年3月15日", "deadline", (2025, 3, 15)),
+            (15, "会議 2025年3月15日", "meeting", (2025, 3, 15)),
+            (16, "plazox 15 de marzo de 2025", "date", (2025, 3, 15)),
+        )
+        with self._db() as conn:
+            for thread_pk, body, kind, ymd in cases:
+                self._message(conn, thread_pk, "other@example.com", 0, _stamp(2026, 10, 1), "Form", body)
+                facts = thread_time_facts(conn, thread_pk, AS_OF)
+                self.assertEqual(facts.found[0].kind, kind, body)
+                self.assertEqual(facts.found[0].at, calendar.timegm((*ymd, 0, 0, 0)), body)
+            started = time.perf_counter()
+            for thread_pk, body in (
+                (21, "1 de " * 2000),
+                (22, "a" * TEXT_CAP),
+                (23, "期限" * 2000),
+                (24, "1. " * 2000),
+                (25, "2025年" * 500),
+            ):
+                self._message(conn, thread_pk, "other@example.com", 0, _stamp(2026, 10, 1), "Form", body)
+                thread_time_facts(conn, thread_pk, AS_OF)
+            self.assertLess(time.perf_counter() - started, 1.0)
 
     def test_four_closed_threads_move_and_a_fresh_request_stays(self) -> None:
         cases = (
@@ -363,6 +423,15 @@ class TimeFactsTest(unittest.TestCase):
             digits = thread_time_facts(conn, 2, AS_OF)
             self.assertEqual(digits.found, ())
             self.assertEqual(apply_time(draft, digits).next_state, "reply")
+            for thread_pk, body in (
+                (4, "plazo ١٥ de marzo de ٢٠٢٥"),
+                (5, "deadline १५ marzo २०२५"),
+                (6, "plazo １５ de marzo de ２０２５"),
+                (7, "期限 ２０२５年３月１５日"),
+            ):
+                self._message(conn, thread_pk, "other@example.com", 0, _stamp(2026, 10, 16), "Digits", body)
+                facts = thread_time_facts(conn, thread_pk, AS_OF)
+                self.assertEqual(facts.found, (), body)
             self._message(
                 conn,
                 3,
@@ -736,7 +805,7 @@ class TimeFactsTest(unittest.TestCase):
 
     def _mbox_sent(self, conn, path: Path) -> None:
         path.write_bytes(
-            b"From 1@example.com Sat Oct 10 12:00:00 +0000 2026\n"
+            b"From 1@xxx Sat Oct 10 12:00:00 +0000 2026\n"
             b"X-GM-THRID: 1\n"
             b"X-Gmail-Labels: Sent\n"
             b"Message-ID: <mbox-owner@example.com>\n"
@@ -745,7 +814,7 @@ class TimeFactsTest(unittest.TestCase):
             b"Subject: q\n\n"
             b"Can you confirm?\n"
             b"\n"
-            b"From 2@example.com Sat Oct 16 12:00:00 +0000 2026\n"
+            b"From 2@xxx Sat Oct 16 12:00:00 +0000 2026\n"
             b"X-GM-THRID: 2\n"
             b"X-Gmail-Labels: Inbox\n"
             b"Message-ID: <mbox-sent@example.com>\n"
@@ -1103,9 +1172,11 @@ class TimeFactsTest(unittest.TestCase):
                 conn.execute(
                     "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (1, 't', 5, 0)"
                 )
+                header_id = gmail_hex("1760000000000000005", decimal_only=True)
+                receipt_id = gmail_hex("1760000000000000009", decimal_only=True)
                 rows = (
-                    ("header", header_stamp, f"mbox:{mbox.resolve()}#0"),
-                    ("receipt", receipt_stamp, f"mbox:{mbox.resolve()}#{second}"),
+                    (header_id, header_stamp, f"mbox:{mbox.resolve()}#0"),
+                    (receipt_id, receipt_stamp, f"mbox:{mbox.resolve()}#{second}"),
                     ("missing", header_stamp, "mbox:/tmp/does-not-exist-mailcrawl.mbox#0"),
                     ("eml-header", header_stamp, str(eml.resolve())),
                     ("eml-receipt", receipt_stamp, str(other.resolve())),
@@ -1144,9 +1215,9 @@ class TimeFactsTest(unittest.TestCase):
                     }
 
                 got = flags()
-                self.assertEqual(got["header"], (0, header_stamp, 0))
-                self.assertEqual(got["receipt"], (0, receipt_stamp, 1))
-                self.assertEqual(got["missing"], (0, header_stamp, 0))
+                self.assertEqual(got[header_id], (0, receipt_stamp, 1))
+                self.assertEqual(got[receipt_id], (0, receipt_stamp, 1))
+                self.assertEqual(got["missing"], (0, header_stamp, 1))
                 self.assertEqual(got["eml-header"], (0, header_stamp, 0))
                 self.assertEqual(got["eml-receipt"], (0, receipt_stamp, 0))
                 conn.execute("PRAGMA user_version = 7")
@@ -1162,7 +1233,12 @@ class TimeFactsTest(unittest.TestCase):
                         """
                     )
                 ]
-                self.assertEqual(after, kept)
+                expected = []
+                for message_id, mine, stamp, raw_path in kept:
+                    if message_id == header_id:
+                        stamp = receipt_stamp
+                    expected.append((message_id, mine, stamp, raw_path))
+                self.assertEqual(after, expected)
             finally:
                 conn.close()
 
