@@ -8,10 +8,9 @@ from dataclasses import replace
 
 from mailcrawl.decisions import DecisionDraft, insert_draft
 from mailcrawl.rules import _time_reason, supersede_current
-from mailcrawl.timefacts import TimePolicy, apply_time, thread_time_facts
+from mailcrawl.timefacts import TimePolicy, apply_time, present_time_closure, thread_time_facts
 
 TIME_DETAIL = "time"
-_CLOSURE_REASONS = frozenset({"waiting is stale", "last activity is old"})
 
 
 def reevaluate_time(
@@ -83,7 +82,7 @@ def reevaluate_time(
         if adjusted is draft:
             rows.append(record)
             continue
-        shown = _present(adjusted, lane, review)
+        shown = present_time_closure(adjusted, lane, review)
         record["next_state"] = shown.next_state
         record["next_lane"] = shown.lane
         record["reason"] = _time_reason(adjusted.evidence)
@@ -119,36 +118,6 @@ def _stored_evidence(value: object) -> tuple[dict[str, object], ...]:
     if not isinstance(parsed, list):
         return ()
     return tuple(item for item in parsed if isinstance(item, dict))
-
-
-def _closes(draft: DecisionDraft) -> bool:
-    reasons: list[str] = []
-    for item in draft.evidence:
-        found = item.get("time_reason")
-        if isinstance(found, list):
-            reasons.extend(str(part) for part in found)
-    return (
-        draft.next_state in ("reference", "resolved")
-        and draft.lane == "paper_trail"
-        and any(reason in _CLOSURE_REASONS for reason in reasons)
-    )
-
-
-def _present(draft: DecisionDraft, previous_lane: str, review: bool) -> DecisionDraft:
-    if not _closes(draft):
-        return draft
-    stamped = _stamp(draft)
-    if review:
-        return stamped
-    return replace(stamped, next_state="needs_review", lane=previous_lane)
-
-
-def _stamp(draft: DecisionDraft) -> DecisionDraft:
-    if not draft.evidence:
-        return draft
-    note = dict(draft.evidence[-1])
-    note["time_closure"] = {"lane": draft.lane, "state": draft.next_state}
-    return replace(draft, evidence=draft.evidence[:-1] + (note,))
 
 
 def _supersede_time(conn: sqlite3.Connection, current: sqlite3.Row, draft: DecisionDraft, now: int) -> None:

@@ -432,6 +432,7 @@ def _rules(args: argparse.Namespace) -> int:
             security_senders=security_senders,
             test_recipients=test_recipients,
             policy=time_policy(config_path(args.config)),
+            review=llm_review(config_path(args.config)),
         )
     finally:
         conn.close()
@@ -497,6 +498,7 @@ def _dry_run(args: argparse.Namespace) -> int:
             test_recipients=test_recipients,
             advisor=StubAdvisor() if args.advise else None,
             policy=time_policy(config_path(args.config)),
+            review=llm_review(config_path(args.config)),
         )
 
     _emit(args, {**_counted(args, report), "ok": True})
@@ -508,7 +510,10 @@ def _as_of(args: argparse.Namespace) -> int:
 
 
 def _time_args(args: argparse.Namespace) -> dict[str, object]:
-    return {"policy": time_policy(config_path(args.config))}
+    return {
+        "policy": time_policy(config_path(args.config)),
+        "review": llm_review(config_path(args.config)),
+    }
 
 
 def _identity(

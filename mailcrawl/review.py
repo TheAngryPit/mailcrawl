@@ -679,17 +679,21 @@ def _confirmed(
 def _closure_target(current: sqlite3.Row | None) -> tuple[str, str] | None:
     if current is None or current["source_detail"] is None:
         return None
-    if str(current["source_detail"]) != "time":
-        return None
     if str(current["origin"]) not in _QUEUE_ORIGINS:
+        return None
+    marked = _marked_closure(current["evidence"])
+    if marked is None:
         return None
     state = str(current["next_state"])
     lane = str(current["lane"])
     if state in _CLOSURE_STATES and lane == "paper_trail":
         return state, lane
-    if state != "needs_review":
-        return None
-    evidence = current["evidence"]
+    if state == "needs_review":
+        return marked
+    return None
+
+
+def _marked_closure(evidence: object) -> tuple[str, str] | None:
     if not isinstance(evidence, str) or not evidence:
         return None
     try:
@@ -837,12 +841,10 @@ def _queue_sql(scope: ReviewScope) -> tuple[str, list[object]]:
         params.append(scope.label)
         params.append(_like_prefix(scope.label))
     closure = (
-        "(decisions.source_detail = 'time'"
-        " AND decisions.next_state IN ('reference', 'resolved')"
+        "instr(decisions.evidence, '\"time_closure\":') > 0"
+        " AND ((decisions.next_state IN ('reference', 'resolved')"
         " AND decisions.lane = 'paper_trail')"
-        " OR (decisions.source_detail = 'time'"
-        " AND decisions.next_state = 'needs_review'"
-        " AND instr(decisions.evidence, '\"time_closure\":') > 0)"
+        " OR decisions.next_state = 'needs_review')"
     )
     if scope.time_closures and clauses:
         where = "(" + " AND ".join(clauses) + ") OR (" + closure + ")"

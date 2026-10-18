@@ -89,6 +89,7 @@ def dry_run(
     test_recipients: frozenset[str] = frozenset(),
     advisor: Advisor | None = None,
     policy=None,
+    review: bool = False,
 ) -> dict[str, object]:
     backfill_categories(conn)
     active = _active(categories)
@@ -113,6 +114,7 @@ def dry_run(
         security_senders=security_senders,
         test_recipients=test_recipients,
         policy=policy,
+        review=review,
     ):
         state = preview.next_state
         rule_id = preview.rule_id

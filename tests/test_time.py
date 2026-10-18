@@ -186,8 +186,8 @@ class TimeFactsTest(unittest.TestCase):
                 "owner@example.com",
                 1,
                 "please reply",
-                "resolved",
-                "paper_trail",
+                "needs_review",
+                "imbox",
                 "waiting is stale",
                 "reply",
             ),
@@ -208,8 +208,8 @@ class TimeFactsTest(unittest.TestCase):
                 "supplier@example.com",
                 0,
                 "Quote acknowledged 10 Feb 2025. please reply stated deadline",
-                "reference",
-                "paper_trail",
+                "needs_review",
+                "imbox",
                 "last activity is old",
                 "action",
             ),
@@ -248,18 +248,26 @@ class TimeFactsTest(unittest.TestCase):
                 else:
                     self.assertIn(reason, evidence[1]["time_reason"])
                     time_reason = evidence[1]["time_reason"]
+                    if reason in ("waiting is stale", "last activity is old"):
+                        self.assertEqual(
+                            evidence[1]["time_closure"],
+                            {
+                                "lane": "paper_trail",
+                                "state": "resolved" if reason == "waiting is stale" else "reference",
+                            },
+                        )
                 table.append((name, before, stored["next_state"], stored["lane"], time_reason))
         self.assertEqual(
             table,
             [
                 ("past meeting", "reply", "needs_review", "imbox", ["past date"]),
-                ("owner closed", "reply", "resolved", "paper_trail", ["owner sent last", "waiting is stale"]),
+                ("owner closed", "reply", "needs_review", "imbox", ["owner sent last", "waiting is stale"]),
                 ("past form", "reply", "needs_review", "imbox", ["past date"]),
                 (
                     "acknowledged quote",
                     "action",
-                    "reference",
-                    "paper_trail",
+                    "needs_review",
+                    "imbox",
                     ["last activity is old"],
                 ),
                 ("fresh request", "reply", "reply", "imbox", None),
@@ -310,11 +318,12 @@ class TimeFactsTest(unittest.TestCase):
             stored = knn_decide(conn, 2, FakeEmbedder(), flags, AS_OF)
             self.assertEqual(stored["origin"], "knn")
             self.assertEqual(stored["source_detail"], "fake-embedder")
-            self.assertEqual(stored["next_state"], "reference")
-            self.assertEqual(stored["lane"], "paper_trail")
+            self.assertEqual(stored["next_state"], "needs_review")
+            self.assertEqual(stored["lane"], "imbox")
             evidence = json.loads(stored["evidence"])
             self.assertEqual(evidence[0]["neighbour_thread_pk"], 1)
             self.assertIn("last activity is old", evidence[1]["time_reason"])
+            self.assertEqual(evidence[1]["time_closure"], {"lane": "paper_trail", "state": "reference"})
 
     def test_undo_of_knn_rolls_back_when_one_previous_row_is_human(self) -> None:
         with self._db() as conn:
@@ -531,8 +540,9 @@ class TimeFactsTest(unittest.TestCase):
         self.assertNotIn("time_reason", fresh["evidence"])
         self.assertEqual((due["origin"], due["next_state"], due["lane"], due["rule_id"]), ("rule", "needs_review", "imbox", "5"))
         self.assertIn("past date", due["evidence"])
-        self.assertEqual((old["origin"], old["next_state"], old["lane"]), ("rule", "reference", "paper_trail"))
+        self.assertEqual((old["origin"], old["next_state"], old["lane"]), ("rule", "needs_review", "imbox"))
         self.assertIn("last activity is old", old["evidence"])
+        self.assertIn('"time_closure":{"lane":"paper_trail","state":"reference"}', old["evidence"])
         self.assertEqual((mine["origin"], mine["next_state"]), ("rule", "needs_review"))
         self.assertEqual((kept["origin"], kept["next_state"]), ("human", "reply"))
         root = os.environ.get("PROOF_DIR")

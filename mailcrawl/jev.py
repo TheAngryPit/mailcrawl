@@ -12,7 +12,7 @@ from typing import Protocol
 from mailcrawl.decisions import DecisionDraft, decide_open, eligible_thread_pks
 from mailcrawl.inference import enabled_points, enter_model, invoke
 from mailcrawl.paths import UsageError
-from mailcrawl.timefacts import TimePolicy, apply_time, thread_time_facts
+from mailcrawl.timefacts import TimePolicy, apply_time, present_time_closure, thread_time_facts
 
 MODEL_ID = "jev-1.13.0"
 BATTERY_VERSION = "battery-v1"
@@ -158,6 +158,7 @@ def jev_decide(
     now: int,
     *,
     policy: TimePolicy | None = None,
+    review: bool = False,
 ) -> sqlite3.Row | None:
     if "jev-battery" not in enabled_points(config):
         return None
@@ -168,7 +169,7 @@ def jev_decide(
         conn,
         thread_pk,
         now,
-        lambda: _timed(conn, thread_pk, client, config, now, policy),
+        lambda: _timed(conn, thread_pk, client, config, now, policy, review),
     )
 
 
@@ -186,10 +187,11 @@ def score_grey_band(
     now: int,
     *,
     policy: TimePolicy | None = None,
+    review: bool = False,
 ) -> GreyPass:
     rows = eligible_thread_pks(conn, include_image_only=False)
     decided = 0
-    review = 0
+    pending = 0
     for thread_pk in rows:
         decision = jev_decide(
             conn,
@@ -198,12 +200,13 @@ def score_grey_band(
             config,
             now,
             policy=policy,
+            review=review,
         )
         if decision is None or decision["next_state"] == "needs_review":
-            review += 1
+            pending += 1
         else:
             decided += 1
-    return GreyPass(len(rows), decided, review)
+    return GreyPass(len(rows), decided, pending)
 
 
 def _api_key() -> str:
@@ -367,10 +370,12 @@ def _timed(
     config: dict[str, bool] | None,
     now: int,
     policy: TimePolicy | None,
+    review: bool,
 ) -> DecisionDraft:
     draft = _produce(conn, thread_pk, client, config)
     facts = thread_time_facts(conn, thread_pk, now)
-    return apply_time(draft, facts, policy)
+    adjusted = apply_time(draft, facts, policy)
+    return present_time_closure(adjusted, draft.lane, review)
 
 
 def _produce(

@@ -147,6 +147,7 @@ def preview_rules(
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
     policy=None,
+    review: bool = False,
 ) -> list[Preview]:
     found: list[Preview] = []
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
@@ -169,6 +170,7 @@ def preview_rules(
             now,
             config.rules_version,
             policy,
+            review,
         )
         found.append(
             Preview(thread_pk, outcome.next_state, outcome.rule_id, outcome.lane, _time_reason(outcome.evidence))
@@ -186,6 +188,7 @@ def apply_rules(
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
     policy=None,
+    review: bool = False,
 ) -> Coverage:
     threads = conn.execute("SELECT thread_pk FROM threads ORDER BY thread_pk").fetchall()
     for thread in threads:
@@ -200,6 +203,7 @@ def apply_rules(
             security_senders,
             test_recipients,
             policy,
+            review,
         )
     conn.commit()
     return coverage_counts(conn)
@@ -272,6 +276,7 @@ def _apply_thread(
     security_senders: frozenset[str] = frozenset(),
     test_recipients: frozenset[str] = frozenset(),
     policy=None,
+    review: bool = False,
 ) -> None:
     facts = _load(
         conn,
@@ -301,7 +306,7 @@ def _apply_thread(
         _supersede(
             conn,
             current,
-            _with_time(conn, thread_pk, outcome, now, config.rules_version, policy),
+            _with_time(conn, thread_pk, outcome, now, config.rules_version, policy, review),
             now,
             config.rules_version,
         )
@@ -313,6 +318,7 @@ def _apply_thread(
         now,
         config.rules_version,
         policy,
+        review,
     )
     _insert_decision(conn, thread_pk, outcome, now, config.rules_version, None)
 
@@ -455,25 +461,12 @@ def _classify(
         or _security_notice(facts, config)
     ):
         fresh = facts.last_at is not None and (now - facts.last_at) < config.unrecognized_days * _DAY
+        evidence = _labels(facts.keys.get("account_security", ())) + ({"type": "rule", "name": "4"},)
         if facts.sender_known is False and fresh:
-            return _outcome(
-                "needs_review",
-                "4",
-                "imbox",
-                None,
-                None,
-                0,
-                _labels(facts.keys.get("account_security", ())) + ({"type": "rule", "name": "4"},),
-            )
-        return _outcome(
-            "reference",
-            "4",
-            "paper_trail",
-            None,
-            None,
-            0,
-            _labels(facts.keys.get("account_security", ())) + ({"type": "rule", "name": "4"},),
-        )
+            return _outcome("needs_review", "4", "imbox", None, None, 0, evidence)
+        if facts.sender_known is False:
+            evidence = evidence + ({"time_reason": ["unrecognized sender is not recent"]},)
+        return _outcome("reference", "4", "paper_trail", None, None, 0, evidence)
     if facts.bin_labels:
         return _outcome(
             "resolved",
@@ -1134,9 +1127,17 @@ def _labels(items: tuple[dict[str, object], ...]) -> tuple[dict[str, object], ..
     return tuple(cleaned)
 
 
-def _with_time(conn, thread_pk: int, outcome: _Outcome, now: int, rules_version: str, policy) -> _Outcome:
+def _with_time(
+    conn,
+    thread_pk: int,
+    outcome: _Outcome,
+    now: int,
+    rules_version: str,
+    policy,
+    review: bool = False,
+) -> _Outcome:
     from mailcrawl.decisions import DecisionDraft
-    from mailcrawl.timefacts import apply_time, thread_time_facts
+    from mailcrawl.timefacts import apply_time, present_time_closure, thread_time_facts
 
     draft = DecisionDraft(
         next_state=outcome.next_state,
@@ -1151,16 +1152,17 @@ def _with_time(conn, thread_pk: int, outcome: _Outcome, now: int, rules_version:
         muted=outcome.muted,
     )
     adjusted = apply_time(draft, thread_time_facts(conn, thread_pk, now), policy)
-    if adjusted is draft:
+    presented = present_time_closure(adjusted, outcome.lane, review)
+    if presented is adjusted and adjusted is draft:
         return outcome
     return _outcome(
-        adjusted.next_state,
+        presented.next_state,
         outcome.rule_id,
-        adjusted.lane,
+        presented.lane,
         outcome.priority,
-        adjusted.review_date,
+        presented.review_date,
         outcome.muted,
-        adjusted.evidence,
+        presented.evidence,
     )
 
 

@@ -1397,6 +1397,85 @@ class TimeClosureReviewTest(unittest.TestCase):
             self.assertEqual(queued["items"][0]["time_closure"]["reason"], "time_closure")
             self.assertNotIn("young-thread", ids)
 
+    def test_the_first_pass_holds_a_time_close_and_settles_sender_rules(self) -> None:
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = _closure_config(home, False)
+            db = _closure_db(home)
+            _seed_first_pass(db)
+            with _no_model():
+                _json(
+                    home,
+                    config,
+                    "rules",
+                    "--account",
+                    "personal",
+                    "--rules",
+                    str(bundled_rules_path()),
+                    "--now",
+                    str(_AS_OF),
+                )
+                queued = _json(home, config, "review", "queue", "--account", "personal", "--now", str(_AS_OF))
+            self.assertEqual(_stored(db, "old-reply"), ("rule", "needs_review", "5"))
+            self.assertEqual(_lane(db, "old-reply"), "imbox")
+            self.assertIn("time_closure", _evidence(db, "old-reply"))
+            self.assertEqual(_stored(db, "invoice-thread"), ("rule", "reference", "3"))
+            self.assertEqual(_lane(db, "invoice-thread"), "paper_trail")
+            self.assertNotIn("time_closure", _evidence(db, "invoice-thread"))
+            self.assertEqual(_stored(db, "spam-thread"), ("rule", "resolved", "spam-trash"))
+            self.assertNotIn("time_closure", _evidence(db, "spam-thread"))
+            by_id = {item["thread_id"]: item for item in queued["items"]}
+            self.assertEqual(by_id["old-reply"]["time_closure"]["state"], "reference")
+            self.assertEqual(by_id["old-reply"]["time_closure"]["lane"], "paper_trail")
+            self.assertNotIn("invoice-thread", by_id)
+            self.assertNotIn("spam-thread", by_id)
+            self.assertNotIn("@", json.dumps(by_id["old-reply"]["time_closure"]))
+            refused = _decide(home, config, _keep("invoice-thread"))
+            self.assertEqual(refused["ok"], False)
+            self.assertEqual(_stored(db, "invoice-thread"), ("rule", "reference", "3"))
+
+        with TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            config = _closure_config(home, True)
+            db = _closure_db(home)
+            _seed_first_pass(db)
+            with _no_model():
+                _json(
+                    home,
+                    config,
+                    "rules",
+                    "--account",
+                    "personal",
+                    "--rules",
+                    str(bundled_rules_path()),
+                    "--now",
+                    str(_AS_OF),
+                )
+                queued = _json(
+                    home,
+                    config,
+                    "review",
+                    "queue",
+                    "--account",
+                    "personal",
+                    "--all",
+                    "--state",
+                    "noise",
+                    "--now",
+                    str(_AS_OF),
+                )
+            self.assertEqual(_stored(db, "old-reply"), ("rule", "reference", "5"))
+            self.assertEqual(_lane(db, "old-reply"), "paper_trail")
+            ids = [item["thread_id"] for item in queued["items"]]
+            self.assertEqual(ids, ["old-reply"])
+            self.assertEqual(queued["items"][0]["time_closure"]["reason"], "time_closure")
+            kept = _decide(home, config, _keep("old-reply"))
+            self.assertEqual(kept["decisions"][0]["state"], "reference")
+            self.assertEqual(kept["decisions"][0]["lane"], "paper_trail")
+            refused = _decide(home, config, _keep("invoice-thread"))
+            self.assertEqual(refused["ok"], False)
+            self.assertEqual(_stored(db, "invoice-thread"), ("rule", "reference", "3"))
+
     def test_llm_review_rejects_a_non_boolean(self) -> None:
         with TemporaryDirectory() as tmp:
             home = Path(tmp)
@@ -1501,6 +1580,87 @@ def _thread(conn, account: int, thread_id: str, when: int, state: str, people) -
         """,
         (thread_pk, state),
     )
+
+
+def _seed_first_pass(db: Path) -> None:
+    conn = connect(db)
+    try:
+        account = int(conn.execute("SELECT account_id FROM accounts").fetchone()[0])
+        _plain_thread(conn, account, "old-reply", _AS_OF - 200 * 86400, "Bao Fixture <bao@example.com>", "hello there")
+        _plain_thread(
+            conn,
+            account,
+            "invoice-thread",
+            _AS_OF - 86400,
+            "Bills <bills@example.com>",
+            "Your invoice is ready.",
+        )
+        spam = _plain_thread(
+            conn,
+            account,
+            "spam-thread",
+            _AS_OF - 86400,
+            "Spam <spam@example.com>",
+            "hello there",
+        )
+        conn.execute(
+            """
+            INSERT INTO labels(account_id, gmail_label_id, name, kind, seen_at)
+            VALUES (?, 'SPAM', 'SPAM', 'system', 1)
+            """,
+            (account,),
+        )
+        conn.execute(
+            """
+            INSERT INTO message_labels(msg_pk, account_id, gmail_label_id, observed_at)
+            VALUES (?, ?, 'SPAM', 1)
+            """,
+            (spam, account),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _plain_thread(conn, account: int, thread_id: str, when: int, header: str, body: str) -> int:
+    address = header.rsplit("<", 1)[-1].rstrip(">").strip().lower()
+    conn.execute(
+        "INSERT INTO senders(account_id, address_norm, domain) VALUES (?, ?, ?)",
+        (account, address, address.split("@", 1)[-1]),
+    )
+    sender_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    conn.execute(
+        "INSERT INTO threads(account_id, gmail_thread_id, msg_count, image_only) VALUES (?, ?, 1, 0)",
+        (account, thread_id),
+    )
+    thread_pk = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+    conn.execute(
+        """
+        INSERT INTO messages(
+          account_id, gmail_message_id, thread_pk, internal_date, from_hdr,
+          sender_id, subject, body_text, is_from_me, date_trusted, raw_sha256,
+          provenance_hash, imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'synthetic subject', ?, 0, 1, ?, 'prov', 1)
+        """,
+        (account, f"m-{thread_id}", thread_pk, when, header, sender_id, body, f"sha-{thread_id}"),
+    )
+    return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
+def _evidence(db: Path, thread_id: str) -> str:
+    conn = connect(db)
+    try:
+        row = conn.execute(
+            """
+            SELECT evidence FROM decisions
+            JOIN threads ON threads.thread_pk = decisions.thread_pk
+            WHERE gmail_thread_id = ? AND superseded_by IS NULL
+            """,
+            (thread_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return "" if row is None or row["evidence"] is None else str(row["evidence"])
 
 
 def _keep(thread_id: str) -> dict[str, str]:
