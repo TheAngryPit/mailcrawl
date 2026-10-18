@@ -5,6 +5,12 @@ set -euo pipefail
 
 cd /tmp
 
+export http_proxy="${http_proxy:-http://127.0.0.1:9}"
+export https_proxy="${https_proxy:-http://127.0.0.1:9}"
+export HTTP_PROXY="$http_proxy"
+export HTTPS_PROXY="$https_proxy"
+export ALL_PROXY="${ALL_PROXY:-$http_proxy}"
+
 if [[ -z "${REPO:-}" ]]; then
   echo "REPO is required" >&2
   exit 1
