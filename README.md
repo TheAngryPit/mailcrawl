@@ -128,6 +128,6 @@ A Go port comes after the Python prototype settles. The archive stays local.
 
 ## License
 
-mailcrawl is [MIT](LICENSE). Libraries and models it can download are named in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This repository does not ship their weights.
+mailcrawl is [MIT](LICENSE). Libraries and models it can download are named in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This repository does not ship their weights. An install with `--no-build-isolation` needs setuptools 77 or newer.
 
 [Built by a storyteller who builds the worlds he imagines.](https://github.com/TheAngryPit)
