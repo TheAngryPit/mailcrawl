@@ -291,6 +291,49 @@ class TimeFactsTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
+    def test_knn_does_not_copy_an_unsettled_time_closure(self) -> None:
+        if __import__("importlib").util.find_spec("sqlite_vec") is None:
+            self.skipTest("sqlite-vec is not installed")
+        with self._db() as conn:
+            self._message(conn, 1, "other@example.com", 0, _stamp(2025, 2, 10), "Old", "same words")
+            self._message(conn, 2, "other@example.com", 0, _stamp(2026, 10, 16), "Young", "same words")
+            self._message(conn, 3, "other@example.com", 0, _stamp(2025, 2, 10), "Held", "same words")
+            mark = json.dumps(
+                [
+                    {
+                        "time_closure": {"lane": "paper_trail", "state": "reference"},
+                        "time_reason": ["last activity is old"],
+                    }
+                ]
+            )
+            conn.execute(
+                """
+                INSERT INTO decisions(
+                  thread_pk, next_state, lane, source, origin, source_detail,
+                  rule_id, rules_version, evidence, created_at
+                ) VALUES (1, 'reference', 'paper_trail', 'rule', 'rule', '5', '5', 'rules-v4', ?, 1)
+                """,
+                (mark,),
+            )
+            conn.execute(
+                """
+                INSERT INTO decisions(
+                  thread_pk, next_state, lane, source, origin, source_detail,
+                  rule_id, rules_version, evidence, created_at
+                ) VALUES (3, 'needs_review', 'imbox', 'rule', 'rule', '5', '5', 'rules-v4', ?, 1)
+                """,
+                (mark,),
+            )
+            conn.commit()
+            flags = {"embeddings": True}
+            invoke("embeddings", lambda: embed_threads(conn, FakeEmbedder(), flags), flags)
+            stored = knn_decide(conn, 2, FakeEmbedder(), flags, AS_OF, review=True)
+            self.assertIsNone(stored)
+            copied = conn.execute(
+                "SELECT next_state FROM decisions WHERE thread_pk = 2"
+            ).fetchone()
+            self.assertIsNone(copied)
+
     def test_knn_does_not_copy_a_reply_onto_an_old_thread(self) -> None:
         if __import__("importlib").util.find_spec("sqlite_vec") is None:
             self.skipTest("sqlite-vec is not installed")
