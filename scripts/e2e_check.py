@@ -297,12 +297,16 @@ def _walk(path: str, actual: object, expected: object) -> list[str]:
     return [f"{label} expected {_show(expected)} actual {_show(actual)}"]
 
 
+def _canonical(value: object) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
 def _unreported(actual: object, expected: object) -> list[str]:
     if isinstance(actual, dict) and isinstance(expected, dict):
         lines = [
             f"{key}: differs"
             for key in sorted(set(actual) | set(expected))
-            if actual.get(key) != expected.get(key)
+            if _canonical(actual.get(key)) != _canonical(expected.get(key))
         ]
         if lines:
             return lines
@@ -311,7 +315,7 @@ def _unreported(actual: object, expected: object) -> list[str]:
 
 def compare(actual: object, expected: object) -> str:
     lines = _walk("", actual, expected)
-    if actual != expected and not lines:
+    if _canonical(actual) != _canonical(expected) and not lines:
         lines = _unreported(actual, expected)
     if not lines:
         return ""
