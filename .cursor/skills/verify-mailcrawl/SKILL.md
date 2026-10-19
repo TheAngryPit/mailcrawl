@@ -38,6 +38,12 @@ The default taxonomy applies generic signals and reads one local override. See [
 
 A time closure stored with `llm_review` on stays in the default queue after the switch is turned off. See [closure-stays-queued](./features/closure-stays-queued.md). The same wheel install drives the closure review, an owner alias, bundled rules with a refused jev redirect, and a revive hold. Those drives use an empty working directory and loopback only.
 
+Crawler operations, local producer handoff and large archive import are separate
+from upstream Gmail freshness. For changes to those surfaces, follow
+[crawler-operations](./features/crawler-operations.md), including the optional
+multi-GiB capacity proof when whole-file budgets change. The CrawlBar recipe
+proves the external CLI contract; installed-app UI validation is separate.
+
 ## Launch
 
 Set an isolated run context (no servers, no credentials):

@@ -12,12 +12,24 @@ The defaults in `mailcrawl/inputio.py` limit work before parsing or decoding.
 | Raw message / header | 64 MiB / 64 KiB |
 | MIME parts / nesting depth | 256 / 32 |
 | Decoded payload | 32 MiB |
-| Records / total import bytes | 100,000 / 512 MiB |
-| Encoded image / new image storage per import | 8 / 256 MiB |
+| GOG default records / total import bytes | 100,000 / 512 MiB |
+| Encoded image / GOG default new image storage per import | 8 / 256 MiB |
 | PDF output / stderr | 4 MiB / 64 KiB |
-| Extraction work per import | 64 MiB |
+| GOG default extraction work per import | 64 MiB |
 
-These are fixed code defaults, not new configuration keys. Oversized records can be refused. Exhausting an aggregate budget aborts the import and rolls back database changes. Newly created image files from that import are removed on rollback; pre-existing image blobs remain. Streaming removes whole-export parsed-message retention, but index and manifest JSON are still bounded in-memory documents. The limits do not guarantee an exact process RSS ceiling.
+Per-record limits apply independently of archive size. Mbox streams default to
+the opened regular file's finite size rather than a 512 MiB archive cap. Optional
+operator-supplied aggregate limits constrain work without changing message,
+header, MIME, image or extraction-subprocess bounds. A growing or changed mbox
+is refused instead of following an unbounded producer stream.
+
+Oversized records can be refused. Exhausting an explicit aggregate budget aborts
+the import and rolls back database changes. Newly created image files from that
+import are removed on rollback; pre-existing image blobs remain. Diagnostic
+samples and image rollback ownership are bounded independently of message
+count. Index and manifest JSON remain bounded in-memory documents. These limits
+do not guarantee an exact process RSS ceiling; large archives still require disk
+space for SQLite and its transaction journal.
 
 PDF extraction has a 30-second wall deadline and child CPU limits. Linux also enforces a 512 MiB address-space limit. macOS rejects the address-space limit used here, so it uses CPU, wall-time, input and output limits instead. A malicious native PDF parser can still allocate memory internally before producing output on macOS. Native parser vulnerability assessment is separate from these controls.
 

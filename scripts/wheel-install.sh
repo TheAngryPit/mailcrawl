@@ -33,3 +33,5 @@ if [[ -z "$block" ]]; then
 fi
 printf '%s\n' "$block"
 bash -euo pipefail -c "$block"
+
+python3 "$ROOT/scripts/crawler-journey.py" --repo "$ROOT"
