@@ -51,6 +51,7 @@ export interface PullRequestFacts {
   readonly isDraft: boolean;
 }
 export interface OpenPullRequest {
+  readonly headRepository: Repository | null;
   readonly number: PrNumber;
   readonly headRefName: string;
   readonly baseRefName: string;
@@ -201,6 +202,11 @@ export type MergeBlocker =
       readonly reason: MergeGateReason;
     };
 export type QueryFailure =
+  | {
+      readonly kind: "stack-graph";
+      readonly retryable: false;
+      readonly detail: string;
+    }
   | {
       readonly kind: "json-parse";
       readonly retryable: true;

@@ -222,3 +222,17 @@ describe("main", () => {
     expect(reader.calls).toEqual([]);
   });
 });
+
+describe("unsafe stack discovery", () => {
+  it("returns a structured blocker for a cycle without polling", async () => {
+    const repository = { owner: "owner", repo: "repo" };
+    const { runtime, stdout } = testRuntime(fakeReader({
+      openPullRequests: [{
+        number: parsePrNumber(1), headRepository: repository,
+        headRefName: "main", baseRefName: "main",
+      }],
+    }));
+    expect(await main(["--owner", "owner", "--repo", "repo", "--pr", "1", "--stack"], runtime)).toBe(7);
+    expect(JSON.parse(stdout.join("")).blocker.failure).toMatchObject({ kind: "stack-graph", retryable: false });
+  });
+});

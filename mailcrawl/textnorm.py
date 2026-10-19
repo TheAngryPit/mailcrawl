@@ -7,7 +7,9 @@ import re
 from email.utils import parseaddr, parsedate_to_datetime
 from html.parser import HTMLParser
 
-_PREFIX = re.compile(r"^(?:re|fwd|fw)\s*:\s*", re.IGNORECASE)
+from mailcrawl.paths import UsageError
+
+_PREFIX = re.compile(r"(?:re|fwd|fw)\s*:\s*", re.IGNORECASE)
 _SPACE = re.compile(r"\s+")
 _BREAK_TAGS = {"p", "br", "div", "tr", "blockquote", "li", "h1", "h2", "h3"}
 _ON_WROTE = re.compile(r"^On .+ wrote:\s*$", re.IGNORECASE)
@@ -22,13 +24,13 @@ _OUTLOOK_WINDOW = 8
 def subject_norm(subject: str | None) -> str | None:
     if subject is None:
         return None
+    if len(subject) > 65536:
+        raise UsageError("subject exceeds text budget")
     text = subject.strip()
-    while True:
-        nxt = _PREFIX.sub("", text, count=1)
-        if nxt == text:
-            break
-        text = nxt.strip()
-    return _SPACE.sub(" ", text).strip()
+    index = 0
+    while match := _PREFIX.match(text, index):
+        index = match.end()
+    return _SPACE.sub(" ", text[index:]).strip()
 
 
 def parse_address(value: str | None) -> tuple[str | None, str | None, str | None]:

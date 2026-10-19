@@ -36,6 +36,8 @@ Copy `template.sh` to the target path. Replace the example stage with one `stage
 
 Hold the bar the template sets: open the URL before asking for its value, use `ask_secret` for anything secret, `write_env` every persisted value, `set_secret` only the values CI actually needs, and `confirm` before any irreversible action. Each `stage` clears the screen so only the current step is visible: keep a stage to one focused task so nothing the human needs scrolls away. Don't touch the library above the marker.
 
+`write_env` requires Python 3 and an owned private destination. New files are atomically published at mode 0600. Existing readable files, symlinks, foreign ownership, writable parent directories and file ACLs are refused before adding values. Choose a private regular destination when refused. On macOS the helper also rejects ancestor ACLs granting write or deletion; on Linux it rejects POSIX access ACLs. It never prints captured values. This local security patch applies to newly generated wizards; existing generated copies require separate review.
+
 ### 4. Verify and hand off
 
 - `bash -n <script>`; run `shellcheck` if available.

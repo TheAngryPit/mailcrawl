@@ -6,6 +6,13 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import selectors
+import tempfile
+import time
+import os
+import resource
+import sys
+from mailcrawl import inputio
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -85,18 +92,60 @@ class PdftotextBackend:
     def read(self, kind: str, payload: bytes) -> BackendRead:
         if kind != "pdf":
             raise PdfExtractError(kind)
-        proc = subprocess.run(
-            ["pdftotext", "-q", "-", "-"],
-            input=payload,
-            capture_output=True,
-            check=False,
-            timeout=30,
-        )
-        if proc.returncode != 0:
-            raise PdfExtractError("pdftotext failed")
-        text = proc.stdout.decode("utf-8", errors="replace").replace("\f", "\n")
-        pages = max(proc.stdout.count(b"\f"), 1 if text.strip() else 0)
+        if len(payload) > inputio.MAX_DECODED_BYTES:
+            raise inputio.InputLimit("PDF input byte limit exceeded")
+        inputio.charge_extraction(len(payload))
+        output = bytearray()
+        stderr_size = 0
+        deadline = time.monotonic() + 30
+        with tempfile.TemporaryFile() as source:
+            source.write(payload)
+            source.seek(0)
+            with subprocess.Popen(
+                ["pdftotext", "-q", "-", "-"], stdin=source,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                preexec_fn=_child_limits,
+            ) as proc:
+                try:
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+                        selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+                        while selector.get_map():
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise PdfExtractError("pdftotext timed out")
+                            for key, _event in selector.select(min(remaining, 0.25)):
+                                chunk = os.read(key.fileobj.fileno(), 65536)
+                                if not chunk:
+                                    selector.unregister(key.fileobj)
+                                elif key.data == "stdout":
+                                    if len(output) + len(chunk) > inputio.MAX_EXTRACT_BYTES:
+                                        raise inputio.InputLimit("PDF output byte limit exceeded")
+                                    inputio.charge_extraction(len(chunk))
+                                    output.extend(chunk)
+                                else:
+                                    stderr_size += len(chunk)
+                                    if stderr_size > inputio.MAX_EXTRACT_STDERR_BYTES:
+                                        raise inputio.InputLimit("PDF stderr byte limit exceeded")
+                    if proc.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
+                        raise PdfExtractError("pdftotext failed")
+                except BaseException:
+                    proc.kill()
+                    proc.wait()
+                    raise
+        text = output.decode("utf-8", errors="replace").replace("\f", "\n")
+        pages = max(output.count(b"\f"), 1 if text.strip() else 0)
         return BackendRead(text, pages, None)
+
+
+def _child_limits() -> None:
+    hard = resource.getrlimit(resource.RLIMIT_CPU)[1]
+    cpu = 10 if hard == resource.RLIM_INFINITY else min(10, hard)
+    resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+    if sys.platform != "darwin" and hasattr(resource, "RLIMIT_AS"):
+        hard = resource.getrlimit(resource.RLIMIT_AS)[1]
+        memory = 512 << 20 if hard == resource.RLIM_INFINITY else min(512 << 20, hard)
+        resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
 
 
 def pdf_backend() -> PdftotextBackend:
@@ -131,6 +180,8 @@ def parse_attachment(
 ) -> ExtractResult:
     if payload is None:
         return _result("skipped", "no_bytes", None, None, "not_needed", None, None)
+    if len(payload) > inputio.MAX_DECODED_BYTES:
+        raise inputio.InputLimit("attachment byte limit exceeded")
     digest = hashlib.sha256(payload).hexdigest()
     mime = _mime(mime_type)
     if mime in ("text/plain", "text/html"):
@@ -143,7 +194,7 @@ def parse_attachment(
         return _result("skipped", kind, None, digest, "not_needed", None, None)
     try:
         read = tool.read(kind, payload)
-    except (PdfExtractError, OSError, subprocess.TimeoutExpired):
+    except (PdfExtractError, OSError, subprocess.SubprocessError):
         return _result("error", kind, None, digest, "not_needed", None, None)
     ocr_status = "not_needed"
     ocr_conf = None
@@ -155,6 +206,8 @@ def parse_attachment(
             backend_present=True,
         )
         ocr_conf = read.ocr_conf
+    if len(read.text) > inputio.MAX_TEXT_CHARS:
+        raise inputio.InputLimit("extracted text limit exceeded")
     text = read.text.strip()
     status = "empty" if not text else "ok"
     return _result(
@@ -176,6 +229,9 @@ def _text_result(
 ) -> ExtractResult:
     if decoded_text is None:
         decoded_text = payload.decode("utf-8", errors="replace")
+    inputio.charge_extraction(len(decoded_text))
+    if len(decoded_text) > inputio.MAX_TEXT_CHARS:
+        raise inputio.InputLimit("text attachment limit exceeded")
     if mime == "text/html":
         text = html_to_text(decoded_text)
         method = "html2text"

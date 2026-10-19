@@ -417,20 +417,56 @@ describe("context and stack discovery", () => {
     const ordered = orderStack(context, [
       {
         number: parsePrNumber(41),
+        headRepository: context,
         headRefName: "base-feature",
         baseRefName: "main",
       },
       {
         number: context.number,
+        headRepository: context,
         headRefName: "feature",
         baseRefName: "base-feature",
       },
       {
         number: parsePrNumber(43),
+        headRepository: context,
         headRefName: "upstack",
         baseRefName: "feature",
       },
     ]);
     expect(ordered.map((item) => Number(item.number))).toEqual([41, 42, 43]);
+  });
+});
+
+describe("untrusted stack graphs", () => {
+  const sameRepo = { owner: "owner", repo: "repo" };
+  const seed = { ...sameRepo, number: parsePrNumber(1) };
+  const pr = (number: number, head: string, base: string, repository = sameRepo) => ({
+    number: parsePrNumber(number), headRefName: head, baseRefName: base, headRepository: repository,
+  });
+  it("does not link a fork main branch to the base repository main", () => {
+    expect(orderStack(seed, [pr(1, "main", "main", { owner: "fork", repo: "repo" })])).toEqual([seed]);
+  });
+  it("rejects a same-repository self cycle with a structured error", () => {
+    try {
+      orderStack(seed, [pr(1, "main", "main")]);
+      throw new Error("expected graph rejection");
+    } catch (error) {
+      expect(error).toBeInstanceOf(WatcherQueryError);
+      expect((error as WatcherQueryError).failure).toMatchObject({ kind: "stack-graph", retryable: false });
+    }
+  });
+  it("rejects two-node cycles", () => {
+    expect(() => orderStack(seed, [pr(1, "a", "b"), pr(2, "b", "a")])).toThrow("cycle");
+  });
+  it("keeps fork branch-name collisions separate", () => {
+    expect(orderStack(seed, [pr(1, "feature", "main"), pr(2, "main", "main", { owner: "fork", repo: "repo" }), pr(3, "feature", "main", { owner: "other", repo: "repo" })])).toEqual([seed]);
+  });
+  it("rejects unknown head repository metadata", () => {
+    expect(() => orderStack(seed, [{ number: seed.number, headRefName: "feature", baseRefName: "main" } as never])).toThrow("missing head repository");
+  });
+  it("bounds descendant traversal without recursion for long stacks", () => {
+    const open = Array.from({ length: 2000 }, (_, index) => pr(index + 1, `branch-${index + 1}`, index === 0 ? "main" : `branch-${index}`));
+    expect(orderStack(seed, open)).toHaveLength(2000);
   });
 });

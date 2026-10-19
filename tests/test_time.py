@@ -95,6 +95,10 @@ class TimeFactsTest(unittest.TestCase):
         self.assertFalse(_reads_wall_clock("import time\ntime.sleep(1)\n", "jev.py"))
         self.assertTrue(_reads_wall_clock("import time\ntime.sleep(1)\n", "rules.py"))
         self.assertFalse(_reads_wall_clock("import time\ntime.perf_counter()\n", "bench.py"))
+        self.assertFalse(_reads_wall_clock("import time\ntime.monotonic()\n", "extract.py"))
+        self.assertTrue(_reads_wall_clock("import time\ntime.time()\n", "extract.py"))
+        self.assertFalse(_reads_wall_clock("import time\ntime.monotonic()\n", "runtime_limits.py"))
+        self.assertTrue(_reads_wall_clock("import time\ntime.time()\n", "runtime_limits.py"))
         self.assertFalse(_reads_wall_clock("x = 'time.time()'\n"))
         self.assertFalse(
             _reads_wall_clock(
@@ -1677,6 +1681,8 @@ def _current(conn, thread_pk: int):
 
 _TIME_ALLOW = {
     "jev.py": frozenset({"sleep"}),
+    "extract.py": frozenset({"monotonic"}),
+    "runtime_limits.py": frozenset({"monotonic"}),
     "bench.py": frozenset({"perf_counter", "perf_counter_ns"}),
 }
 _NOW_ATTRS = frozenset({"now", "utcnow", "today"})

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mailcrawl"
-version = "0.0.0"
+dynamic = ["version"]
 description = "Local archive for one inbox."
 requires-python = ">=3.11.10"
 license = "MIT"
@@ -28,3 +28,6 @@ include = ["mailcrawl*"]
 
 [tool.setuptools.package-data]
 mailcrawl = ["rules-v0.json"]
+
+[tool.setuptools.dynamic]
+version = {attr = "mailcrawl.version.VERSION"}

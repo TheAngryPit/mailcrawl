@@ -11,6 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import io
+from dataclasses import replace
+from collections.abc import Iterator
+from mailcrawl import inputio
 from pathlib import Path, PurePosixPath
 
 from mailcrawl.contract import ExportDocument, LabelRec, MessageRec, infer_kind
@@ -44,19 +48,31 @@ class ExportInvalid(Exception):
     def __init__(self, error: str, detail: str, exit_code: int) -> None:
         self.error = error
         self.exit_code = exit_code
-        super().__init__(detail)
+        super().__init__("".join(char if char.isprintable() else "?" for char in detail[:400]))
 
 
 def load_native(export_dir: Path) -> tuple[ExportDocument, str]:
-    root, labels_path, index_path = _locate(export_dir)
-    labels = load_labels(labels_path)
-    raw_index = _read_bytes(index_path, "messages/index.jsonl")
-    messages = _parse_index(raw_index, root)
+    root = export_dir.parent.parent if export_dir.parent.name == "gmail" else export_dir
+    try:
+        reader = inputio.SafeRoot(root)
+    except OSError as exc:
+        raise _unsupported("export directory is missing") from exc
+    try:
+        root, labels_path, index_path = _locate(export_dir, reader)
+        labels = _parse_labels(reader.read(str(labels_path.relative_to(root)), inputio.MAX_LABEL_BYTES))
+        raw_index = reader.read(str(index_path.relative_to(root)), inputio.MAX_INDEX_BYTES)
+    except inputio.UnsafeInput as exc:
+        reader.close()
+        raise ExportInvalid("unsafe_path", "unsafe export metadata path", 1) from exc
+    except BaseException:
+        reader.close()
+        raise
+    messages = _parse_index(raw_index, root, reader)
     return (
         ExportDocument(
-            manifest_messages=len(messages),
+            manifest_messages=sum(bool(line.strip()) for line in raw_index.splitlines()),
             labels=labels,
-            messages=tuple(messages),
+            messages=messages,
             raw_json=None,
         ),
         hashlib.sha256(raw_index).hexdigest(),
@@ -71,20 +87,29 @@ def _bad(detail: str) -> ExportInvalid:
     return ExportInvalid("malformed_record", detail, 3)
 
 
-def _locate(export_dir: Path) -> tuple[Path, Path, Path]:
+def _locate(export_dir: Path, discovery: inputio.SafeRoot) -> tuple[Path, Path, Path]:
     if not export_dir.is_dir():
         raise _unsupported("export directory is missing")
+    if export_dir.parent.name == "gmail":
+        return export_dir.parent.parent, export_dir / "labels.json", export_dir / "messages/index.jsonl"
     gmail = export_dir / "gmail"
     found: list[Path] = []
-    if gmail.is_dir():
-        for child in sorted(path for path in gmail.iterdir() if path.is_dir()):
-            labels = child / "labels.json"
-            index = child / "messages" / "index.jsonl"
-            if labels.is_file() and index.is_file():
+    try:
+        for name in discovery.directories("gmail"):
+            child = gmail / name
+            complete = True
+            for metadata in (f"gmail/{name}/labels.json", f"gmail/{name}/messages/index.jsonl"):
+                try:
+                    with discovery.open(metadata):
+                        pass
+                except FileNotFoundError:
+                    complete = False
+            if complete:
                 found.append(child)
-    if len(found) > 1:
-        names = ", ".join(path.name for path in found)
-        raise _unsupported(f"export has more than one gmail account directory: {names}")
+                if len(found) > 1:
+                    raise _unsupported("export has more than one gmail account directory")
+    except inputio.UnsafeInput as exc:
+        raise ExportInvalid("unsafe_path", "unsafe export directory path", 1) from exc
     if len(found) == 1:
         account = found[0]
         return export_dir, account / "labels.json", account / "messages" / "index.jsonl"
@@ -101,11 +126,18 @@ def _locate(export_dir: Path) -> tuple[Path, Path, Path]:
 
 
 def load_labels(path: Path) -> tuple[LabelRec, ...]:
-    if not path.is_file():
-        raise ExportInvalid("missing_file", "labels.json is missing", 1)
     try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return _parse_labels(inputio.read_file(path, inputio.MAX_LABEL_BYTES))
+    except inputio.UnsafeInput as exc:
+        raise ExportInvalid("unsafe_path", "unsafe labels path", 1) from exc
+    except OSError as exc:
+        raise ExportInvalid("missing_file", "labels.json is missing", 1) from exc
+
+
+def _parse_labels(raw: bytes) -> tuple[LabelRec, ...]:
+    try:
+        document = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise _bad("labels.json is not valid JSON") from exc
     if not isinstance(document, list):
         raise _bad("labels.json is not an array")
@@ -132,23 +164,37 @@ def load_labels(path: Path) -> tuple[LabelRec, ...]:
     return tuple(labels)
 
 
-def _parse_index(raw: bytes, root: Path) -> list[MessageRec]:
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeError as exc:
-        raise _bad("messages/index.jsonl is not valid UTF-8") from exc
-    messages: list[MessageRec] = []
-    for line_no, line in enumerate(text.splitlines(), start=1):
-        if not line.strip():
-            continue
-        messages.append(_parse_record(line, line_no, root))
-    return messages
+def _parse_index(raw: bytes, root: Path, pinned: inputio.SafeRoot | None = None) -> Iterator[MessageRec | inputio.Refused]:
+    budget = inputio.ImportBudget()
+    count = 0
+    raw_cache: list[tuple[str, MessageRec]] = []
+    with pinned if pinned is not None else inputio.SafeRoot(root) as reader:
+        handle = io.BytesIO(raw)
+        while True:
+            line = handle.readline(inputio.MAX_RECORD_BYTES + 1)
+            if not line:
+                return
+            count += 1
+            if len(line) > inputio.MAX_RECORD_BYTES or count > inputio.MAX_IMPORT_RECORDS:
+                raise inputio.InputLimit("native index record limit exceeded")
+            if not line.strip():
+                continue
+            try:
+                text = line.decode("utf-8")
+                record = _parse_record(text, count, root, reader, budget, raw_cache)
+                yield record
+            except UnicodeError as exc:
+                raise _bad("messages/index.jsonl is not valid UTF-8") from exc
+            except inputio.ImportExhausted:
+                raise
+            except inputio.InputLimit:
+                yield inputio.Refused(count, "input_limit")
 
 
-def _parse_record(line: str, line_no: int, root: Path) -> MessageRec:
+def _parse_record(line: str, line_no: int, root: Path, reader: inputio.SafeRoot | None = None, budget: inputio.ImportBudget | None = None, cache: list[tuple[str, MessageRec]] | None = None) -> MessageRec:
     try:
         item = json.loads(line)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise _bad(f"messages/index.jsonl line {line_no} is not valid JSON") from exc
     if not isinstance(item, dict):
         raise _bad(f"messages/index.jsonl line {line_no} is not an object")
@@ -168,28 +214,43 @@ def _parse_record(line: str, line_no: int, root: Path) -> MessageRec:
     if not isinstance(eml_rel, str) or not eml_rel:
         raise _bad(f"{where} has no eml path")
     eml_path = _resolve_eml(root, eml_rel, where)
-    raw_bytes = _read_bytes(eml_path, eml_rel, where)
+    base = cache[0][1] if cache and cache[0][0] == eml_rel else None
+    if base is None:
+        try:
+            if reader is not None:
+                raw_bytes = inputio.read_import(reader, eml_rel, inputio.MAX_MESSAGE_BYTES, budget)
+            else:
+                with inputio.SafeRoot(root) as opened:
+                    raw_bytes = inputio.read_import(opened, eml_rel, inputio.MAX_MESSAGE_BYTES, budget)
+        except inputio.UnsafeInput as exc:
+            raise ExportInvalid("unsafe_path", f"{where} has unsafe message path", 1) from exc
+        except OSError as exc:
+            raise ExportInvalid("missing_file", f"{where} eml file is missing: {eml_rel}", 1) from exc
+        base = eml_record(
+            raw_bytes, gmail_message_id="", gmail_thread_id="", label_ids=(),
+            internal_date=0, raw_path=str(eml_path),
+        )
+        if cache is not None:
+            cache[:] = [(eml_rel, base)]
     unknown = {key: value for key, value in item.items() if key not in _INDEX_KNOWN}
     history = item.get("historyId")
     if history is not None and not isinstance(history, str):
         raise _bad(f"{where} field historyId is not a string")
-    return eml_record(
-        raw_bytes,
+    estimated_size = _size(item.get("sizeEstimate"), where)
+    return replace(
+        base,
         gmail_message_id=message_id,
         gmail_thread_id=thread_id,
         label_ids=tuple(label_ids),
         internal_date=internal_date,
-        raw_path=str(eml_path),
-        size_bytes=_size(item.get("sizeEstimate"), where),
+        size_bytes=base.size_bytes if estimated_size is None else estimated_size,
         gmail_history_id=history,
         raw_json=_raw_json(unknown),
         date_trusted=date_trusted,
-        fallback={
-            "from": index_from,
-            "to": index_to,
-            "cc": index_cc,
-            "subject": index_subject,
-        },
+        from_hdr=base.from_hdr or index_from,
+        to_hdr=base.to_hdr or index_to,
+        cc_hdr=base.cc_hdr or index_cc,
+        subject=base.subject or index_subject,
     )
 
 
@@ -213,6 +274,8 @@ def _label_ids(value: object, where: str) -> list[str]:
         return []
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise _bad(f"{where} field labelIds is not an array of strings")
+    if len(set(value)) != len(value):
+        raise _bad(f"{where} repeats labelIds")
     return value
 
 
@@ -254,22 +317,7 @@ def _resolve_eml(root: Path, rel: str, where: str) -> Path:
     pure = PurePosixPath(rel)
     if pure.is_absolute() or not pure.parts or ".." in pure.parts:
         raise ExportInvalid("unsafe_path", f"{where} has an unsafe eml path", 1)
-    base = root.resolve()
-    candidate = base.joinpath(*pure.parts).resolve()
-    if not candidate.is_relative_to(base):
-        raise ExportInvalid("unsafe_path", f"{where} eml path escapes the export directory", 1)
-    if not candidate.is_file():
-        raise ExportInvalid("missing_file", f"{where} eml file is missing: {rel}", 1)
-    return candidate
-
-
-def _read_bytes(path: Path, label: str, where: str | None = None) -> bytes:
-    try:
-        return path.read_bytes()
-    except OSError as exc:
-        if where is None:
-            raise ExportInvalid("missing_file", f"{label} is missing", 1) from exc
-        raise ExportInvalid("missing_file", f"{where} eml file is missing: {label}", 1) from exc
+    return root.absolute().joinpath(*pure.parts)
 
 
 def _raw_json(unknown: dict[str, object]) -> str | None:

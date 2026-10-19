@@ -20,7 +20,8 @@ from mailcrawl.configfile import DEFAULT_BATCH_SIZE, DEFAULT_MAX_TOKENS
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.inference import invoke
 from mailcrawl.paths import UsageError
-from mailcrawl.threads import image_gate
+from mailcrawl.threads import image_gate, embeddable_image
+from mailcrawl.runtime_limits import MAX_BENCH_THREADS
 from mailcrawl.vectors import (
     classification_text,
     open_embedder,
@@ -246,7 +247,9 @@ def _draw(
         labelled = _label_sets(conn, label_categories) if truth == "labels" else {}
         blank = (frozenset(), frozenset())
         rows = []
-        for thread_pk, subject, body in _threads(conn):
+        for thread_pk, subject, body in _threads(conn, include_text=False):
+            if len(rows) >= MAX_BENCH_THREADS:
+                raise UsageError("benchmark exceeds thread selection budget")
             paths, categories = labelled.get(thread_pk, blank)
             rows.append(
                 ThreadRow(
@@ -266,7 +269,8 @@ def _draw(
             (item.thread_pk, item.att_pk, item.blob)
             for item in _kept_images(conn, ids)
         )
-        texts = tuple((row.thread_pk, classification_text(row.body)) for row in chosen)
+        selected_texts = {key: body for key, _subject, body in _threads(conn, thread_ids=ids)}
+        texts = tuple((row.thread_pk, classification_text(selected_texts[row.thread_pk])) for row in chosen)
         image_only = frozenset(row.thread_pk for row in chosen if row.image_only)
         chosen_human = {
             row.thread_pk: row.human_label
@@ -323,30 +327,12 @@ def _label_sets(
 
 def _threads_with_images(conn: sqlite3.Connection) -> set[int]:
     rows = conn.execute(
-        """
-        SELECT threads.thread_pk, attachments.mime_type, attachments.is_inline,
-               attachments.size_bytes, attachments.stored_path
-        FROM attachments
-        JOIN messages ON messages.msg_pk = attachments.msg_pk
-        JOIN threads ON threads.thread_pk = messages.thread_pk
-        """
-    ).fetchall()
-    found: set[int] = set()
-    for thread_pk, mime, inline, size, stored in rows:
-        path = Path(str(stored)) if stored else None
-        if path is None or not path.is_file():
-            continue
-        blob = path.read_bytes()
-        keep, _reason = image_gate(
-            mime,
-            int(inline or 0),
-            None if size is None else int(size),
-            blob,
-        )
-        if not keep:
-            continue
-        found.add(int(thread_pk))
-    return found
+        "SELECT messages.thread_pk, attachments.mime_type, attachments.is_inline, "
+        "attachments.size_bytes FROM attachments "
+        "JOIN messages ON messages.msg_pk = attachments.msg_pk "
+        "WHERE attachments.stored_path IS NOT NULL"
+    )
+    return {int(key) for key, mime, inline, size in rows if embeddable_image(mime, int(inline or 0), size)}
 
 
 def _measure(name: str, drawn: Drawn, batch_size: int, max_tokens: int) -> Measured:

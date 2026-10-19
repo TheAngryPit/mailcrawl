@@ -4,9 +4,10 @@
 from __future__ import annotations
 
 import binascii
-import email
 import hashlib
 from email import policy
+from email.feedparser import BytesFeedParser
+from mailcrawl import inputio
 from email.message import EmailMessage, Message
 
 from mailcrawl.contract import AttachmentRec, MessageRec
@@ -16,6 +17,73 @@ from mailcrawl.textnorm import html_to_text
 from mailcrawl.threads import embeddable_image
 
 _HEADER_ALLOW = frozenset(HEADER_ALLOW)
+
+
+class LimitedFeedParser(BytesFeedParser):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self._part_count = 0
+        super().__init__(*args, **kwargs)
+
+    def _new_message(self) -> None:
+        self._part_count += 1
+        if self._part_count > inputio.MAX_MIME_PARTS or len(self._msgstack) >= inputio.MAX_MIME_DEPTH:
+            raise inputio.InputLimit("MIME structure limit exceeded")
+        super()._new_message()
+
+    def _parse_headers(self, lines: list[str]) -> None:
+        if sum(len(line) for line in lines) > inputio.MAX_HEADER_BYTES:
+            raise inputio.InputLimit("header byte limit exceeded")
+        super()._parse_headers(lines)
+
+
+def validate_raw(raw: bytes) -> None:
+    if len(raw) > inputio.MAX_MESSAGE_BYTES:
+        raise inputio.InputLimit("message byte limit exceeded")
+    cursor = 0
+    head = 0
+    in_head = True
+    while cursor < len(raw):
+        end = raw.find(b"\n", cursor, cursor + inputio.MAX_LINE_BYTES + 1)
+        if end < 0:
+            end = len(raw)
+        length = end - cursor
+        if length > inputio.MAX_LINE_BYTES:
+            raise inputio.InputLimit("physical line limit exceeded")
+        if in_head:
+            head += length + 1
+            if head > inputio.MAX_HEADER_BYTES:
+                raise inputio.InputLimit("header byte limit exceeded")
+            in_head = raw[cursor:end].strip(b"\r") != b""
+        cursor = end + 1
+
+
+def parse_bytes(raw: bytes) -> EmailMessage:
+    validate_raw(raw)
+    parser = LimitedFeedParser(policy=policy.default)
+    parser.feed(raw)
+    return parser.close()
+
+
+def validate_mime(message: EmailMessage) -> None:
+    stack = [(message, 1)]
+    count = 0
+    decoded = 0
+    while stack:
+        part, depth = stack.pop()
+        count += 1
+        if depth > inputio.MAX_MIME_DEPTH or count > inputio.MAX_MIME_PARTS:
+            raise inputio.InputLimit("MIME structure limit exceeded")
+        if sum(len(k) + len(v) for k, v in part.raw_items()) > inputio.MAX_HEADER_BYTES:
+            raise inputio.InputLimit("header byte limit exceeded")
+        payload = part.get_payload()
+        if isinstance(payload, list):
+            stack.extend((child, depth + 1) for child in payload)
+        elif isinstance(payload, str):
+            encoding = str(part.get("content-transfer-encoding", "")).lower()
+            estimate = (len(payload) * 3 + 3) // 4 if encoding == "base64" else len(payload)
+            decoded += estimate
+            if decoded > inputio.MAX_DECODED_BYTES:
+                raise inputio.InputLimit("decoded payload limit exceeded")
 
 
 def eml_record(
@@ -34,7 +102,7 @@ def eml_record(
 ) -> MessageRec:
     """Build a message record from RFC822 bytes. Header values beat ``fallback``."""
     return parsed_record(
-        email.message_from_bytes(raw, policy=policy.default),
+        parse_bytes(raw),
         raw_sha256=hashlib.sha256(raw).hexdigest(),
         size_bytes=len(raw) if size_bytes is None else size_bytes,
         gmail_message_id=gmail_message_id,
@@ -65,6 +133,7 @@ def parsed_record(
     fallback: dict[str, str | None] | None = None,
 ) -> MessageRec:
     """Build a message record from a parsed message whose raw bytes were hashed while streaming."""
+    validate_mime(parsed)
     body, headers, parts = view_message(parsed)
     spare = fallback or {}
     return MessageRec(
@@ -96,6 +165,7 @@ def parsed_record(
 
 
 def view_message(message: EmailMessage) -> tuple[str | None, dict[str, str], tuple[AttachmentRec, ...]]:
+    validate_mime(message)
     return body_text(message), allow_headers(message), attachments(message)
 
 
@@ -122,9 +192,9 @@ def body_text(message: EmailMessage) -> str | None:
         elif isinstance(text, str) and kind == "text/html":
             html = text
     if plain is not None:
-        return _lf(plain)
+        return _lf(plain)[:inputio.MAX_TEXT_CHARS]
     if html is not None:
-        return _lf(html_to_text(html))
+        return _lf(html_to_text(html))[:inputio.MAX_TEXT_CHARS]
     return None
 
 
@@ -142,6 +212,7 @@ def allow_headers(message: EmailMessage) -> dict[str, str]:
 
 
 def attachments(message: EmailMessage) -> tuple[AttachmentRec, ...]:
+    validate_mime(message)
     if not message.is_multipart():
         if is_attachment(message):
             return (_attachment(message),)
@@ -206,6 +277,9 @@ def _payload(part: Message) -> bytes | None:
     joins it again before decoding, which peaks near six times the attachment.
     Anything the fast path rejects goes through the standard library unchanged.
     """
+    raw = part.get_payload()
+    if isinstance(raw, str) and len(raw) > inputio.MAX_MESSAGE_BYTES:
+        raise inputio.InputLimit("encoded payload limit exceeded")
     if str(part.get("content-transfer-encoding", "")).lower() == "base64":
         text = part.get_payload()
         if isinstance(text, str):
@@ -253,7 +327,8 @@ def _text_content(part: Message) -> str | None:
     if part.get_content_maintype() != "text":
         return None
     try:
-        content = part.get_content()
+        payload = _payload(part)
+        content = _decoded_text(part, payload)
     except (KeyError, LookupError, ValueError, TypeError):
         return None
     if not isinstance(content, str):

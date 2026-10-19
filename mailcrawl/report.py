@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from mailcrawl.output import spreadsheet_cell
+
 import csv
 import datetime
 import random
@@ -333,7 +335,7 @@ def _write_decisions(path: Path, rows: list[_ExportRow]) -> int:
                 "reason",
             ]
         )
-        writer.writerows(ordered)
+        writer.writerows([spreadsheet_cell(cell) for cell in row] for row in ordered)
     return len(ordered)
 
 

@@ -134,17 +134,94 @@ ask_secret() {
   printf -v "$key" '%s' "$input"
 }
 
-# write_env KEY VALUE upserts KEY='VALUE' into ENV_FILE (replaces any existing
-# line) and sets $KEY. Idempotent. Creates ENV_FILE at mode 0600; writes through
-# a symlink and keeps an existing file's mode.
 write_env() {
-  local key="$1" value="$2" tmp sq="'\\''"
-  [[ -e "$ENV_FILE" ]] || (umask 077 && : > "$ENV_FILE")
-  tmp=$(mktemp)
-  grep -vE "^${key}=" "$ENV_FILE" > "$tmp" || true
-  printf "%s='%s'\n" "$key" "${value//\'/$sq}" >> "$tmp"
-  cat "$tmp" > "$ENV_FILE"
-  rm -f "$tmp"
+  local key="$1" value="$2"
+  if ! printf '%s' "$value" | python3 /dev/fd/3 "$ENV_FILE" "$key" 3<<'PYENV'
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+
+path, key = sys.argv[1:]
+
+def no_acl(path, directory=False):
+    if sys.platform == "darwin":
+        listing = subprocess.check_output(["/bin/ls", "-lde", path], stderr=subprocess.DEVNULL).decode().splitlines()
+        entries = listing[1:]
+        if entries and (not directory or any(" allow " in entry and any(permission in entry for permission in ("write", "delete", "add_file", "add_subdirectory")) for entry in entries)):
+            raise ValueError("ACL")
+    elif hasattr(os, "listxattr"):
+        if "system.posix_acl_access" in os.listxattr(path, follow_symlinks=False):
+            raise ValueError("ACL")
+    else:
+        raise ValueError("ACL inspection unavailable")
+
+try:
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        raise ValueError("key")
+    absolute = os.path.abspath(path)
+    parent, name = os.path.split(absolute)
+    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        current = ""
+        for part in parent.split("/"):
+            if not part:
+                continue
+            next_directory = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = next_directory
+            current += "/" + part
+            no_acl(current, directory=True)
+            metadata = os.fstat(directory)
+            if metadata.st_uid not in (0, os.getuid()):
+                raise ValueError("owner")
+            writable = metadata.st_mode & 0o022
+            sticky_system = metadata.st_uid == 0 and metadata.st_mode & stat.S_ISVTX
+            if writable and not sticky_system:
+                raise ValueError("parent permissions")
+        if os.fstat(directory).st_uid != os.getuid():
+            raise ValueError("parent owner")
+        old = ""
+        try:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            descriptor = None
+        if descriptor is not None:
+            with os.fdopen(descriptor, encoding="utf-8") as existing:
+                metadata = os.fstat(existing.fileno())
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                    raise ValueError("target permissions")
+                no_acl(absolute)
+                old = existing.read()
+        value = sys.stdin.read()
+        escaped = value.replace("'", "'\\''")
+        lines = [line for line in old.splitlines(keepends=True) if not line.startswith(key + "=")]
+        content = "".join(lines)
+        if content and not content.endswith("\n"):
+            content += "\n"
+        content += key + "='" + escaped + "'\n"
+        descriptor, temporary = tempfile.mkstemp(prefix=".wizard-env-", dir=parent)
+        try:
+            no_acl(temporary)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(os.path.basename(temporary), name, src_dir_fd=directory, dst_dir_fd=directory)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    finally:
+        os.close(directory)
+except (OSError, ValueError, UnicodeError, subprocess.SubprocessError):
+    sys.stderr.write("Refusing unsafe env destination; use an owned private regular file without symlinks or ACLs.\n")
+    sys.exit(1)
+PYENV
+  then
+    return 1
+  fi
   printf -v "$key" '%s' "$value"
   WRITTEN_ENV+=("$key")
   printf '  %s✓ wrote%s %s → %s\n' "$GREEN" "$RESET" "$key" "$ENV_FILE"

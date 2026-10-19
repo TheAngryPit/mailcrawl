@@ -4,7 +4,14 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 EVIDENCE_DIR="${EVIDENCE_DIR:-/tmp/mailcrawl-verify-evidence/$RUN_ID}"
-SCRATCH_DIR="/tmp/mailcrawl-verify-scratch/$RUN_ID"
+SCRATCH_DIR="$(umask 077; mktemp -d /tmp/mailcrawl-verify.XXXXXXXXXX)"
+readonly SCRATCH_DIR
+WHEEL_READY=0
+
+cleanup_owned_scratch() {
+  rm -rf -- "$SCRATCH_DIR"
+}
+trap cleanup_owned_scratch EXIT
 
 log() {
   echo "[mailcrawl-verify] $*"
@@ -39,21 +46,17 @@ wheel_scenarios_runnable() {
 
 ensure_wheel() {
   local venv="$SCRATCH_DIR/venv"
-  if [[ -x "$venv/bin/python" ]] && (
-    cd /tmp
-    "$venv/bin/python" -c "import mailcrawl; raise SystemExit(0 if 'site-packages' in mailcrawl.__file__ else 1)"
-  ); then
+  if [[ "$WHEEL_READY" -eq 1 ]]; then
     return 0
   fi
-  mkdir -p "$SCRATCH_DIR"
-  rm -rf "$venv"
-  python3 -m venv "$venv"
+  python3 -m venv --copies "$venv" || return $?
   (
     cd /tmp
-    "$venv/bin/python" -m pip install --disable-pip-version-check 'setuptools>=77'
+    "$venv/bin/python" -m pip install --disable-pip-version-check 'setuptools>=77' &&
     "$venv/bin/python" -m pip install --disable-pip-version-check \
       --no-deps --no-build-isolation "$REPO_ROOT"
-  )
+  ) || return $?
+  WHEEL_READY=1
 }
 
 drive_wheel_scenario() {
@@ -197,7 +200,7 @@ drive_native_gog_import() {
   local home
   home="$(mktemp -d "$SCRATCH_DIR/native-home.XXXXXX")"
   NATIVE_HOME="$home"
-  trap 'rm -rf "$NATIVE_HOME"' EXIT
+  trap cleanup_owned_scratch EXIT
   local native="$REPO_ROOT/testdata/fixtures/gog-export/native"
   local taxonomy="$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json"
 
@@ -278,7 +281,7 @@ sys.exit(0 if ok else 1)
   fi
   rm -f "$bad_err"
   rm -rf "$NATIVE_HOME"
-  trap - EXIT
+  trap cleanup_owned_scratch EXIT
 }
 
 drive_body_clean() {
@@ -290,7 +293,7 @@ drive_body_clean() {
   local home
   home="$(mktemp -d "$SCRATCH_DIR/body-home.XXXXXX")"
   BODY_HOME="$home"
-  trap 'rm -rf "$BODY_HOME"' EXIT
+  trap cleanup_owned_scratch EXIT
   local export_dir="$REPO_ROOT/testdata/fixtures/gog-export/v0"
   local taxonomy="$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json"
   local db="$home/.local/share/mailcrawl/personal.db"
@@ -385,7 +388,7 @@ sys.exit(0 if "html-clean-001" in ids else 1)
     return 1
   }
   rm -rf "$BODY_HOME"
-  trap - EXIT
+  trap cleanup_owned_scratch EXIT
 }
 
 drive_attachment_parse() {
@@ -397,7 +400,7 @@ drive_attachment_parse() {
   local home
   home="$(mktemp -d "$SCRATCH_DIR/attach-home.XXXXXX")"
   ATTACH_HOME="$home"
-  trap 'rm -rf "$ATTACH_HOME"' EXIT
+  trap cleanup_owned_scratch EXIT
   local taxonomy="$REPO_ROOT/testdata/catalogue/taxonomy.synthetic.json"
   local personal="$home/.local/share/mailcrawl/personal.db"
   local hive="$home/.local/share/mailcrawl/thehive.db"
@@ -465,7 +468,7 @@ PY
     return 1
   }
   rm -rf "$ATTACH_HOME"
-  trap - EXIT
+  trap cleanup_owned_scratch EXIT
 }
 
 drive_rules_v0() {
@@ -477,7 +480,7 @@ drive_rules_v0() {
   local home
   home="$(mktemp -d "$SCRATCH_DIR/rules-home.XXXXXX")"
   RULES_HOME="$home"
-  trap 'rm -rf "$RULES_HOME"' EXIT
+  trap cleanup_owned_scratch EXIT
   mailcrawl_in "$home" --json init --account vcl --email ada@example.com >/dev/null
   local db="$home/.local/share/mailcrawl/vcl.db"
   DB_PATH="$db" python3 - <<'PY'
@@ -563,7 +566,7 @@ PY
     return 1
   fi
   rm -rf "$RULES_HOME"
-  trap - EXIT
+  trap cleanup_owned_scratch EXIT
 }
 
 drive_stats_dry_run() {
@@ -575,7 +578,7 @@ drive_stats_dry_run() {
   local home
   home="$(mktemp -d "$SCRATCH_DIR/stats-home.XXXXXX")"
   STATS_HOME="$home"
-  trap 'rm -rf "$STATS_HOME"' EXIT
+  trap cleanup_owned_scratch EXIT
   mailcrawl_in "$home" --json init --account vcl --email ada@example.com >/dev/null
   local db="$home/.local/share/mailcrawl/vcl.db"
   DB_PATH="$db" python3 - <<'PY'
@@ -733,7 +736,7 @@ PY
     return 1
   fi
   rm -rf "$STATS_HOME"
-  trap - EXIT
+  trap cleanup_owned_scratch EXIT
 }
 
 drive_mbox_import() {
@@ -745,7 +748,7 @@ drive_mbox_import() {
   local home
   home="$(mktemp -d "$SCRATCH_DIR/mbox-home.XXXXXX")"
   MBOX_HOME="$home"
-  trap 'rm -rf "$MBOX_HOME"' EXIT
+  trap cleanup_owned_scratch EXIT
   local fixture="$REPO_ROOT/testdata/fixtures/mbox"
   local db="$home/.local/share/mailcrawl/personal.db"
 
@@ -905,7 +908,7 @@ PY
   fi
   rm -f "$bad_err"
   rm -rf "$MBOX_HOME"
-  trap - EXIT
+  trap cleanup_owned_scratch EXIT
 }
 
 drive_default_taxonomy() {
@@ -917,7 +920,7 @@ drive_default_taxonomy() {
   local home
   home="$(mktemp -d "$SCRATCH_DIR/taxonomy-home.XXXXXX")"
   TAXONOMY_HOME="$home"
-  trap 'rm -rf "$TAXONOMY_HOME"' EXIT
+  trap cleanup_owned_scratch EXIT
   local export_dir="$home/export"
   mkdir -p "$export_dir"
   cat >"$export_dir/export.json" <<'JSON'
@@ -1204,7 +1207,7 @@ ok = doc.get("inactive_rules") == [] and doc.get("inactive_reason") is None
 sys.exit(0 if ok else 1)
 ' || { log "default taxonomy: example schema left content rules inactive"; return 1; }
   rm -rf "$TAXONOMY_HOME"
-  trap - EXIT
+  trap cleanup_owned_scratch EXIT
 }
 
 cmd_doctor() {
@@ -1309,11 +1312,8 @@ cmd_drive() {
 }
 
 cmd_cleanup() {
-  rm -rf "$SCRATCH_DIR"
-  shopt -s nullglob
-  rm -rf /tmp/mailcrawl-wheel-*
-  shopt -u nullglob
-  log "cleanup done (evidence kept at $EVIDENCE_DIR)"
+  cleanup_owned_scratch
+  log "cleanup done (only this invocation's private scratch; evidence kept at $EVIDENCE_DIR)"
 }
 
 main() {
