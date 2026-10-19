@@ -50,3 +50,5 @@ Each feature file uses exactly four H2 sections: `Sub-features`, `How to get to 
 - [wheel-rules-jev](./wheel-rules-jev.md). Run bundled rules from the wheel and refuse a jev redirect.
 - [revive-hold](./revive-hold.md). Leave a harness revive in place until an untrusted import is newer.
 - [closure-stays-queued](./closure-stays-queued.md). Keep a stored time closure in the default queue after `llm_review` is turned off.
+
+- [crawler-operations](./crawler-operations.md). Safe health, local sync, producer handoff, manifest argv and multi-GiB mbox capacity.

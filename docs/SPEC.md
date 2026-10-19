@@ -1,6 +1,14 @@
 # mailcrawl: spec v0
 
-Status: schema v2 is in the tree. Idempotent import, cleaned `body_text`, FTS search, and the JSON CLI. Repo: `TheAngryPit/mailcrawl`. License: MIT.
+Current implementation: schema v11, import, FTS search, rules and review,
+optional inference, and crawler metadata, health and configured local refresh.
+Repo: `TheAngryPit/mailcrawl`. License: MIT.
+
+The phase sections below preserve the original design and its evidence. Their
+phase-specific scope statements are historical, not a complete inventory of the
+current CLI. See [README](../README.md) for implemented commands and
+[crawler architecture](CRAWLER_ARCHITECTURE.md) for local source receipts,
+health inspection, CrawlBar integration and the separate future Go decision.
 
 **Local-only.** mailcrawl archives mail that is already on disk. It does not open a network connection, does not read credentials, and does not write to Gmail. Unknown export shapes fail closed.
 

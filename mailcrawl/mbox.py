@@ -129,6 +129,7 @@ class MboxSource:
         seed: tuple[LabelRec, ...] = (),
         stored: Callable[[str], bool] = lambda key: False,
         label_map: dict[str, str] | None = None,
+        limits: inputio.ImportLimits | None = None,
     ) -> None:
         if not path.is_file():
             raise ExportInvalid("missing_file", "mbox file is missing", 1)
@@ -137,6 +138,7 @@ class MboxSource:
         self._known = dict(known)
         self._seed = seed
         self._label_map = {} if label_map is None else label_map
+        self._limits = inputio.DEFAULT_MBOX_IMPORT_LIMITS if limits is None else limits
         self._digest = hashlib.sha256()
         self._done = False
 
@@ -152,9 +154,21 @@ class MboxSource:
             yield label
         raw_path = RAW_PATH + str(self.path.resolve())
         with inputio.SafeRoot(self.path.parent) as reader, reader.open(self.path.name) as handle:
-            if os.fstat(handle.fileno()).st_size > inputio.MAX_IMPORT_BYTES:
+            initial_stat = os.fstat(handle.fileno())
+            initial_size = initial_stat.st_size
+            if (
+                self._limits.max_total_bytes is not None
+                and initial_size > self._limits.max_total_bytes
+            ):
                 raise inputio.ImportExhausted("mbox import byte limit exceeded")
-            for entry in _entries(handle, self._digest.update, self._stored):
+            for entry in _entries(
+                handle,
+                self._digest.update,
+                self._stored,
+                initial_size=initial_size,
+                initial_signature=_file_signature(initial_stat),
+                limits=self._limits,
+            ):
                 parsed = self._parse(entry, f"{raw_path}#{entry.offset}")
                 if isinstance(parsed, Refused):
                     yield parsed
@@ -228,18 +242,36 @@ def from_line_is_separator(preceding: bytes | None) -> bool:
 
 
 def _entries(
-    handle: BinaryIO, digest: Callable[[bytes], None], stored: Callable[[str], bool]
+    handle: BinaryIO,
+    digest: Callable[[bytes], None],
+    stored: Callable[[str], bool],
+    *,
+    initial_size: int | None = None,
+    initial_signature: tuple[int, int, int, int, int] | None = None,
+    limits: inputio.ImportLimits | None = None,
 ) -> Iterator[_Entry]:
+    initial_stat = os.fstat(handle.fileno())
+    if initial_size is None:
+        initial_size = initial_stat.st_size
+    if initial_signature is None:
+        initial_signature = _file_signature(initial_stat)
+    if initial_stat.st_size != initial_size or _file_signature(initial_stat) != initial_signature:
+        raise inputio.ImportExhausted("mbox changed during read")
+    policy = inputio.DEFAULT_MBOX_IMPORT_LIMITS if limits is None else limits
     offset = 0
     entry: _Entry | None = None
     preceding: bytes | None = None
     complete = True
     total = 0
     count = 0
-    for line in iter(lambda: handle.readline(min(inputio.MAX_LINE_BYTES + 1, max(1, inputio.MAX_IMPORT_BYTES - total + 1))), b""):
+    while total < initial_size:
+        remaining = initial_size - total
+        line = handle.readline(min(inputio.MAX_LINE_BYTES + 1, remaining))
+        if not line:
+            raise inputio.ImportExhausted("mbox changed during read")
         digest(line)
         total += len(line)
-        if total > inputio.MAX_IMPORT_BYTES:
+        if policy.max_total_bytes is not None and total > policy.max_total_bytes:
             raise inputio.ImportExhausted("mbox import byte limit exceeded")
         if not complete or len(line) > inputio.MAX_LINE_BYTES:
             if entry is not None:
@@ -253,8 +285,8 @@ def _entries(
             if entry is not None:
                 yield entry
             count += 1
-            if count > inputio.MAX_IMPORT_RECORDS:
-                raise inputio.InputLimit("mbox record limit exceeded")
+            if policy.max_records is not None and count > policy.max_records:
+                raise inputio.ImportExhausted("mbox record limit exceeded")
             entry = _Entry(offset, line, stored)
         elif entry is None:
             if line.strip(b"\r\n") != b"":
@@ -263,9 +295,22 @@ def _entries(
             entry.add(_canonical(line[1:] if _ESCAPED_FROM.match(line) else line))
         preceding = line
         offset += len(line)
+    final_stat = os.fstat(handle.fileno())
+    if total != initial_size or _file_signature(final_stat) != initial_signature:
+        raise inputio.ImportExhausted("mbox changed during read")
     if entry is None:
         raise ExportInvalid("unsupported_schema", "file has no mbox From line", 3)
     yield entry
+
+
+def _file_signature(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
 
 
 def _canonical(line: bytes) -> bytes:

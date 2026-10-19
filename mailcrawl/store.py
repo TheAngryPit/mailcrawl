@@ -358,18 +358,22 @@ def connect(path: Path | str) -> sqlite3.Connection:
         dest.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(dest.parent, 0o700)
     conn = sqlite3.connect(target)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    # Some SQLite builds map the file by default, and mapped pages count as process RSS.
-    conn.execute("PRAGMA mmap_size = 0")
-    if memory:
-        conn.execute("PRAGMA journal_mode = MEMORY")
-    else:
-        conn.execute("PRAGMA journal_mode = WAL")
-    migrate(conn)
-    if not memory:
-        os.chmod(target, 0o600)
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        # Some SQLite builds map the file by default, and mapped pages count as process RSS.
+        conn.execute("PRAGMA mmap_size = 0")
+        if memory:
+            conn.execute("PRAGMA journal_mode = MEMORY")
+        else:
+            conn.execute("PRAGMA journal_mode = WAL")
+        migrate(conn)
+        if not memory:
+            os.chmod(target, 0o600)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def init_account(data: Path, alias: str, email: str) -> Path:

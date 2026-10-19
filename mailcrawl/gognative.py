@@ -51,7 +51,12 @@ class ExportInvalid(Exception):
         super().__init__("".join(char if char.isprintable() else "?" for char in detail[:400]))
 
 
-def load_native(export_dir: Path) -> tuple[ExportDocument, str]:
+def load_native(
+    export_dir: Path,
+    *,
+    limits: inputio.ImportLimits | None = None,
+) -> tuple[ExportDocument, str]:
+    policy = inputio.DEFAULT_GOG_IMPORT_LIMITS if limits is None else limits
     root = export_dir.parent.parent if export_dir.parent.name == "gmail" else export_dir
     try:
         reader = inputio.SafeRoot(root)
@@ -67,7 +72,7 @@ def load_native(export_dir: Path) -> tuple[ExportDocument, str]:
     except BaseException:
         reader.close()
         raise
-    messages = _parse_index(raw_index, root, reader)
+    messages = _parse_index(raw_index, root, reader, limits=policy)
     return (
         ExportDocument(
             manifest_messages=sum(bool(line.strip()) for line in raw_index.splitlines()),
@@ -164,8 +169,15 @@ def _parse_labels(raw: bytes) -> tuple[LabelRec, ...]:
     return tuple(labels)
 
 
-def _parse_index(raw: bytes, root: Path, pinned: inputio.SafeRoot | None = None) -> Iterator[MessageRec | inputio.Refused]:
-    budget = inputio.ImportBudget()
+def _parse_index(
+    raw: bytes,
+    root: Path,
+    pinned: inputio.SafeRoot | None = None,
+    *,
+    limits: inputio.ImportLimits | None = None,
+) -> Iterator[MessageRec | inputio.Refused]:
+    policy = inputio.DEFAULT_GOG_IMPORT_LIMITS if limits is None else limits
+    budget = inputio.import_budget.get() or inputio.ImportBudget(limits=policy)
     count = 0
     raw_cache: list[tuple[str, MessageRec]] = []
     with pinned if pinned is not None else inputio.SafeRoot(root) as reader:
@@ -174,11 +186,13 @@ def _parse_index(raw: bytes, root: Path, pinned: inputio.SafeRoot | None = None)
             line = handle.readline(inputio.MAX_RECORD_BYTES + 1)
             if not line:
                 return
-            count += 1
-            if len(line) > inputio.MAX_RECORD_BYTES or count > inputio.MAX_IMPORT_RECORDS:
+            if len(line) > inputio.MAX_RECORD_BYTES:
                 raise inputio.InputLimit("native index record limit exceeded")
             if not line.strip():
                 continue
+            count += 1
+            if policy.max_records is not None and count > policy.max_records:
+                raise inputio.ImportExhausted("native index record limit exceeded")
             try:
                 text = line.decode("utf-8")
                 record = _parse_record(text, count, root, reader, budget, raw_cache)

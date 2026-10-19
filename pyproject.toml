@@ -11,6 +11,9 @@ license = "MIT"
 license-files = ["LICENSE"]
 dependencies = []
 
+[project.scripts]
+mailcrawl = "mailcrawl.cli:main"
+
 [project.optional-dependencies]
 vectors = [
   "sqlite-vec",
