@@ -8,11 +8,11 @@ required message keys is missing.
 
 from __future__ import annotations
 
-import email
 import hashlib
 import json
 from dataclasses import dataclass
-from email import policy
+from collections.abc import Iterable
+from mailcrawl import inputio
 from pathlib import Path
 
 from mailcrawl.extract import PARSER_VERSION
@@ -155,28 +155,31 @@ class MessageRec:
 class ExportDocument:
     manifest_messages: int
     labels: tuple[LabelRec, ...]
-    messages: tuple[MessageRec, ...]
+    messages: Iterable[MessageRec | inputio.Refused]
     raw_json: str | None
 
 
 def classify_export(document: object) -> str:
     """Return ``ok`` or ``unsupported_schema``."""
     try:
-        parse_export(document)
+        parsed = parse_export(document)
+        tuple(parsed.messages)
     except ExportRejected:
         return UNSUPPORTED_SCHEMA
     return "ok"
 
 
-def parse_export(document: object, root: Path | None = None) -> ExportDocument:
+def parse_export(document: object, root: Path | inputio.SafeRoot | None = None) -> ExportDocument:
     if not isinstance(document, dict) or document.get("schema") != CONTRACT_V0:
         raise ExportRejected()
     raw_messages = document.get("example_messages")
     if not isinstance(raw_messages, list):
         raise ExportRejected()
     labels = _parse_labels(document.get("example_labels"))
-    messages = tuple(_parse_message(item, root) for item in raw_messages)
-    manifest_messages = _manifest_count(document.get("example_manifest"), len(messages))
+    if len(raw_messages) > inputio.MAX_IMPORT_RECORDS:
+        raise inputio.InputLimit("manifest record limit exceeded")
+    manifest_messages = _manifest_count(document.get("example_manifest"), len(raw_messages))
+    messages = _fixture_messages(raw_messages, root)
     unknown = {key: value for key, value in document.items() if key not in ENVELOPE_KNOWN}
     return ExportDocument(
         manifest_messages=manifest_messages,
@@ -184,6 +187,28 @@ def parse_export(document: object, root: Path | None = None) -> ExportDocument:
         messages=messages,
         raw_json=_raw_json(unknown),
     )
+
+
+def _fixture_messages(items: list[object], root: Path | inputio.SafeRoot | None) -> Iterable[MessageRec | inputio.Refused]:
+    reader = root if isinstance(root, inputio.SafeRoot) else (inputio.SafeRoot(root) if root is not None else None)
+    used = 0
+    try:
+        for offset, item in enumerate(items):
+            size = len(json.dumps(item, ensure_ascii=False).encode())
+            used += size
+            if used > inputio.MAX_IMPORT_BYTES:
+                raise inputio.InputLimit("import byte limit exceeded")
+            try:
+                if size > inputio.MAX_RECORD_BYTES:
+                    raise inputio.InputLimit("fixture record byte limit exceeded")
+                yield _parse_message(item, reader)
+            except inputio.ImportExhausted:
+                raise
+            except inputio.InputLimit:
+                yield inputio.Refused(offset, "input_limit")
+    finally:
+        if reader is not None:
+            reader.close()
 
 
 def is_pseudo_label(label_id: str) -> bool:
@@ -238,7 +263,7 @@ def _parse_labels(value: object) -> tuple[LabelRec, ...]:
     return tuple(labels)
 
 
-def _parse_message(item: object, root: Path | None) -> MessageRec:
+def _parse_message(item: object, root: Path | inputio.SafeRoot | None) -> MessageRec:
     if not isinstance(item, dict):
         raise ExportRejected()
     for key in MESSAGE_REQUIRED:
@@ -254,6 +279,8 @@ def _parse_message(item: object, root: Path | None) -> MessageRec:
     if not isinstance(label_ids, list) or not all(
         isinstance(label_id, str) and label_id for label_id in label_ids
     ):
+        raise ExportRejected()
+    if len(set(label_ids)) != len(label_ids):
         raise ExportRejected()
     header_date = parse_date(item["example_date"])
     receipt = None
@@ -341,41 +368,10 @@ def _body(item: dict[str, object], raw_bytes: bytes | None) -> str | None:
 
 
 def _body_from_eml(raw_bytes: bytes) -> str | None:
-    message = email.message_from_bytes(raw_bytes, policy=policy.default)
-    plain: str | None = None
-    html: str | None = None
-    if message.is_multipart():
-        for part in message.walk():
-            if part.get_content_maintype() == "multipart":
-                continue
-            if part.get_content_disposition() == "attachment":
-                continue
-            kind = part.get_content_type()
-            try:
-                text = part.get_content()
-            except (KeyError, LookupError, ValueError):
-                continue
-            if not isinstance(text, str):
-                continue
-            if kind == "text/plain" and plain is None:
-                plain = text
-            elif kind == "text/html" and html is None:
-                html = text
-    else:
-        kind = message.get_content_type()
-        try:
-            text = message.get_content()
-        except (KeyError, LookupError, ValueError):
-            text = None
-        if isinstance(text, str) and kind == "text/plain":
-            plain = text
-        elif isinstance(text, str) and kind == "text/html":
-            html = text
-    if plain is not None:
-        return plain
-    if html is not None:
-        return html_to_text(html)
-    return None
+    from mailcrawl.eml import body_text, parse_bytes, validate_mime
+    message = parse_bytes(raw_bytes)
+    validate_mime(message)
+    return body_text(message)
 
 
 def _attachments(
@@ -411,18 +407,24 @@ def _attachments(
     return tuple(records), unknown
 
 
-def _read_raw(value: object, root: Path | None) -> tuple[bytes | None, str | None]:
+def _read_raw(value: object, root: Path | inputio.SafeRoot | None) -> tuple[bytes | None, str | None]:
     if value is None:
         return None, None
     if not isinstance(value, str) or not value:
         raise ExportRejected()
     if root is None:
         return None, value
-    base = root.resolve()
-    candidate = (base / value).resolve()
-    if not candidate.is_relative_to(base) or not candidate.is_file():
-        raise ExportRejected()
-    return candidate.read_bytes(), str(candidate)
+    try:
+        if isinstance(root, inputio.SafeRoot):
+            raw = inputio.read_import(root, value, inputio.MAX_MESSAGE_BYTES)
+            base = root.path
+        else:
+            with inputio.SafeRoot(root) as reader:
+                raw = inputio.read_import(reader, value, inputio.MAX_MESSAGE_BYTES)
+            base = root.absolute()
+        return raw, str(base / value)
+    except (OSError, inputio.UnsafeInput) as exc:
+        raise ExportRejected() from exc
 
 
 def _raw_sha256(item: dict[str, object], raw_bytes: bytes | None) -> str:

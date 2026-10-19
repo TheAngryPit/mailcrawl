@@ -144,7 +144,7 @@ Remove only ephemeral run state **you** created. **Do not** delete `$EVIDENCE_DI
 "$REPO_ROOT/.cursor/skills/verify-mailcrawl/bin/mailcrawl-verify" cleanup
 ```
 
-Cleanup clears a temp workdir under `/tmp/mailcrawl-verify-scratch/$RUN_ID` if present. It does not stop processes (none are started) and does not remove evidence.
+Each command allocates a fresh mode-0700 directory with `mktemp -d /tmp/mailcrawl-verify.XXXXXXXXXX` and removes only that directory on exit. `RUN_ID` identifies evidence only. Scratch and wheel interpreters are never reused between commands. `cleanup` is an idempotent compatibility command and does not discover or delete older temporary paths. Evidence remains available.
 
 After cleanup, confirm evidence still exists:
 

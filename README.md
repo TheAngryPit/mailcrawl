@@ -1,9 +1,9 @@
 # mailcrawl 📬 — Your inboxes, on the record. Locally.
-Local-first, read-only archive for mail you already exported. Pulls a local export into one searchable SQLite index, with provenance, and with no network on the read path.
+Local-first archive for mail you already exported. Pulls a local export into one searchable SQLite index, with provenance, and with no network on the read path.
 
 ## Status
 
-mailcrawl is pre-alpha. This revision is schema v11, cleaned body text, the attachment interface, rules 0 to 8, and read-only `stats` and `dry-run` counts. [The spec](docs/SPEC.md) is the behavior contract.
+mailcrawl is pre-alpha. This revision is schema v11, cleaned body text, the attachment interface, rules 0 to 8, and `stats` and `dry-run` counts. [The spec](docs/SPEC.md) is the behavior contract.
 
 ## Why it exists
 
@@ -40,6 +40,8 @@ python3 -m mailcrawl --home "$ARCHIVE" --json import gog-export --account thehiv
 python3 -m mailcrawl --home "$ARCHIVE" --json stats --account thehive
 python3 -m mailcrawl --home "$ARCHIVE" --json dry-run --account thehive --rules "$(python3 -c 'from mailcrawl.rules import bundled_rules_path; print(bundled_rules_path())')"
 ```
+
+`stats` and `dry-run` do not write decisions or modify the source export or Gmail. Opening the local archive can migrate its schema, change local file permissions, and backfill missing Gmail category keys. These commands need a writable local archive and do not guarantee byte-for-byte database immutability.
 
 `stats` uses the rules file shipped in the package. `dry-run` reads `--rules` or `[rules] path` in the config. A relative config path is next to the config file. `--rules` stays relative to the working directory.
 

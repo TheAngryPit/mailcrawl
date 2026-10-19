@@ -13,6 +13,8 @@ _SHA = re.compile(r"[0-9a-f]{7,40}")
 
 
 def mailcrawl_version() -> str:
+    if not (Path(__file__).resolve().parents[1] / ".git").exists():
+        return VERSION
     try:
         out = subprocess.check_output(
             ["git", "rev-parse", "--short=7", "HEAD"],

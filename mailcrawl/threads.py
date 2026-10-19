@@ -8,6 +8,8 @@ import sqlite3
 import warnings
 from contextlib import contextmanager
 
+from mailcrawl.runtime_limits import MAX_IMAGE_BYTES
+
 TEXT_LIMIT = 200
 INLINE_IMAGE_FLOOR = 20 * 1024
 MIN_IMAGE_SIDE = 32
@@ -93,6 +95,8 @@ def image_gate(
 ) -> tuple[bool, str | None]:
     if not embeddable_image(mime_type, is_inline, size_bytes, None, None):
         return False, None
+    if len(blob) > MAX_IMAGE_BYTES:
+        return False, "encoded image exceeds byte budget"
     measured = _measure(blob)
     if isinstance(measured, str):
         return False, measured

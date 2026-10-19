@@ -9,6 +9,8 @@ import os
 import sqlite3
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from itertools import chain
+from mailcrawl import inputio
 
 from mailcrawl.clock import as_of
 from mailcrawl.contract import (
@@ -78,7 +80,7 @@ def import_gog_export(
         account_id=account_id,
         alias=alias,
         source="gog-export",
-        items=[*_label_map(parsed).values(), *parsed.messages],
+        items=chain(parsed.labels, parsed.messages),
         ref=lambda: manifest_sha,
         run_json=parsed.raw_json,
         catalogue=load_catalogue_entries(taxonomy_path, alias),
@@ -168,14 +170,26 @@ def _ingest(
     conflicts: list[str] = []
     reconciled: list[dict[str, str]] = []
     refused: list[dict[str, object]] = []
+    known_labels = {row[0] for row in conn.execute("SELECT gmail_label_id FROM labels WHERE account_id = ?", (account_id,))}
+    budget = inputio.ImportBudget()
+    budget_token = inputio.import_budget.set(budget)
     try:
         for item in items:
             if isinstance(item, LabelRec):
                 if source == "mbox" or not is_pseudo_label(item.gmail_label_id):
                     _upsert_label(conn, account_id, item, catalogue)
+                    known_labels.add(item.gmail_label_id)
                 continue
             if isinstance(item, Refused):
                 refused.append({"offset": item.offset, "reason": item.reason})
+                continue
+            for label_id in item.label_ids:
+                if label_id not in known_labels and (source == "mbox" or not is_pseudo_label(label_id)):
+                    _upsert_label(conn, account_id, LabelRec(label_id, label_id, infer_kind(label_id)), catalogue)
+                    known_labels.add(label_id)
+            image_size = sum(len(a.image_bytes or b"") for a in item.attachments)
+            if any(len(a.image_bytes or b"") > inputio.MAX_IMAGE_BYTES for a in item.attachments) or budget.image_bytes + image_size > inputio.MAX_IMPORT_IMAGE_BYTES:
+                refused.append({"offset": 0, "reason": "image_limit"})
                 continue
             outcome, kept_sha = _upsert_message(
                 conn,
@@ -260,7 +274,11 @@ def _ingest(
         conn.commit()
     except Exception:
         conn.rollback()
+        for path in budget.created_images:
+            path.unlink(missing_ok=True)
         raise
+    finally:
+        inputio.import_budget.reset(budget_token)
     return ImportResult(
         n_seen=n_seen,
         n_new=counts["new"],
@@ -273,20 +291,29 @@ def _ingest(
 
 def _load_export(export_dir: Path) -> tuple[ExportDocument, str]:
     export_path = export_dir / "export.json"
-    if export_path.is_file():
-        raw_file = export_path.read_bytes()
+    try:
+        reader = inputio.SafeRoot(export_dir)
+    except OSError as exc:
+        from mailcrawl.gognative import ExportInvalid
+        raise ExportInvalid("unsupported_schema", "export directory is missing", 3) from exc
+    try:
+        raw_file = reader.read("export.json", inputio.MAX_MANIFEST_BYTES)
+    except FileNotFoundError:
+        reader.close()
+        return load_native(export_dir)
+    except inputio.UnsafeInput as exc:
+        reader.close()
+        from mailcrawl.gognative import ExportInvalid
+        raise ExportInvalid("unsafe_path", "unsafe export manifest path", 1) from exc
+    except BaseException:
+        reader.close()
+        raise
+    try:
         document = json.loads(raw_file.decode("utf-8"))
-        return parse_export(document, export_dir), hashlib.sha256(raw_file).hexdigest()
-    return load_native(export_dir)
-
-
-def _label_map(parsed: ExportDocument) -> dict[str, LabelRec]:
-    labels = {label.gmail_label_id: label for label in parsed.labels}
-    for message in parsed.messages:
-        for label_id in message.label_ids:
-            if label_id not in labels:
-                labels[label_id] = LabelRec(label_id, label_id, infer_kind(label_id))
-    return labels
+    except (ValueError, RecursionError) as exc:
+        reader.close()
+        raise ValueError("invalid export manifest JSON") from exc
+    return parse_export(document, reader), hashlib.sha256(raw_file).hexdigest()
 
 
 def _upsert_label(
@@ -541,14 +568,30 @@ def _keep_image(conn: sqlite3.Connection, attachment: AttachmentRec) -> str | No
     db_file = "" if listed is None else str(listed[2] or "")
     if not db_file:
         return None
+    if len(blob) > inputio.MAX_IMAGE_BYTES:
+        raise inputio.InputLimit("image byte limit exceeded")
+    budget = inputio.import_budget.get()
+    if budget is not None and budget.image_bytes + len(blob) > inputio.MAX_IMPORT_IMAGE_BYTES:
+        raise inputio.InputLimit("import image byte limit exceeded")
     directory = Path(db_file).parent / "images"
     directory.mkdir(mode=0o700, exist_ok=True)
-    os.chmod(directory, 0o700)
-    digest = attachment.file_sha256 or hashlib.sha256(blob).hexdigest()
+    digest = hashlib.sha256(blob).hexdigest()
     path = directory / digest
-    if not path.is_file():
-        path.write_bytes(blob)
-        os.chmod(path, 0o600)
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        try:
+            fd = os.open(digest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
+        except FileExistsError:
+            with inputio.SafeRoot(directory) as reader:
+                reader.read(digest, inputio.MAX_IMAGE_BYTES)
+        else:
+            if budget is not None:
+                budget.created_images.append(path)
+                budget.image_bytes += len(blob)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(blob)
+    finally:
+        os.close(directory_fd)
     return str(path)
 
 

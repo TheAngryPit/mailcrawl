@@ -18,7 +18,7 @@ import {
   verdictFactory,
   type WatchClock,
 } from "./policy.ts";
-import { renderJson, renderPretty } from "./render.ts";
+import { escapeTerminal, renderJson, renderPretty } from "./render.ts";
 import type * as T from "./types.ts";
 import { nonEmpty, parsePrNumber } from "./types.ts";
 export interface CliOptions {
@@ -87,7 +87,7 @@ export function parseArgs(
     .description(
       "Watch one pull request, a connected stack, or an immutable queued stack.\nJSON (NDJSON while polling) is the default; --pretty renders human text."
     )
-    .configureOutput({ writeOut: io.stdout, writeErr: io.stderr })
+    .configureOutput({ writeOut: io.stdout, writeErr: (value) => io.stderr(value.split("\n").map(escapeTerminal).join("\n")) })
     .exitOverride()
     .option("--owner <owner>", "GitHub repository owner")
     .option("--repo <repo>", "GitHub repository name")

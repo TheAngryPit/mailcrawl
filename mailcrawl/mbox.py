@@ -10,19 +10,21 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import os
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 import email
 from email import policy
-from email.feedparser import BytesFeedParser
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from pathlib import Path
 from typing import BinaryIO
 
 from mailcrawl.contract import PSEUDO_LABEL, LabelRec, MessageRec
-from mailcrawl.eml import allow_headers, parsed_record
+from mailcrawl.eml import LimitedFeedParser, allow_headers, parsed_record
+from mailcrawl import inputio
+from mailcrawl.inputio import Refused
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.clock import as_of
 from mailcrawl.takeout_labels import resolved_label, system_id
@@ -52,12 +54,6 @@ PSEUDO_LABELS: dict[str, str] = {
     "arquivado": PSEUDO_LABEL + "archived",
     "arquivada": PSEUDO_LABEL + "archived",
 }
-
-
-@dataclass(frozen=True)
-class Refused:
-    offset: int
-    reason: str
 
 
 @dataclass(frozen=True)
@@ -155,7 +151,9 @@ class MboxSource:
             emitted.add(label.gmail_label_id)
             yield label
         raw_path = RAW_PATH + str(self.path.resolve())
-        with self.path.open("rb") as handle:
+        with inputio.SafeRoot(self.path.parent) as reader, reader.open(self.path.name) as handle:
+            if os.fstat(handle.fileno()).st_size > inputio.MAX_IMPORT_BYTES:
+                raise inputio.ImportExhausted("mbox import byte limit exceeded")
             for entry in _entries(handle, self._digest.update, self._stored):
                 parsed = self._parse(entry, f"{raw_path}#{entry.offset}")
                 if isinstance(parsed, Refused):
@@ -183,6 +181,10 @@ class MboxSource:
                 internal_date=0,
                 raw_path=raw_path,
             )
+        except inputio.ImportExhausted:
+            raise
+        except inputio.InputLimit:
+            return Refused(offset, "input_limit")
         except Exception:
             return Refused(offset, "unparseable")
         if message_id is None:
@@ -231,11 +233,28 @@ def _entries(
     offset = 0
     entry: _Entry | None = None
     preceding: bytes | None = None
-    for line in handle:
+    complete = True
+    total = 0
+    count = 0
+    for line in iter(lambda: handle.readline(min(inputio.MAX_LINE_BYTES + 1, max(1, inputio.MAX_IMPORT_BYTES - total + 1))), b""):
         digest(line)
+        total += len(line)
+        if total > inputio.MAX_IMPORT_BYTES:
+            raise inputio.ImportExhausted("mbox import byte limit exceeded")
+        if not complete or len(line) > inputio.MAX_LINE_BYTES:
+            if entry is not None:
+                entry.reject()
+            complete = line.endswith(b"\n")
+            offset += len(line)
+            preceding = line
+            continue
+        complete = line.endswith(b"\n")
         if line.startswith(b"From ") and from_line_is_separator(preceding):
             if entry is not None:
                 yield entry
+            count += 1
+            if count > inputio.MAX_IMPORT_RECORDS:
+                raise inputio.InputLimit("mbox record limit exceeded")
             entry = _Entry(offset, line, stored)
         elif entry is None:
             if line.strip(b"\r\n") != b"":
@@ -278,21 +297,40 @@ class _Entry:
         self._held = b""
         self._chunk = bytearray()
         self._hash = hashlib.sha256()
-        self._parser = BytesFeedParser(policy=policy.default)
+        self._parser = LimitedFeedParser(policy=policy.default)
+        self._rejected = False
+        self._raw_size = 0
         self._size = 0
         self._takeout = _Takeout()
 
+    def reject(self) -> None:
+        self._rejected = True
+        self._head = None
+        self._chunk.clear()
+        self._held = b""
+        self._parser = None
+
     def add(self, line: bytes) -> None:
+        if self._rejected:
+            return
+        self._raw_size += len(line)
+        if self._raw_size > inputio.MAX_MESSAGE_BYTES:
+            self.reject()
+            return
         # A blank line is held back one step: the one before the next separator is not part of the message.
         if self._held:
             self._take(self._held)
             self._held = b""
+            if self._rejected:
+                return
         if line == _BLANK:
             self._held = line
         else:
             self._take(line)
 
     def finish(self) -> tuple[EmailMessage, str, int, _Takeout, str | None]:
+        if self._rejected:
+            raise inputio.InputLimit("message byte limit exceeded")
         if self._head is not None:
             self._end_head()
         self._flush()
@@ -305,6 +343,9 @@ class _Entry:
             self._chunk += line
             if len(self._chunk) >= _FEED_CHUNK:
                 self._flush()
+            return
+        if len(self._head) + len(line) > inputio.MAX_HEADER_BYTES:
+            self.reject()
             return
         self._head += line
         if line == _BLANK:
@@ -332,7 +373,10 @@ class _Entry:
             self._chunk.clear()
             self._hash.update(data)
             if self._header is None:
-                self._parser.feed(data)
+                try:
+                    self._parser.feed(data)
+                except inputio.InputLimit:
+                    self.reject()
             self._size += len(data)
 
 

@@ -500,12 +500,18 @@ export class GhGitHubReader implements T.GitHubReader {
       "--limit",
       "300",
       "--json",
-      "number,headRefName,baseRefName",
+      "number,headRefName,baseRefName,headRepository,headRepositoryOwner",
     ]);
     return list(value, "open PRs").map((item, index) => {
       const object = record(item, `open PRs[${index}]`);
       return {
         number: parsePrNumber(object.number, `open PRs[${index}].number`),
+        headRepository: object.headRepository === null || object.headRepositoryOwner === null
+          ? null
+          : {
+              owner: string(record(object.headRepositoryOwner, "headRepositoryOwner").login, "headRepositoryOwner.login"),
+              repo: string(record(object.headRepository, "headRepository").name, "headRepository.name"),
+            },
         headRefName: string(
           object.headRefName,
           `open PRs[${index}].headRefName`
@@ -670,45 +676,64 @@ export function orderStack(
   context: T.PrContext,
   open: readonly T.OpenPullRequest[]
 ): T.NonEmpty<T.PrContext> {
-  const byNumber = new Map(open.map((pr) => [pr.number, pr]));
-  const byHead = new Map(open.map((pr) => [pr.headRefName, pr]));
+  const graphError = (detail: string): never => {
+    throw new WatcherQueryError({
+      kind: "stack-graph",
+      retryable: false,
+      detail: `invalid stack graph: ${detail}`,
+    });
+  };
+  const branch = (repository: T.Repository, name: string): string =>
+    JSON.stringify([
+      repository.owner.toLowerCase(), repository.repo.toLowerCase(), name,
+    ]);
+  const byNumber = new Map<T.PrNumber, T.OpenPullRequest>();
+  const byHead = new Map<string, T.OpenPullRequest>();
   const children = new Map<string, T.OpenPullRequest[]>();
-  for (const pr of open)
-    children.set(pr.baseRefName, [...(children.get(pr.baseRefName) ?? []), pr]);
-  for (const values of children.values())
-    values.sort((a, b) => a.number - b.number);
+  for (const pr of open) {
+    if (byNumber.has(pr.number)) graphError("duplicate PR number");
+    byNumber.set(pr.number, pr);
+    if (pr.headRepository === undefined)
+      graphError("missing head repository identity");
+    if (pr.headRepository === null) continue;
+    const head = branch(pr.headRepository, pr.headRefName);
+    if (byHead.has(head)) graphError("ambiguous head branch");
+    byHead.set(head, pr);
+    const base = branch(context, pr.baseRefName);
+    children.set(base, [...(children.get(base) ?? []), pr]);
+  }
+  for (const values of children.values()) values.sort((a, b) => a.number - b.number);
   const start = byNumber.get(context.number);
   if (start === undefined) return [context];
+  const seen = new Set<T.PrNumber>([start.number]);
   const down: T.OpenPullRequest[] = [];
   let current = start;
-  while (byHead.has(current.baseRefName)) {
-    const parent = byHead.get(current.baseRefName);
+  while (true) {
+    const parent = byHead.get(branch(context, current.baseRefName));
     if (parent === undefined) break;
+    if (seen.has(parent.number) || seen.size >= open.length)
+      graphError("cycle in parent branches");
+    seen.add(parent.number);
     down.push(parent);
     current = parent;
   }
-  const seen = new Set<T.PrNumber>([
-    ...down.map((pr) => pr.number),
-    start.number,
-  ]);
   const up: T.OpenPullRequest[] = [];
-  const visit = (parent: T.OpenPullRequest): void => {
-    for (const child of children.get(parent.headRefName) ?? []) {
-      if (seen.has(child.number)) continue;
+  const pending = [start];
+  while (pending.length > 0) {
+    const parent = pending.pop()!;
+    if (parent.headRepository == null) continue;
+    const next = children.get(branch(parent.headRepository, parent.headRefName)) ?? [];
+    for (const child of [...next].reverse()) {
+      if (seen.has(child.number) || seen.size >= open.length)
+        graphError("cycle in child branches");
       seen.add(child.number);
-      up.push(child);
-      visit(child);
+      pending.push(child);
     }
-  };
-  visit(start);
-  return (
-    nonEmpty(
-      [...down.reverse(), start, ...up].map((pr) => ({
-        ...context,
-        number: pr.number,
-      }))
-    ) ?? [context]
-  );
+    if (parent !== start) up.push(parent);
+  }
+  return nonEmpty(
+    [...down.reverse(), start, ...up].map((pr) => ({ ...context, number: pr.number }))
+  ) ?? [context];
 }
 export async function discoverStack(
   reader: T.GitHubReader,

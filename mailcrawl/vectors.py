@@ -13,9 +13,11 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Iterator
 
 from mailcrawl.configfile import DEFAULT_BATCH_SIZE, DEFAULT_MAX_TOKENS
+from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_BATCH_BYTES, MAX_IMAGE_BATCH_COUNT, context_parts
+from mailcrawl.output import terminal_text
 from mailcrawl.decisions import (
     DecisionDraft,
     current_decision,
@@ -65,13 +67,12 @@ VEC_IMAGE = "vec_image"
 
 
 def truncate_text(text: str, max_tokens: int) -> str:
-    words = text.split()
+    if max_tokens < 1:
+        raise ValueError("max_tokens must be positive")
     cap = max_tokens * CHARS_PER_TOKEN
-    if len(words) <= max_tokens and len(text) <= cap:
-        return text
-    kept = 0
     index = 0
-    length = len(text)
+    kept = 0
+    length = min(len(text), cap)
     while index < length and kept < max_tokens:
         while index < length and text[index].isspace():
             index += 1
@@ -80,10 +81,7 @@ def truncate_text(text: str, max_tokens: int) -> str:
         while index < length and not text[index].isspace():
             index += 1
         kept += 1
-    clipped = text[:index]
-    if len(clipped) > cap:
-        return clipped[:cap]
-    return clipped
+    return text if index == len(text) else text[:index]
 
 
 def _max_tokens(embedder: object) -> int:
@@ -554,12 +552,11 @@ def truncate(vector: list[float], dim: int) -> list[float]:
 def embed_threads(conn: sqlite3.Connection, embedder: Embedder, config: dict[str, bool] | None) -> int:
     if "embeddings" not in enabled_points(config):
         return 0
-    grouped = _threads(conn)
-    if not grouped:
+    if conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone() is None:
         return 0
     require_vec(conn)
     written = 0
-    for row in grouped:
+    for row in _threads(conn):
         if _vectors_stored(conn, row[0]):
             continue
         if _embed_group(conn, embedder, config, [row]):
@@ -733,24 +730,46 @@ def _scripted_vector(text: str, dim: int) -> list[float]:
     return vector
 
 
-def _threads(conn: sqlite3.Connection) -> list[tuple[int, str, str]]:
+def _threads(
+    conn: sqlite3.Connection, *, thread_ids: set[int] | None = None, include_text: bool = True,
+) -> Iterator[tuple[int, str, str]]:
+    where = ""
+    args: list[object] = [MAX_CONTEXT_BYTES + 1, MAX_CONTEXT_BYTES + 1] if include_text else []
+    if thread_ids is not None:
+        if not thread_ids:
+            return
+        where = "WHERE thread_pk IN (" + ",".join("?" for _ in thread_ids) + ")"
+        args.extend(sorted(thread_ids))
+    body_column = "substr(body_text, 1, ?)" if include_text else "''"
+    subject_column = "substr(subject, 1, ?)" if include_text else "''"
     rows = conn.execute(
-        """
-        SELECT thread_pk, subject, body_text
-        FROM messages
-        ORDER BY thread_pk, internal_date, msg_pk
-        """
-    ).fetchall()
-    grouped: dict[int, tuple[str, list[str]]] = {}
+        f"SELECT thread_pk, {subject_column}, {body_column} FROM messages "
+        f"{where} ORDER BY thread_pk, internal_date, msg_pk", args,
+    )
+    key = None
+    title = ""
+    parts: list[str] = []
+    size = 0
     for thread_pk, subject, body_text in rows:
-        key = int(thread_pk)
-        title, parts = grouped.get(key, ("", []))
+        current = int(thread_pk)
+        if key is not None and current != key:
+            yield key, title, "\n".join(parts)
+            title, parts, size = "", [], 0
+        key = current
         if not title and subject and str(subject).strip():
             title = str(subject).strip()
+            if len(title.encode("utf-8")) > MAX_CONTEXT_BYTES:
+                raise UsageError("thread subject exceeds byte budget")
+        if body_text is not None and len(str(body_text)) > MAX_CONTEXT_BYTES:
+            raise UsageError("thread text exceeds byte budget")
         if body_text and str(body_text).strip():
-            parts.append(str(body_text).strip())
-        grouped[key] = (title, parts)
-    return [(key, title, "\n".join(parts)) for key, (title, parts) in grouped.items()]
+            text = str(body_text).strip()
+            size += len(text.encode("utf-8")) + bool(parts)
+            if size > MAX_CONTEXT_BYTES:
+                raise UsageError("thread text exceeds byte budget")
+            parts.append(text)
+    if key is not None:
+        yield key, title, "\n".join(parts)
 
 
 def _upsert(
@@ -791,7 +810,7 @@ def _ensure_classification(
 ) -> None:
     if _vectors_stored(conn, thread_pk):
         return
-    rows = [row for row in _threads(conn) if row[0] == thread_pk]
+    rows = list(_threads(conn, thread_ids={thread_pk}))
     if not rows:
         return
     _embed_group(conn, embedder, config, rows)
@@ -818,11 +837,10 @@ def _embed_group(
     grouped: list[tuple[int, str, str]],
 ) -> bool:
     wrote = False
-    image_only = {
-        int(row[0])
-        for row in conn.execute("SELECT thread_pk FROM threads WHERE image_only = 1")
-    }
     for thread_pk, subject, body in grouped:
+        image_only = conn.execute(
+            "SELECT image_only FROM threads WHERE thread_pk = ?", (thread_pk,),
+        ).fetchone()
         texts = [classification_text(body), search_document(subject, body)]
         try:
             text_vectors = invoke("embeddings", lambda texts=texts: embedder.embed(texts), config)
@@ -855,7 +873,7 @@ def _embed_group(
                 continue
             _upsert_image(conn, item.thread_pk, item.att_pk, got[0])
             image_vectors.append(got[0])
-        if thread_pk in image_only and image_vectors:
+        if image_only is not None and image_only[0] and image_vectors:
             mean = _mean(image_vectors)
             _upsert(conn, "classification", thread_pk, mean, "")
             _upsert(conn, "search", thread_pk, mean, "")
@@ -864,43 +882,49 @@ def _embed_group(
     return wrote
 
 
-def _kept_images(conn: sqlite3.Connection, thread_ids: set[int]) -> list[_KeptImage]:
+def _kept_images(conn: sqlite3.Connection, thread_ids: set[int]) -> Iterator[_KeptImage]:
+    from mailcrawl.inputio import read_file
     if not thread_ids:
-        return []
+        return
+    if len(thread_ids) > 1000:
+        raise UsageError("image selection exceeds thread budget")
+    placeholders = ",".join("?" for _ in thread_ids)
     rows = conn.execute(
-        """
-        SELECT threads.thread_pk, attachments.att_pk, attachments.mime_type,
-               attachments.is_inline, attachments.size_bytes, attachments.stored_path
-        FROM attachments
-        JOIN messages ON messages.msg_pk = attachments.msg_pk
-        JOIN threads ON threads.thread_pk = messages.thread_pk
-        ORDER BY threads.thread_pk, attachments.att_pk
-        """
-    ).fetchall()
-    found: list[_KeptImage] = []
+        "SELECT messages.thread_pk, attachments.att_pk, attachments.mime_type, "
+        "attachments.is_inline, attachments.size_bytes, attachments.stored_path "
+        "FROM attachments JOIN messages ON messages.msg_pk = attachments.msg_pk "
+        f"WHERE messages.thread_pk IN ({placeholders}) "
+        "ORDER BY messages.thread_pk, attachments.att_pk", sorted(thread_ids),
+    )
+    total = 0
+    count = 0
+    previous_path = None
+    previous_blob = b""
     for thread_pk, att_pk, mime, inline, size, stored in rows:
-        if int(thread_pk) not in thread_ids or not stored:
+        if not stored:
             continue
         path = Path(str(stored))
-        if not path.is_file():
+        try:
+            blob = previous_blob if path == previous_path else read_file(path, MAX_IMAGE_BYTES)
+        except FileNotFoundError:
             continue
-        blob = path.read_bytes()
-        keep, reason = image_gate(
-            mime,
-            int(inline or 0),
-            None if size is None else int(size),
-            blob,
-        )
+        except (OSError, ValueError) as exc:
+            raise UsageError("stored image exceeds byte budget or is unsafe") from exc
+        keep, reason = image_gate(mime, int(inline or 0), None if size is None else int(size), blob)
         if not keep:
             if reason:
                 _log_skip(f"image {int(att_pk)}", reason)
             continue
-        found.append(_KeptImage(int(thread_pk), int(att_pk), blob))
-    return found
+        count += 1
+        total += len(blob)
+        if count > MAX_IMAGE_BATCH_COUNT or total > MAX_IMAGE_BATCH_BYTES:
+            raise UsageError("images exceed batch budget")
+        previous_path, previous_blob = path, blob
+        yield _KeptImage(int(thread_pk), int(att_pk), blob)
 
 
 def _log_skip(item: str, reason: object) -> None:
-    text = str(reason).splitlines()[0][:200]
+    text = terminal_text(str(reason).splitlines()[0][:200])
     sys.stderr.write(f"skipped {item}: {text}\n")
 
 

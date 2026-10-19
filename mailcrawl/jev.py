@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES, context_parts, request_bytes, response_bytes
+
 import json
 import os
 import sqlite3
@@ -313,7 +315,9 @@ class HttpJev:
     ) -> tuple[dict[str, Answer], str]:
         enter_model()
         key = _api_key()
-        payload = json.dumps(request_body(state, questions)).encode()
+        if len(state.encode("utf-8")) > MAX_CONTEXT_BYTES:
+            raise UsageError("thread text exceeds byte budget")
+        payload = request_bytes(json.dumps(request_body(state, questions)).encode())
         req = urllib.request.Request(
             _ENDPOINT,
             data=payload,
@@ -328,10 +332,10 @@ class HttpJev:
         for attempt in (1, 2):
             try:
                 with opener.open(req, timeout=30) as resp:
-                    raw = resp.read().decode()
+                    raw = response_bytes(resp).decode()
                 break
             except urllib.error.HTTPError as exc:
-                body = exc.read().decode(errors="replace")
+                body = response_bytes(exc).decode(errors="replace")
                 if "max_tokens_exceeded" in body:
                     raise TokenLimit() from exc
                 if exc.code == 429 and attempt == 1:
@@ -597,13 +601,13 @@ def _image_only(conn: sqlite3.Connection, thread_pk: int) -> bool:
 def _thread_state(conn: sqlite3.Connection, thread_pk: int) -> str:
     rows = conn.execute(
         """
-        SELECT body_text FROM messages
+        SELECT substr(body_text, 1, ?) FROM messages
         WHERE thread_pk = ?
         ORDER BY internal_date, msg_pk
         """,
-        (thread_pk,),
-    ).fetchall()
-    return "\n".join(row[0] or "" for row in rows)
+        (MAX_CONTEXT_BYTES + 1, thread_pk),
+    )
+    return context_parts(row[0] for row in rows)
 
 
 def _load_answers(conn: sqlite3.Connection, thread_pk: int) -> dict[str, Answer] | None | str:

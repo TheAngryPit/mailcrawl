@@ -33,6 +33,7 @@ from mailcrawl.configfile import (
 from mailcrawl.contract import ExportRejected, ManifestMismatch
 from mailcrawl.gognative import ExportInvalid
 from mailcrawl.ingest import ImportResult, import_gog_export, import_mbox
+from mailcrawl.output import spreadsheet_cell, terminal_text
 from mailcrawl.owner import recompute_from_me
 from mailcrawl.schema import USER_VERSION
 from mailcrawl.inference import enabled_points
@@ -116,6 +117,9 @@ def main(argv: list[str] | None = None) -> int:
         return 3
     except ManifestMismatch as exc:
         _emit(args, {"detail": str(exc), "error": "manifest_mismatch", "ok": False})
+        return 1
+    except sqlite3.Error:
+        _emit(args, {"detail": "database operation failed", "error": "database_error", "ok": False})
         return 1
     except ValueError as exc:
         _emit(args, {"detail": str(exc), "error": "usage", "ok": False})
@@ -838,7 +842,9 @@ def _write_reevaluate(path: Path, rows: list[dict[str, str]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(
+            {key: spreadsheet_cell(value) for key, value in row.items()} for row in rows
+        )
 
 
 def _init_aliases(args: argparse.Namespace) -> list[str]:
@@ -989,13 +995,13 @@ def _emit(args: argparse.Namespace, doc: dict[str, object], text: str | None = N
         sys.stdout.write("\n")
         return
     if text:
-        print(text)
+        print(terminal_text(text))
         return
     detail = doc.get("detail")
     if isinstance(detail, str) and detail:
-        print(detail, file=sys.stderr)
+        print(terminal_text(detail), file=sys.stderr)
     error = doc.get("error")
     if isinstance(error, str):
-        print(error)
+        print(terminal_text(error))
         return
     print("ok")

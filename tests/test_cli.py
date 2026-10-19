@@ -118,3 +118,56 @@ class CliImportTest(unittest.TestCase):
             )
             self.assertEqual(failed.returncode, 3, failed.stdout)
             self.assertEqual(json.loads(failed.stdout)["error"], "unsupported_schema")
+
+
+class CliOperationalErrorTest(unittest.TestCase):
+    def test_malformed_database_has_sanitized_json_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            archive = home / "private-path"
+            archive.mkdir()
+            database = archive / "personal.db"
+            database.write_bytes(b"not a sqlite database")
+            failed = run_mailcrawl(home, "--json", "--home", str(archive), "stats", "--account", "personal")
+            self.assertEqual(failed.returncode, 1)
+            self.assertEqual(json.loads(failed.stdout), {
+                "ok": False, "error": "database_error", "detail": "database operation failed",
+            })
+            self.assertEqual(failed.stderr, "")
+            self.assertNotIn(str(home), failed.stdout)
+            self.assertEqual(database.read_bytes(), b"not a sqlite database")
+
+    def test_human_output_escapes_untrusted_controls_and_json_preserves_data(self) -> None:
+        import argparse
+        import contextlib
+        import io
+        from mailcrawl.cli import _emit
+
+        malicious = "external\x1b[2J\r\nforged\x85line"
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            _emit(argparse.Namespace(json=False), {"detail": malicious, "error": malicious})
+            _emit(argparse.Namespace(json=False), {}, text=malicious)
+        for output in (stdout.getvalue(), stderr.getvalue()):
+            self.assertNotIn("\x1b", output)
+            self.assertNotIn("\r", output)
+            self.assertNotIn("\x85", output)
+        self.assertEqual(len(stdout.getvalue().splitlines()), 2)
+        self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            _emit(argparse.Namespace(json=True), {"text": malicious})
+        self.assertEqual(json.loads(stdout.getvalue())["text"], malicious)
+
+    def test_reevaluate_csv_escapes_formula_fields(self) -> None:
+        import csv
+        from mailcrawl.cli import _write_reevaluate
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "reevaluate.csv"
+            _write_reevaluate(path, [{"gmail_thread_id": "=1+1", "reason": "@SUM(1,2)", "state": "reply"}])
+            with path.open(newline="") as handle:
+                row = next(csv.DictReader(handle))
+            self.assertEqual(row["gmail_thread_id"], "'=1+1")
+            self.assertEqual(row["reason"], "'@SUM(1,2)")
+            self.assertEqual(row["state"], "reply")

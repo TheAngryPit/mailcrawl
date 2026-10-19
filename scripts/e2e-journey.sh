@@ -148,7 +148,7 @@ python3 "$REPO/scripts/e2e_check.py" \
   --native-import "$EVIDENCE/import-native.json" \
   --mbox-import "$EVIDENCE/import-mbox.json" \
   --expected "$REPO/testdata/e2e/expected.json" \
-  "${record[@]}"
+  ${record[@]+"${record[@]}"}
 
 printf 'e2e archive %s\n' "$ARCHIVE"
 printf 'e2e evidence %s\n' "$EVIDENCE"

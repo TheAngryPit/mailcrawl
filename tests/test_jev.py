@@ -124,9 +124,10 @@ def _reply_document() -> bytes:
 class _Ok:
     def __init__(self, raw: bytes) -> None:
         self._raw = raw
+        self._reader = io.BytesIO(raw)
 
-    def read(self) -> bytes:
-        return self._raw
+    def read(self, size: int = -1) -> bytes:
+        return self._reader.read(size)
 
     def __enter__(self) -> _Ok:
         return self

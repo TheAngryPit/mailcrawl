@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import datetime
+import json
 import os
+import re
+import tempfile
 import unicodedata
 import tomllib
 from pathlib import Path
@@ -316,122 +320,67 @@ def write_account(path: Path, alias: str, email: str) -> None:
         raise UsageError("email contains a character the config file cannot store")
     document = load_config(path)
     accounts = document.get("accounts")
-    if not isinstance(accounts, dict):
+    if accounts is None:
         accounts = {}
+    if not isinstance(accounts, dict):
+        raise UsageError("accounts config is not a table")
     current = accounts.get(canonical)
+    if current is not None and not isinstance(current, dict):
+        raise UsageError("account config is not a table")
     row = dict(current) if isinstance(current, dict) else {}
     row["email"] = email.strip()
     accounts[canonical] = row
-    taxonomy = document.get("taxonomy")
-    lines: list[str] = []
-    as_of_value = document.get("as_of")
-    if isinstance(as_of_value, int) and not isinstance(as_of_value, bool) and as_of_value >= 0:
-        lines.append(f"as_of = {as_of_value}")
-        lines.append("")
-    time_block = document.get("time")
-    if isinstance(time_block, dict):
-        lines.append("[time]")
-        for key in ("stale_days", "old_days"):
-            if key in time_block:
-                lines.append(f"{key} = {_optional_days(time_block, key, 0)}")
-        lines.append("")
-    if isinstance(taxonomy, str) and taxonomy and '"' not in taxonomy:
-        lines.append(f'taxonomy = "{taxonomy}"')
-        lines.append("")
-    rules_value = _stored_rules(document.get("rules"))
-    if rules_value:
-        lines.extend(["[rules]", f'path = "{_rules_value(rules_value)}"', ""])
-    inference = document.get("inference")
-    if isinstance(inference, dict):
-        saved = [
-            (key, value)
-            for key, value in inference.items()
-            if isinstance(key, str) and isinstance(value, bool)
-        ]
-        named = _embedder_value(inference["embedder"]) if "embedder" in inference else None
-        counted = [
-            (key, _required_count(inference[key], key))
-            for key in ("batch_size", "max_tokens")
-            if key in inference
-        ]
-        device = _device_value(inference["device"]) if "device" in inference else None
-        llm = inference.get("llm")
-        if saved or named or counted or device:
-            lines.append("[inference]")
-            if named:
-                lines.append(f'embedder = "{named}"')
-            if device:
-                lines.append(f'device = "{device}"')
-            for key, value in sorted(saved):
-                lines.append(f"{key} = {'true' if value else 'false'}")
-            for key, value in counted:
-                lines.append(f"{key} = {value}")
-            lines.append("")
-        if isinstance(llm, dict):
-            lines.extend(_llm_lines(llm))
-    review = document.get("review")
-    if isinstance(review, dict):
-        review_lines: list[str] = []
-        if review.get("allow_override") is True:
-            review_lines.append("allow_override = true")
-        if review.get("llm_review") is True:
-            review_lines.append("llm_review = true")
-        if review_lines:
-            lines.extend(["[review]", *review_lines, ""])
-    for name in sorted(accounts):
-        account = accounts[name]
-        if not isinstance(account, dict):
-            continue
-        addr = account.get("email")
-        if not isinstance(addr, str):
-            continue
-        lines.append(f"[accounts.{name}]")
-        lines.append(f'email = "{addr}"')
-        owner_aliases = _string_list(account.get("owner_addresses"))
-        owners = _string_list(account.get("owners"))
-        domains = _string_list(account.get("domains"))
-        security_senders = _string_list(account.get("security_senders"))
-        test_recipients = _string_list(account.get("test_recipients"))
-        if owner_aliases:
-            lines.append(f"owner_addresses = {_toml_strings(owner_aliases)}")
-        if owners:
-            lines.append(f"owners = {_toml_strings(owners)}")
-        if domains:
-            lines.append(f"domains = {_toml_strings(domains)}")
-        if security_senders:
-            lines.append(f"security_senders = {_toml_strings(security_senders)}")
-        if test_recipients:
-            lines.append(f"test_recipients = {_toml_strings(test_recipients)}")
-        lines.append("")
+    document["accounts"] = accounts
+    legacy_rules = document.get("rules")
+    if isinstance(legacy_rules, str) and legacy_rules.strip():
+        document["rules"] = {"path": _rules_value(legacy_rules)}
+    content = "\n".join(_toml_table(document)) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
-    path.write_text("\n".join(lines), encoding="utf-8")
-    os.chmod(path, 0o600)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            os.fchmod(output.fileno(), 0o600)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
 
 
-def _llm_lines(block: dict[str, object]) -> list[str]:
-    lines = ["[inference.llm]"]
-    for key in ("base_url", "model"):
-        value = block.get(key)
-        if not isinstance(value, str):
-            continue
-        if '"' in value or "\n" in value:
-            raise UsageError("local llm config contains a character the config file cannot store")
-        lines.append(f'{key} = "{value}"')
-    if block.get("allow_remote") is True:
-        lines.append("allow_remote = true")
-    lines.append("")
-    return lines
+def _toml_key(value: str) -> str:
+    return value if re.fullmatch(r"[A-Za-z0-9_-]+", value) else _toml_value(value)
 
 
-def _stored_rules(value: object) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value
+def _toml_value(value: object) -> str:
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False).replace("\x7f", "\\u007f")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, (datetime.datetime, datetime.date, datetime.time)):
+        return value.isoformat()
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
     if isinstance(value, dict):
-        path = value.get("path")
-        if isinstance(path, str) and path.strip():
-            return path
-    return None
+        return "{ " + ", ".join(
+            f"{_toml_key(key)} = {_toml_value(item)}" for key, item in value.items()
+        ) + " }"
+    raise UsageError("config contains an unsupported TOML value")
+
+
+def _toml_table(document: dict[str, object], prefix: tuple[str, ...] = ()) -> list[str]:
+    lines = ["[" + ".".join(_toml_key(key) for key in prefix) + "]"] if prefix else []
+    for key, value in document.items():
+        if not isinstance(value, dict):
+            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+    for key, value in document.items():
+        if isinstance(value, dict):
+            lines.extend(["", *_toml_table(value, (*prefix, key))])
+    return lines
 
 
 def _fold_address(value: str) -> str:
@@ -453,8 +402,3 @@ def _string_list(value: object) -> tuple[str, ...]:
             raise UsageError("owner address contains a character the config file cannot store")
         found.append(item.strip())
     return tuple(found)
-
-
-def _toml_strings(values: tuple[str, ...]) -> str:
-    inner = ", ".join(f'"{item}"' for item in values)
-    return f"[{inner}]"

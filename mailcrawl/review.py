@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from mailcrawl.runtime_limits import MAX_REASON_CHARS, MAX_CONTEXT_BYTES, context_parts, request_bytes, response_bytes
+
 import json
 import sqlite3
 import unicodedata
@@ -481,13 +483,13 @@ def _item(
 def _body(conn: sqlite3.Connection, thread_pk: int, max_tokens: int) -> str:
     rows = conn.execute(
         """
-        SELECT body_text FROM messages
+        SELECT substr(body_text, 1, ?) AS body_text FROM messages
         WHERE thread_pk = ?
         ORDER BY internal_date, msg_pk
         """,
-        (thread_pk,),
-    ).fetchall()
-    body = "\n".join(str(row["body_text"]) for row in rows if row["body_text"])
+        (MAX_CONTEXT_BYTES + 1, thread_pk),
+    )
+    body = context_parts(row["body_text"] for row in rows if row["body_text"])
     return truncate_text(body, max_tokens)
 
 
@@ -862,13 +864,13 @@ def _subject(conn: sqlite3.Connection, thread_pk: int) -> str:
 def _excerpt(conn: sqlite3.Connection, thread_pk: int, max_tokens: int) -> str:
     rows = conn.execute(
         """
-        SELECT body_text FROM messages
+        SELECT substr(body_text, 1, ?) AS body_text FROM messages
         WHERE thread_pk = ?
         ORDER BY internal_date, msg_pk
         """,
-        (thread_pk,),
-    ).fetchall()
-    body = "\n".join(_harness_text(str(row["body_text"])) for row in rows if row["body_text"])
+        (MAX_CONTEXT_BYTES + 1, thread_pk),
+    )
+    body = context_parts((row["body_text"] for row in rows if row["body_text"]), transform=_harness_text)
     return truncate_text(body, max_tokens)
 
 
@@ -1120,14 +1122,14 @@ def _complete(base_url: str, model: str, item: ReviewItem) -> AgentDecision:
     }
     request = urllib.request.Request(
         base_url + "/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
+        data=request_bytes(json.dumps(payload).encode("utf-8")),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
         with opener.open(request, timeout=60) as response:
-            raw = json.loads(response.read().decode("utf-8"))
+            raw = json.loads(response_bytes(response).decode("utf-8"))
     except UsageError:
         raise
     except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, ValueError) as exc:
@@ -1177,6 +1179,8 @@ def _decision_from_model(content: str, thread_id: str, model: str) -> AgentDecis
     reason = raw.get("reason")
     if reason is not None and not isinstance(reason, str):
         raise UsageError("reason is text")
+    if reason is not None and len(reason) > MAX_REASON_CHARS:
+        raise UsageError("reason exceeds text budget")
     return AgentDecision(
         thread_id,
         _choice(raw.get("state"), STATES, "state"),
@@ -1204,6 +1208,8 @@ def _endpoint(base_url: str, allow_remote: bool) -> str:
         raise UsageError("local llm base_url is not a URL")
     if host not in _LOCAL_HOSTS and not allow_remote:
         raise UsageError("local llm refuses a remote URL")
+    if host not in _LOCAL_HOSTS and parsed.scheme != "https":
+        raise UsageError("remote llm requires HTTPS")
     name = f"[{host}]" if ":" in host else host
     netloc = name if port is None else f"{name}:{port}"
     path = parsed.path or ""

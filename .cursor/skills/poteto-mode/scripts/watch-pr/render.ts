@@ -1,4 +1,7 @@
 import type * as T from "./types.ts";
+export const escapeTerminal = (value: string): string =>
+  value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 export const renderJson = (verdict: T.WatcherVerdict): string =>
   `${JSON.stringify(verdict)}\n`;
 function ciCell(row: T.PrSnapshot): string {
@@ -45,7 +48,7 @@ function mergeCell(row: T.PrSnapshot): string {
 export function renderStatusTable(rows: T.NonEmpty<T.PrSnapshot>): string {
   const lines = ["| PR | CI | Review | Merge |", "| --- | --- | --- | --- |"];
   for (const row of rows) {
-    const url = `https://github.com/${row.context.owner}/${row.context.repo}/pull/${row.context.number}`;
+    const url = `https://github.com/${escapeTerminal(row.context.owner)}/${escapeTerminal(row.context.repo)}/pull/${row.context.number}`;
     lines.push(
       `| [#${row.context.number}](${url}) | ${ciCell(row)} | ${reviewCell(row)} | ${mergeCell(row)} |`
     );
@@ -55,13 +58,13 @@ export function renderStatusTable(rows: T.NonEmpty<T.PrSnapshot>): string {
 function threadLine(thread: T.ReviewThread): string {
   const comment = thread.firstComment;
   return [
-    thread.id,
-    comment?.path ?? "None",
+    escapeTerminal(thread.id),
+    escapeTerminal(comment?.path ?? "None"),
     comment?.line ?? "None",
-    comment?.authorLogin ?? "None",
+    escapeTerminal(comment?.authorLogin ?? "None"),
     `isBugBot=${thread.isBugbot}`,
     `bugbotReviewPasses=${thread.bugbotReviewPasses}`,
-    (comment?.body ?? "").split(/\r?\n/, 1)[0]?.slice(0, 180) ?? "",
+    escapeTerminal((comment?.body ?? "").split(/\r?\n/, 1)[0]?.slice(0, 180) ?? ""),
   ].join(" ");
 }
 type StatusQueryBlocker = {
@@ -90,7 +93,7 @@ function renderBlocker(blocker: T.MergeBlocker | StatusQueryBlocker): string {
       const failed = blocker.ci.kind === "ci-failing" ? blocker.ci.failed : [];
       const details = failed.map(
         (check) =>
-          `${check.name} ${check.reportedState} ${check.description} ${check.link}`
+          `${escapeTerminal(check.name)} ${escapeTerminal(check.reportedState)} ${escapeTerminal(check.description)} ${escapeTerminal(check.link)}`
       );
       if (blocker.ci.kind === "ci-github-rejected")
         details.push(
@@ -121,7 +124,7 @@ function renderBlocker(blocker: T.MergeBlocker | StatusQueryBlocker): string {
       return [
         "BLOCKER: status-query",
         `failures=${blocker.failures}`,
-        `detail=${blocker.failure.detail}`,
+        `detail=${escapeTerminal(blocker.failure.detail)}`,
         "action=verify current PR context, GitHub authentication, and API availability, then rearm",
       ].join("\n");
     default: {
@@ -143,7 +146,7 @@ export function renderPretty(verdict: T.WatcherVerdict): string {
     case "ADVANCE":
       return `ADVANCE: merged #${verdict.merged.number}; next=#${verdict.frontier.number}; remaining=${verdict.remaining}\n`;
     case "RETRY":
-      return `RETRY: GitHub status query failed; retrying in ${verdict.retryInSeconds}s\ndetail=${verdict.failure.detail}\n`;
+      return `RETRY: GitHub status query failed; retrying in ${verdict.retryInSeconds}s\ndetail=${escapeTerminal(verdict.failure.detail)}\n`;
     case "BLOCKER":
       return `${renderBlocker(verdict.blocker)}\n`;
     case "READY": {
