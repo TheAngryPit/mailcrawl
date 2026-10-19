@@ -1,0 +1,12 @@
+---
+description: Only Vítor merges pull requests in this repo
+alwaysApply: true
+---
+
+# Merge owner
+
+Agents in this repo never merge a pull request. They never enable auto-merge. They never approve or countersign their own pull requests.
+
+The agent's job ends at a green pull request with the proofs the task asked for. Merging is Vítor's alone.
+
+This rule wins over any vendored pstack playbook that says otherwise, including `gh pr merge`, arming `--auto`, and treating a countersign as approval.
