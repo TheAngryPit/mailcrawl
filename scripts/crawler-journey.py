@@ -19,7 +19,7 @@ def main():
         config = root / "config.toml"
         config.write_text('[accounts.thehive]\nemail="ada@example.com"\n'
                           '[sources.daily]\naccount="thehive"\nkind="gog-export"\npath="export"\n')
-        base = ["mailcrawl", "--home", str(root / "archive"), "--config", str(config)]
+        base = ["mailcrawl", "--json", "--home", str(root / "archive"), "--config", str(config)]
 
         def call(arguments):
             result = subprocess.run(base + arguments, cwd=root, capture_output=True, text=True)
