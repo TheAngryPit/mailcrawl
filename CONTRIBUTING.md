@@ -17,3 +17,6 @@ make check && scripts/proof.sh
 ```
 
 `scripts/proof.sh` lives under `scripts/`.
+
+PRs require the `verification` status, supplied by hosted CI or the
+[owner-operated local verification route](docs/LOCAL_VERIFICATION.md).

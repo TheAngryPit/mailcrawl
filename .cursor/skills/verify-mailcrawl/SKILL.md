@@ -7,6 +7,11 @@ description: Verify mailcrawl repo health (required docs, CI wiring, secrets and
 
 The verification surface is the **repository itself**: required documentation, GitHub check wiring, the hygiene gate, and `make check && scripts/proof.sh`.
 
+When publishing local evidence to satisfy a PR's required `verification` status,
+follow [Local verification](../../../docs/LOCAL_VERIFICATION.md). Its runner
+checks the owner's current PR head and executes the full CI matrix in isolated
+Linux. Ordinary feature drives below do not publish a passing PR status.
+
 ## Product definition of done (scaffold)
 
 On a clean Linux runner with **no network credentials**, this must exit **0**:
