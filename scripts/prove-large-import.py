@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import resource
 import sys
 import tempfile
@@ -9,6 +10,13 @@ from contextlib import closing
 
 from mailcrawl.ingest import import_mbox
 from mailcrawl.store import connect, init_account
+
+
+def flush_fixture(stream):
+    stream.flush()
+    os.fsync(stream.fileno())
+    if hasattr(os, "posix_fadvise"):
+        os.posix_fadvise(stream.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
 
 
 def main():
@@ -33,8 +41,11 @@ def main():
         root = Path(folder)
         source = root / "synthetic.mbox"
         with source.open("wb") as stream:
-            for _ in range(records):
+            for number in range(records):
                 stream.write(block)
+                if (number + 1) % 32 == 0:
+                    flush_fixture(stream)
+            flush_fixture(stream)
         size = source.stat().st_size
         print(f"Generated {size} bytes; starting import", file=sys.stderr, flush=True)
         db = init_account(root / "archive", "personal", "ada@example.com")

@@ -30,7 +30,9 @@ python3 -m unittest discover -s tests -p 'test_large_import.py' -v
 For whole-archive budget changes, run `scripts/prove-large-import.py` in an
 isolated Linux container with no network, at most 512 MiB RAM and two CPUs.
 Set `TMPDIR` to disk-backed container storage: a multi-GiB fixture cannot fit in
-a memory-backed `/tmp` under that RAM limit.
+a memory-backed `/tmp` under that RAM limit. The generator flushes batches and
+asks Linux to release their file-cache pages so fixture creation does not consume
+the import memory budget.
 Capture its JSON receipt under `$EVIDENCE_DIR`. The default generates more than
 2 GiB of synthetic repeated messages and requires peak RSS below 256 MiB. It
 removes its own generated archive and database. This is a capacity regression
