@@ -354,8 +354,9 @@ def connect(path: Path | str) -> sqlite3.Connection:
     target = str(path)
     memory = target == ":memory:"
     if not memory:
-        dest = Path(target).resolve()
+        dest = Path(target)
         refuse_protected_path(dest)
+        dest = dest.resolve()
         target = str(dest)
         ensure_private_directory(dest.parent)
         _create_private_file(dest)

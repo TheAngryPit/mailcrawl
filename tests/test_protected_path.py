@@ -37,6 +37,15 @@ class ProtectedPathTest(unittest.TestCase):
                 connect(root / "plain" / "personal.db")
             self.assertEqual(protected.read_bytes(), b"")
 
+    def test_the_protected_name_is_refused_even_when_it_points_somewhere_else(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "plain").mkdir()
+            (root / "db-v2").symlink_to(root / "plain")
+            with self.assertRaisesRegex(UsageError, "db-v2"):
+                connect(root / "db-v2" / "personal.db")
+            self.assertEqual(list((root / "plain").iterdir()), [])
+
 
 if __name__ == "__main__":
     unittest.main()
