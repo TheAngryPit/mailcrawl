@@ -56,6 +56,10 @@ def _sqlite_vec_installed() -> bool:
     return importlib.util.find_spec("sqlite_vec") is not None
 
 
+def _pillow_installed() -> bool:
+    return importlib.util.find_spec("PIL") is not None
+
+
 def _solid_png(width: int, height: int) -> bytes:
     def chunk(tag: bytes, data: bytes) -> bytes:
         crc = zlib.crc32(tag + data) & 0xFFFFFFFF
@@ -524,6 +528,7 @@ class VectorCliTest(unittest.TestCase):
             self.assertNotIn("sentence_transformers", sys.modules)
             self.assertNotIn("torch", sys.modules)
 
+    @unittest.skipUnless(_pillow_installed(), "Pillow is not installed")
     def test_image_encode_uses_the_gemma_guide(self) -> None:
         png = bytes.fromhex(
             "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
@@ -566,6 +571,7 @@ class VectorCliTest(unittest.TestCase):
             },
         )
 
+    @unittest.skipUnless(_pillow_installed(), "Pillow is not installed")
     def test_fake_encode_does_not_import_an_installed_torch(self) -> None:
         png = bytes.fromhex(
             "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
@@ -591,6 +597,7 @@ class VectorCliTest(unittest.TestCase):
             if previous is not None:
                 sys.modules["torch"] = previous
 
+    @unittest.skipUnless(_pillow_installed(), "Pillow is not installed")
     def test_non_rgb_images_are_converted_before_encode(self) -> None:
         from PIL import Image
 
@@ -1130,6 +1137,7 @@ class FlatEmbedTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    @unittest.skipUnless(_pillow_installed(), "Pillow is not installed")
     def test_oversized_and_unknown_images_are_skipped_before_decode(self) -> None:
         huge_png = _png_header(12000, 12000)
         huge_gif = b"GIF89a" + struct.pack("<HH", 12000, 12000)
