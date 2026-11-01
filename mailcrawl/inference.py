@@ -37,6 +37,20 @@ MODEL_CLIENTS = frozenset(
     }
 )
 
+EGRESS_EDGES = {
+    "urllib": frozenset({"jev.py", "review.py"}),
+    "socket": frozenset({"runtime_limits.py"}),
+    "subprocess": frozenset({"bench.py", "extract.py", "version.py"}),
+    "http": frozenset(),
+    "ssl": frozenset(),
+    "smtplib": frozenset(),
+    "ftplib": frozenset(),
+    "imaplib": frozenset(),
+    "poplib": frozenset(),
+    "telnetlib": frozenset(),
+    "xmlrpc": frozenset(),
+}
+
 T = TypeVar("T")
 _point: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "mailcrawl_inference_point",
@@ -103,6 +117,11 @@ def scan_source(text: str, filename: str) -> list[str]:
             for root_name in _import_roots(node):
                 if root_name in MODEL_CLIENTS:
                     problems.append(f"{filename}:{node.lineno}: model client import {root_name}")
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for root_name in _import_roots(node):
+                owners = EGRESS_EDGES.get(root_name)
+                if owners is not None and Path(filename).name not in owners:
+                    problems.append(f"{filename}:{node.lineno}: network or process import {root_name}")
     return problems
 
 
