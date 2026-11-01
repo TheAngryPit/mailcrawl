@@ -31,6 +31,7 @@ from mailcrawl.jev import (
     score_grey_band,
 )
 from mailcrawl.paths import UsageError
+from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES
 from mailcrawl.search import search_messages
 from mailcrawl.store import connect, index_message
 
@@ -189,6 +190,31 @@ class JevBatteryTest(unittest.TestCase):
                 self.assertEqual(client.calls, 1)
                 self.assertEqual(third["source_detail"], MODEL_ID)
                 self.assertEqual(third["created_at"], 12)
+            finally:
+                conn.close()
+
+    def test_an_oversized_thread_waits_for_review_and_the_pass_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                conn.execute(
+                    "UPDATE messages SET body_text = ? WHERE thread_pk = ?",
+                    ("x" * (MAX_CONTEXT_BYTES + 1), ids["reply"]),
+                )
+                conn.commit()
+                client = CountingJev()
+                passed = score_grey_band(conn, client, {"jev-battery": True}, 10)
+                self.assertEqual(passed.eligible, len(ids))
+                self.assertEqual(client.calls, len(ids) - 1)
+                held = conn.execute(
+                    "SELECT next_state, origin, evidence FROM decisions WHERE thread_pk = ?",
+                    (ids["reply"],),
+                ).fetchone()
+                self.assertEqual((held["next_state"], held["origin"]), ("needs_review", "model"))
+                self.assertFalse(json.loads(held["evidence"])[0]["left_machine"])
+                decided = conn.execute("SELECT count(*) FROM decisions").fetchone()[0]
+                self.assertEqual(decided, len(ids))
             finally:
                 conn.close()
 

@@ -3,7 +3,13 @@
 
 from __future__ import annotations
 
-from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES, context_parts, request_bytes, response_bytes
+from mailcrawl.runtime_limits import (
+    MAX_CONTEXT_BYTES,
+    ContextTooLarge,
+    context_parts,
+    request_bytes,
+    response_bytes,
+)
 
 import json
 import os
@@ -316,7 +322,7 @@ class HttpJev:
         enter_model()
         key = _api_key()
         if len(state.encode("utf-8")) > MAX_CONTEXT_BYTES:
-            raise UsageError("thread text exceeds byte budget")
+            raise ContextTooLarge("thread text exceeds byte budget")
         payload = request_bytes(json.dumps(request_body(state, questions)).encode())
         req = urllib.request.Request(
             _ENDPOINT,
@@ -409,6 +415,8 @@ def _produce(
                 lambda: client.ask(_thread_state(conn, thread_pk), BATTERY),
                 config,
             )
+        except ContextTooLarge:
+            return _review(client.model_id, False)
         except (TokenLimit, RateLimited):
             return _review(client.model_id, client.left_machine)
         if answered is None:

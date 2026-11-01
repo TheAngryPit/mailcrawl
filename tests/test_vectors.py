@@ -27,6 +27,7 @@ from mailcrawl.configfile import (
 from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import BoundaryError, enter_model, invoke
 from mailcrawl.paths import UsageError
+from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES
 from mailcrawl.store import connect, index_message, init_account
 from mailcrawl.ingest import import_mbox
 from mailcrawl.threads import dimension_skip_reason, embeddable_image, image_gate, opened_limit_reason
@@ -957,6 +958,27 @@ class FlatEmbedTest(unittest.TestCase):
             self.assertIn("M4", spec)
             self.assertIn(LOCAL_VERIFY, spec)
             self.assertIn('device` is `auto`', spec)
+
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
+    def test_an_oversized_thread_does_not_stop_embed_or_knn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                conn.execute(
+                    "UPDATE messages SET body_text = ? WHERE thread_pk = ?",
+                    ("x" * (MAX_CONTEXT_BYTES + 1), ids["near"]),
+                )
+                conn.commit()
+                flags = {"embeddings": True}
+                total = conn.execute("SELECT count(*) FROM threads").fetchone()[0]
+                self.assertEqual(embed_threads(conn, FakeEmbedder(), flags), total - 1)
+                eligible, decided, review = knn_account(conn, FakeEmbedder(), flags, 10)
+                self.assertEqual((eligible, decided, review), (total, 0, total))
+                with self.assertRaises(UsageError):
+                    knn_decide(conn, ids["near"], FakeEmbedder(), flags, 10)
+            finally:
+                conn.close()
 
     @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
     def test_a_failed_item_is_skipped_and_a_rerun_keeps_committed_threads(self) -> None:
