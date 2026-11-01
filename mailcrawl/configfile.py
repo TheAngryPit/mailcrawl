@@ -105,12 +105,13 @@ def inference_config(path: Path) -> dict[str, bool]:
     raw = _inference_table(path)
     embed_limits(path)
     inference_device(path)
+    jev_allow_remote(path)
     flags: dict[str, bool] = {}
     for key, value in raw.items():
         if key == "embedder":
             _embedder_value(value)
             continue
-        if key in ("batch_size", "max_tokens", "llm", "device"):
+        if key in ("batch_size", "max_tokens", "llm", "device", "jev"):
             continue
         if not isinstance(key, str) or not isinstance(value, bool):
             raise UsageError("inference flags are booleans")
@@ -195,6 +196,18 @@ def local_llm(path: Path) -> tuple[str, str, bool] | None:
     if not isinstance(allow_remote, bool):
         raise UsageError("allow_remote is a boolean")
     return base_url.strip(), model.strip(), allow_remote
+
+
+def jev_allow_remote(path: Path) -> bool:
+    block = _inference_table(path).get("jev")
+    if block is None:
+        return False
+    if not isinstance(block, dict):
+        raise UsageError("jev config is not a table")
+    value = block.get("allow_remote", False)
+    if not isinstance(value, bool):
+        raise UsageError("allow_remote is a boolean")
+    return value
 
 
 def inference_device(path: Path) -> str:

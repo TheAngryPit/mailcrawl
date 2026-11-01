@@ -49,12 +49,12 @@ CLASSIFICATION_PREFIX = "task: classification | query: "
 SEARCH_QUERY_PREFIX = "task: search result | query: "
 SEARCH_TITLE_PREFIX = "title: "
 LOCAL_VERIFY = (
-    "python -m mailcrawl --db ~/MailVault/db-v5-sandbox "
+    "python -m mailcrawl --db $ARCHIVE "
     "embed --account thehive --embedder gemma"
 )
 MLX_MODEL_ID = "mlx-community/embeddinggemma-2-8bit"
 MLX_LOCAL_VERIFY = (
-    "python -m mailcrawl --db ~/MailVault/db-v5-sandbox "
+    "python -m mailcrawl --db $ARCHIVE "
     "bench --account thehive --embedders gemma,mlx --sample 32"
 )
 MLX_PROCESSOR_ERROR = (

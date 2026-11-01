@@ -24,6 +24,7 @@ from mailcrawl.configfile import (
     llm_review,
     owner_addresses,
     inference_device,
+    jev_allow_remote,
     local_llm,
     rules_path,
     takeout_label_map,
@@ -374,7 +375,7 @@ def _search(args: argparse.Namespace) -> int:
         embedder = _open_embedder(args)
     jev = None
     if "search-reranker" in enabled_points(flags):
-        jev = open_client(args.jev_client)
+        jev = open_client(args.jev_client, allow_remote=jev_allow_remote(config_path(args.config)))
     conn = connect(db_path)
     try:
         hits = search_messages(
@@ -720,7 +721,7 @@ def _jev(args: argparse.Namespace) -> int:
     decision = None
     passed = None
     try:
-        client = open_client(args.client)
+        client = open_client(args.client, allow_remote=jev_allow_remote(config_path(args.config)))
         if args.thread:
             row = conn.execute(
                 "SELECT thread_pk FROM threads WHERE gmail_thread_id = ?",

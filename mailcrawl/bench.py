@@ -32,9 +32,9 @@ from mailcrawl.vectors import (
 
 _ON = {"embeddings": True}
 LABEL_TRUTH_VERIFY = (
-    "python -m mailcrawl --json --db ~/MailVault/db-v5-sandbox "
+    "python -m mailcrawl --json --db $ARCHIVE "
     "bench --account thehive --embedders gemma,mlx --sample 64 "
-    "--truth labels --taxonomy ~/MailVault/taxonomy.thehive.json"
+    "--truth labels --taxonomy $TAXONOMY"
 )
 _TRUTHS = frozenset({"decisions", "labels"})
 _VOTE_K = 10

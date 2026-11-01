@@ -35,7 +35,7 @@ CONFIDENCE_FLOOR = 0.60
 RERANK_LIMIT = 20
 _RETRY_CAP = 60
 LOCAL_VERIFY = (
-    "python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox "
+    "python3 -m mailcrawl --db $ARCHIVE "
     "jev --account thehive --client http"
 )
 _ENDPOINT = "https://api.typesafe.ai/v1/systemone"
@@ -149,10 +149,15 @@ class JevClient(Protocol):
     ) -> tuple[dict[str, Answer], str]: ...
 
 
-def open_client(name: str) -> JevClient:
+def open_client(name: str, *, allow_remote: bool = False) -> JevClient:
     if name == "fake":
         return FakeJev()
     if name == "http":
+        if not allow_remote:
+            raise UsageError(
+                f"jev http sends thread text to {_ENDPOINT}. "
+                "Set allow_remote = true under [inference.jev] to allow it."
+            )
         return HttpJev()
     raise UsageError(f"unknown jev client {name}")
 
