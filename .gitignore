@@ -49,6 +49,7 @@ client_secret*.json
 token.json
 tokens.json
 *.pem
+*.key
 age.key
 *.age
 
