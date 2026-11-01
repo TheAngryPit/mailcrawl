@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Protocol, Iterator
 
 from mailcrawl.configfile import DEFAULT_BATCH_SIZE, DEFAULT_MAX_TOKENS
-from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_BATCH_BYTES, MAX_IMAGE_BATCH_COUNT, context_parts
+from mailcrawl.runtime_limits import (
+    MAX_CONTEXT_BYTES,
+    MAX_IMAGE_BATCH_BYTES,
+    MAX_IMAGE_BATCH_COUNT,
+    MAX_IMAGE_BYTES,
+    ContextTooLarge,
+    context_parts,
+)
 from mailcrawl.output import terminal_text
 from mailcrawl.decisions import (
     DecisionDraft,
@@ -42,12 +49,12 @@ CLASSIFICATION_PREFIX = "task: classification | query: "
 SEARCH_QUERY_PREFIX = "task: search result | query: "
 SEARCH_TITLE_PREFIX = "title: "
 LOCAL_VERIFY = (
-    "python -m mailcrawl --db ~/MailVault/db-v5-sandbox "
+    "python -m mailcrawl --db $ARCHIVE "
     "embed --account thehive --embedder gemma"
 )
 MLX_MODEL_ID = "mlx-community/embeddinggemma-2-8bit"
 MLX_LOCAL_VERIFY = (
-    "python -m mailcrawl --db ~/MailVault/db-v5-sandbox "
+    "python -m mailcrawl --db $ARCHIVE "
     "bench --account thehive --embedders gemma,mlx --sample 32"
 )
 MLX_PROCESSOR_ERROR = (
@@ -556,7 +563,7 @@ def embed_threads(conn: sqlite3.Connection, embedder: Embedder, config: dict[str
         return 0
     require_vec(conn)
     written = 0
-    for row in _threads(conn):
+    for row in _threads(conn, skip_oversize=True):
         if _vectors_stored(conn, row[0]):
             continue
         if _embed_group(conn, embedder, config, [row]):
@@ -689,15 +696,19 @@ def knn_account(
     decided = 0
     pending = 0
     for thread_pk in eligible:
-        decision = knn_decide(
-            conn,
-            thread_pk,
-            embedder,
-            config,
-            now,
-            policy=policy,
-            review=review,
-        )
+        try:
+            decision = knn_decide(
+                conn,
+                thread_pk,
+                embedder,
+                config,
+                now,
+                policy=policy,
+                review=review,
+            )
+        except ContextTooLarge:
+            pending += 1
+            continue
         if decision is None or decision["next_state"] == "needs_review":
             pending += 1
         else:
@@ -731,7 +742,11 @@ def _scripted_vector(text: str, dim: int) -> list[float]:
 
 
 def _threads(
-    conn: sqlite3.Connection, *, thread_ids: set[int] | None = None, include_text: bool = True,
+    conn: sqlite3.Connection,
+    *,
+    thread_ids: set[int] | None = None,
+    include_text: bool = True,
+    skip_oversize: bool = False,
 ) -> Iterator[tuple[int, str, str]]:
     where = ""
     args: list[object] = [MAX_CONTEXT_BYTES + 1, MAX_CONTEXT_BYTES + 1] if include_text else []
@@ -750,25 +765,39 @@ def _threads(
     title = ""
     parts: list[str] = []
     size = 0
+    oversized = False
+
+    def refuse(message: str) -> None:
+        nonlocal oversized
+        if not skip_oversize:
+            raise ContextTooLarge(message)
+        oversized = True
+
     for thread_pk, subject, body_text in rows:
         current = int(thread_pk)
         if key is not None and current != key:
-            yield key, title, "\n".join(parts)
-            title, parts, size = "", [], 0
+            if not oversized:
+                yield key, title, "\n".join(parts)
+            title, parts, size, oversized = "", [], 0, False
         key = current
+        if oversized:
+            continue
         if not title and subject and str(subject).strip():
             title = str(subject).strip()
             if len(title.encode("utf-8")) > MAX_CONTEXT_BYTES:
-                raise UsageError("thread subject exceeds byte budget")
+                refuse("thread subject exceeds byte budget")
+                continue
         if body_text is not None and len(str(body_text)) > MAX_CONTEXT_BYTES:
-            raise UsageError("thread text exceeds byte budget")
+            refuse("thread text exceeds byte budget")
+            continue
         if body_text and str(body_text).strip():
             text = str(body_text).strip()
             size += len(text.encode("utf-8")) + bool(parts)
             if size > MAX_CONTEXT_BYTES:
-                raise UsageError("thread text exceeds byte budget")
+                refuse("thread text exceeds byte budget")
+                continue
             parts.append(text)
-    if key is not None:
+    if key is not None and not oversized:
         yield key, title, "\n".join(parts)
 
 

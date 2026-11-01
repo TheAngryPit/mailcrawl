@@ -489,7 +489,7 @@ def _body(conn: sqlite3.Connection, thread_pk: int, max_tokens: int) -> str:
         """,
         (MAX_CONTEXT_BYTES + 1, thread_pk),
     )
-    body = context_parts(row["body_text"] for row in rows if row["body_text"])
+    body = context_parts((row["body_text"] for row in rows if row["body_text"]), clip=True)
     return truncate_text(body, max_tokens)
 
 
@@ -870,7 +870,7 @@ def _excerpt(conn: sqlite3.Connection, thread_pk: int, max_tokens: int) -> str:
         """,
         (MAX_CONTEXT_BYTES + 1, thread_pk),
     )
-    body = context_parts((row["body_text"] for row in rows if row["body_text"]), transform=_harness_text)
+    body = context_parts((row["body_text"] for row in rows if row["body_text"]), transform=_harness_text, clip=True)
     return truncate_text(body, max_tokens)
 
 

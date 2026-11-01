@@ -2,6 +2,7 @@
 """Bench compares embedders without importing a model."""
 
 import base64
+import importlib.util
 import json
 import os
 import shutil
@@ -112,6 +113,7 @@ Content-Transfer-Encoding: base64
 
 
 class BenchTest(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
     def test_fake_pair_reports_agreement_and_leaves_the_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = _archive(Path(tmp))
@@ -163,6 +165,7 @@ class BenchTest(unittest.TestCase):
             self.assertNotIn("sentence_transformers", sys.modules)
             self.assertNotIn("torch", sys.modules)
 
+    @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
     def test_cli_bench_is_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

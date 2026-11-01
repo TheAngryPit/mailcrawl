@@ -46,9 +46,17 @@ PDF extraction has a 30-second wall deadline and child CPU limits. Linux also en
 | Benchmark thread candidates | 100,000 |
 | Subject normalization | 65,536 characters |
 
+A thread over the context budget raises `ContextTooLarge`, a `UsageError`. A batch pass handles it per thread. `jev` stores `needs_review`, `knn` counts it as review, `embed` skips it, and the search reranker keeps keyword order. `review queue` clips the text to the budget because the model prompt is cut to `max_tokens` anyway. A single-thread call still fails with the error.
+
+Remote Jev needs `allow_remote = true` under `[inference.jev]` before `open_client` returns the HTTP client.
+
 HTTP connection setup retains its existing socket timeout. The body reader checks an aggregate deadline between bounded reads and applies the remaining timeout to supported HTTP sockets. Remote review requires HTTPS even after remote-host opt-in. Exact loopback hosts can still use HTTP. Redirect and environment-proxy refusal remain unchanged.
 
 Embedding reads one bounded thread at a time and restricts attachment queries to selected thread IDs. Benchmark selection uses metadata before loading selected text or images. Image pixel and frame guards remain in place.
+
+## Storage modes
+
+A new database file is created as 0600 before SQLite opens it, so `-wal` and `-shm` take the same mode. Opening an older archive tightens loose sidecars. A directory is set to 0700 only when mailcrawl creates it, so pointing `--home` or `--config` at an existing directory does not change that directory's mode. The `db-v2` guard checks the path as written and its resolved target.
 
 ## Export presentation
 
@@ -58,7 +66,7 @@ Human CLI diagnostics escape C0, DEL and C1 controls. JSON retains the original 
 
 ## Developer tools
 
-The verifier allocates private scratch for each invocation and never executes an interpreter from an older shared run. The bundled watcher qualifies branch identities by repository and refuses cycles or ambiguous parents. Pretty output escapes remote control characters. The wizard refuses unsafe env destinations and atomically writes private files. Existing generated wizards are separate copies and require their own update.
+The verifier allocates private scratch for each invocation and never executes an interpreter from an older shared run. The AST fence in `mailcrawl/inference.py` names the only files that may import `urllib`, `socket`, `subprocess`, and the other network or process modules. The bundled watcher qualifies branch identities by repository and refuses cycles or ambiguous parents. Pretty output escapes remote control characters. The wizard refuses unsafe env destinations and atomically writes private files. Existing generated wizards are separate copies and require their own update.
 
 These changes are local patches to vendored tooling. A future pstack refresh must preserve the protections or verify equivalent upstream fixes before replacing them.
 

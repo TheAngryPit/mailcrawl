@@ -71,7 +71,49 @@ name = "second"
                 self.assertEqual(takeout_label_map(path, "personal"), {"Custom/Label": "INBOX", "Other": "STARRED"})
                 self.assertEqual(inference_config(path), {"embeddings": False, "search-embedding": False})
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_adding_an_account_keeps_comments_and_formatting(self) -> None:
+        source = '# keep me\ntaxonomy = "t.json"   # trailing\n\n[accounts.personal]\nemail = "ada@example.com"  # first\n\n[inference]\nembeddings = false\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(source)
+            write_account(path, "vcl", "bob@example.com")
+            text = path.read_text()
+            self.assertTrue(text.startswith(source))
+            self.assertIn("# keep me", text)
+            self.assertIn("# trailing", text)
+            self.assertIn("# first", text)
+            expected = tomllib.loads(source)
+            expected["accounts"]["vcl"] = {"email": "bob@example.com"}
+            self.assertEqual(load_config(path), expected)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_repeating_init_with_the_same_email_leaves_the_file_alone(self) -> None:
+        source = '# keep me\n[accounts.personal]\nemail = "ada@example.com"\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(source)
+            os.chmod(path, 0o644)
+            write_account(path, "personal", "ada@example.com")
+            self.assertEqual(path.read_text(), source)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_a_layout_that_cannot_take_an_appended_table_is_rewritten(self) -> None:
+        source = 'accounts = { personal = { email = "ada@example.com" } }\n[future]\nkeep = true\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text(source)
+            write_account(path, "vcl", "bob@example.com")
+            self.assertEqual(
+                load_config(path),
+                {
+                    "accounts": {
+                        "personal": {"email": "ada@example.com"},
+                        "vcl": {"email": "bob@example.com"},
+                    },
+                    "future": {"keep": True},
+                },
+            )
 
     def test_legacy_rules_path_normalizes_without_losing_other_sections(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

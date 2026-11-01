@@ -49,6 +49,7 @@ client_secret*.json
 token.json
 tokens.json
 *.pem
+*.key
 age.key
 *.age
 
@@ -110,4 +111,6 @@ env/
 .coverage
 htmlcov/
 *.egg-info/
+build/
+dist/
 .tox/
