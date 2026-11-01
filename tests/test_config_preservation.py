@@ -71,7 +71,6 @@ name = "second"
                 self.assertEqual(takeout_label_map(path, "personal"), {"Custom/Label": "INBOX", "Other": "STARRED"})
                 self.assertEqual(inference_config(path), {"embeddings": False, "search-embedding": False})
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-                self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
 
     def test_legacy_rules_path_normalizes_without_losing_other_sections(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

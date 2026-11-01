@@ -37,3 +37,11 @@ def config_path(config_flag: str | None) -> Path:
     if config_flag:
         return Path(config_flag)
     return Path.home() / ".config" / "mailcrawl" / "config.toml"
+
+
+def ensure_private_directory(directory: Path) -> None:
+    """Create a directory as 0700. A directory that already exists keeps its mode."""
+    created = not directory.exists()
+    directory.mkdir(parents=True, exist_ok=True)
+    if created:
+        os.chmod(directory, 0o700)

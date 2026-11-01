@@ -14,7 +14,7 @@ from pathlib import Path
 
 from mailcrawl.clock import require_as_of
 from mailcrawl.inference import BoundaryError, enabled_points
-from mailcrawl.paths import UsageError, canonical_alias
+from mailcrawl.paths import UsageError, canonical_alias, ensure_private_directory
 from mailcrawl.textnorm import parse_address
 
 
@@ -348,8 +348,7 @@ def write_account(path: Path, alias: str, email: str) -> None:
     if isinstance(legacy_rules, str) and legacy_rules.strip():
         document["rules"] = {"path": _rules_value(legacy_rules)}
     content = "\n".join(_toml_table(document)) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    ensure_private_directory(path.parent)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary_path = Path(temporary)
     try:
