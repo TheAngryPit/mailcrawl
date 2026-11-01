@@ -19,7 +19,7 @@ from pathlib import Path
 from mailcrawl.configfile import DEFAULT_BATCH_SIZE, DEFAULT_MAX_TOKENS
 from mailcrawl.contract import GMAIL_LABEL_SQL
 from mailcrawl.inference import invoke
-from mailcrawl.paths import UsageError
+from mailcrawl.paths import UsageError, refuse_protected_path
 from mailcrawl.threads import image_gate, embeddable_image
 from mailcrawl.runtime_limits import MAX_BENCH_THREADS
 from mailcrawl.vectors import (
@@ -121,8 +121,7 @@ def run_bench(
         raise UsageError("truth is decisions or labels")
     if truth == "labels" and label_categories is None:
         raise UsageError("labels truth needs a taxonomy")
-    if any("db-v2" in part.lower() for part in source.parts):
-        raise UsageError("refusing a path that includes db-v2")
+    refuse_protected_path(source)
     if not source.is_file():
         raise UsageError("account is not initialized")
     before = _digest(source)
