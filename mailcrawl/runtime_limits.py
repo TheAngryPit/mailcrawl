@@ -16,6 +16,10 @@ MAX_IMAGE_BATCH_COUNT = 128
 MAX_BENCH_THREADS = 100_000
 
 
+class ContextTooLarge(UsageError):
+    """One thread is over the context budget. Batch passes leave it for review."""
+
+
 def response_bytes(stream, limit: int = MAX_HTTP_BYTES, *, timeout: float = 30) -> bytes:
     deadline = time.monotonic() + timeout
     chunks: list[bytes] = []
@@ -54,13 +58,21 @@ def request_bytes(payload: bytes) -> bytes:
     return payload
 
 
-def context_parts(parts, limit: int = MAX_CONTEXT_BYTES, *, transform=None) -> str:
+def context_parts(parts, limit: int = MAX_CONTEXT_BYTES, *, transform=None, clip: bool = False) -> str:
     kept: list[str] = []
     size = 0
     for part in parts:
-        text = str(part or "")
-        size += len(text.encode("utf-8")) + bool(kept)
+        encoded = str(part or "").encode("utf-8")
+        used = size + bool(kept)
+        size = used + len(encoded)
         if size > limit:
-            raise UsageError("thread text exceeds byte budget")
+            if not clip:
+                raise ContextTooLarge("thread text exceeds byte budget")
+            room = limit - used
+            if room > 0:
+                tail = encoded[:room].decode("utf-8", "ignore")
+                kept.append(tail if transform is None else transform(tail))
+            break
+        text = encoded.decode("utf-8")
         kept.append(text if transform is None else transform(text))
     return "\n".join(kept)

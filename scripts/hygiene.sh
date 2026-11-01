@@ -28,7 +28,7 @@ while IFS= read -r path; do
     testdata/*) ;;
     *)
       case "$base" in
-        .env*|*.db|*.db-wal|*.db-shm|*.sqlite|*.sqlite3|*.eml|*.mbox|*.jsonl|*credential*.json|client_secret*.json|*oauth*token*.json|token.json|tokens.json|age.key|*.age|*.pem|*.gguf|*.safetensors|*.onnx|*.npy)
+        .env*|*.db|*.db-wal|*.db-shm|*.sqlite|*.sqlite3|*.eml|*.mbox|*.jsonl|*credential*.json|client_secret*.json|*oauth*token*.json|token.json|tokens.json|age.key|*.key|*.age|*.pem|*.gguf|*.safetensors|*.onnx|*.npy)
           echo "tracked forbidden file: $path"
           fail=1
           ;;
@@ -72,6 +72,7 @@ ignored_ok "backup.jsonl"
 ignored_ok "models/embed.gguf"
 ignored_ok ".env"
 ignored_ok "age.key"
+ignored_ok "gog/thehive-backup-age.key"
 tracked_ok "testdata/fixtures/gog-export/v0/note.eml"
 tracked_ok "testdata/fixtures/gog-export/v0/export.json"
 tracked_ok "testdata/fixtures/example.db"

@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 
 from mailcrawl.clock import as_of
-from mailcrawl.paths import UsageError, canonical_alias
+from mailcrawl.paths import UsageError, canonical_alias, ensure_private_directory, refuse_protected_path
 from mailcrawl.schema import FTS_SQL, JEV_SQL, SCHEMA_SQL, TRIGRAM_SQL, USER_VERSION, V2_TABLES_SQL
 from mailcrawl.takeout_repair import repair_takeout
 from mailcrawl.textnorm import clean_body
@@ -355,8 +355,11 @@ def connect(path: Path | str) -> sqlite3.Connection:
     memory = target == ":memory:"
     if not memory:
         dest = Path(target)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(dest.parent, 0o700)
+        refuse_protected_path(dest)
+        dest = dest.resolve()
+        target = str(dest)
+        ensure_private_directory(dest.parent)
+        _create_private_file(dest)
     conn = sqlite3.connect(target)
     try:
         conn.row_factory = sqlite3.Row
@@ -369,17 +372,27 @@ def connect(path: Path | str) -> sqlite3.Connection:
             conn.execute("PRAGMA journal_mode = WAL")
         migrate(conn)
         if not memory:
-            os.chmod(target, 0o600)
+            for suffix in ("", "-wal", "-shm"):
+                sidecar = Path(f"{target}{suffix}")
+                if sidecar.exists():
+                    os.chmod(sidecar, 0o600)
         return conn
     except BaseException:
         conn.close()
         raise
 
 
+def _create_private_file(path: Path) -> None:
+    # SQLite gives -wal and -shm the mode of the database file, so create it private first.
+    try:
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except FileExistsError:
+        os.chmod(path, 0o600)
+
+
 def init_account(data: Path, alias: str, email: str) -> Path:
     canonical = canonical_alias(alias)
-    data.mkdir(parents=True, exist_ok=True)
-    os.chmod(data, 0o700)
+    ensure_private_directory(data)
     path = data / f"{canonical}.db"
     digest = hashlib.sha256(email.strip().lower().encode()).hexdigest()
     conn = connect(path)

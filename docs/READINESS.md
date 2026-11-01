@@ -2,6 +2,17 @@
 
 Audited `main` at `217995a71f23cee7b8356b5a2927a298bf417169` on 18 Oct 2026. The question is what stops a stranger from installing the general program and using it from the README. This pass did not change code. It did not use the owner's mailbox or the owner's config.
 
+## Status on main, 1 Nov 2026
+
+This audit is a record of 18 Oct. The items below were checked again against `main` at `92511d6` plus the review fixes.
+
+- Resolved. Must-fix 1 (`rules-v0.json` ships as package data, and `scripts/wheel-install.sh` runs the README quickstart from a wheel). Must-fix 2 (`HttpJev` uses the no-proxy, no-redirect opener). Must-fix 3 (a census of tests, testdata, and scripts finds only `example.*` domains). Must-fix 4 and 5 (the README installs first and passes `--rules`). Must-fix 7 (`pyproject.toml` declares MIT).
+- Resolved in the review fixes. Should-fix 1 (the README names Python 3.11.10, `pdftotext`, Pillow, and `sqlite-vec`). Should-fix 3 (tests assert 0600 and 0700 modes). Should-fix 5 (the AST fence covers network and process imports).
+- Partly resolved. Must-fix 6 (the README says schema v11, but its status line still omits `embed`, `knn`, `review`, and `jev`).
+- Still open. Should-fix 2 (starter config), should-fix 4 (history scan in CI), and every item under Later.
+
+---
+
 A wheel install does not survive `stats`. From `/tmp`, after `pip install .` into a fresh venv, `stats` exits 1 with an unhandled `FileNotFoundError`. The missing file is `site-packages/testdata/rules/rules-v0.json`.
 
 ## Ranked work

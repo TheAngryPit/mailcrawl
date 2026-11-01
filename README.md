@@ -21,6 +21,7 @@ mailcrawl --version
 
 The installed `mailcrawl` command and `python3 -m mailcrawl` use the same CLI.
 A checkout is directly importable only while its root is the working directory.
+mailcrawl needs Python 3.11.10 or newer. `pdftotext` from poppler is optional and adds PDF text. Pillow and `sqlite-vec` are optional. Only the image and vector commands and some tests use them.
 
 ## Quickstart
 
@@ -82,6 +83,14 @@ Local freshness does not prove that Gmail has been exported recently.
 nonempty SQLite WAL prevents guaranteed nonmutating inspection, they report
 that limitation instead of ignoring recent rows or changing shared memory.
 
+## Owner addresses
+
+Two account keys in `~/.config/mailcrawl/config.toml` say which mail is yours. `owners` and `domains` match recipients, so mail sent to you counts as mail to self. `owner_addresses` lists your own From addresses. A message from one of them counts as from you when the first `Authentication-Results` block shows Gmail DMARC and a DKIM pass aligned with the From domain. Without `owner_addresses`, only mail with the `SENT` label counts as from you. `from-me` reports the counts and `from-me --apply` stores them. `testdata/config/owners.synthetic.toml` shows both keys.
+
+## Hosted model calls
+
+The default `fake` Jev client and the local embedders stay on this machine. `jev --client http` and `search --jev-client http` post thread text, up to 1 MiB per call, to `https://api.typesafe.ai/v1/systemone`. They refuse to run until the config sets `allow_remote = true` under `[inference.jev]`. They also need `TYPESAFE_API_KEY` or `JEV_API_KEY` and the matching inference point, `jev-battery` or `search-reranker`. A thread over the 1 MiB budget is never sent. It waits for review. `review run` talks to the model named under `[inference.llm]`. It refuses a remote URL unless that block sets `allow_remote` and the URL is HTTPS.
+
 ## Human and agent surfaces
 
 The CLI supports JSON output. An external manifest connects it to CrawlBar
@@ -107,8 +116,9 @@ permission to change Gmail.
 ## Boundaries and roadmap
 
 Mailcrawl writes its own archive, never Gmail or the original export. Its
-normal read path does not use the network. Data directories use mode 0700 and
-files mode 0600. Bodies, subjects, addresses, credentials and real exports stay
+normal read path does not use the network. Directories mailcrawl creates use
+mode 0700, and a directory you point it at keeps its mode. Archive files, including
+the SQLite `-wal` and `-shm` files, use mode 0600. Bodies, subjects, addresses, credentials and real exports stay
 out of this repository; public fixtures use `example.com`.
 
 The optional external-producer handoff script is documented in the architecture
