@@ -6,6 +6,7 @@ from pathlib import Path
 
 from mailcrawl.bench import run_bench
 from mailcrawl.paths import UsageError, data_dir
+from mailcrawl.store import connect, init_account
 
 
 class ProtectedPathTest(unittest.TestCase):
@@ -21,6 +22,20 @@ class ProtectedPathTest(unittest.TestCase):
                     data_dir(str(path))
             with self.assertRaisesRegex(UsageError, "db-v2"):
                 run_bench(root / "alias" / "personal.db", ["fake"], 1)
+
+    def test_a_database_file_symlinked_into_the_protected_name_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "db-v2").mkdir()
+            protected = root / "db-v2" / "personal.db"
+            protected.write_bytes(b"")
+            (root / "plain").mkdir()
+            (root / "plain" / "personal.db").symlink_to(protected)
+            with self.assertRaisesRegex(UsageError, "db-v2"):
+                init_account(root / "plain", "personal", "ada@example.com")
+            with self.assertRaisesRegex(UsageError, "db-v2"):
+                connect(root / "plain" / "personal.db")
+            self.assertEqual(protected.read_bytes(), b"")
 
 
 if __name__ == "__main__":

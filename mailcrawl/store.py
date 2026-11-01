@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 
 from mailcrawl.clock import as_of
-from mailcrawl.paths import UsageError, canonical_alias, ensure_private_directory
+from mailcrawl.paths import UsageError, canonical_alias, ensure_private_directory, refuse_protected_path
 from mailcrawl.schema import FTS_SQL, JEV_SQL, SCHEMA_SQL, TRIGRAM_SQL, USER_VERSION, V2_TABLES_SQL
 from mailcrawl.takeout_repair import repair_takeout
 from mailcrawl.textnorm import clean_body
@@ -354,7 +354,9 @@ def connect(path: Path | str) -> sqlite3.Connection:
     target = str(path)
     memory = target == ":memory:"
     if not memory:
-        dest = Path(target)
+        dest = Path(target).resolve()
+        refuse_protected_path(dest)
+        target = str(dest)
         ensure_private_directory(dest.parent)
         _create_private_file(dest)
     conn = sqlite3.connect(target)
@@ -380,7 +382,7 @@ def _create_private_file(path: Path) -> None:
     try:
         os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     except FileExistsError:
-        pass
+        os.chmod(path, 0o600)
 
 
 def init_account(data: Path, alias: str, email: str) -> Path:

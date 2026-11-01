@@ -57,6 +57,25 @@ class PrivateFilesTest(unittest.TestCase):
             conn.close()
             legacy.close()
 
+    def test_a_symlinked_database_gets_private_sidecars_beside_the_real_file(self):
+        real = self.root / "real" / "personal.db"
+        real.parent.mkdir(mode=0o700)
+        legacy = sqlite3.connect(real)
+        legacy.execute("PRAGMA journal_mode = WAL")
+        legacy.execute("CREATE TABLE probe(x)")
+        legacy.commit()
+        os.chmod(real, 0o644)
+        (self.root / "link").mkdir()
+        alias = self.root / "link" / "personal.db"
+        alias.symlink_to(real)
+        conn = connect(alias)
+        try:
+            for suffix in ("", "-wal", "-shm"):
+                self.assertEqual(_mode(Path(f"{real}{suffix}")), 0o600, suffix)
+        finally:
+            conn.close()
+            legacy.close()
+
     def test_an_existing_directory_keeps_its_mode_but_its_files_are_private(self):
         shared = self.root / "shared"
         shared.mkdir()
