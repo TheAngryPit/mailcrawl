@@ -31,7 +31,7 @@ from mailcrawl.jev import (
     score_grey_band,
 )
 from mailcrawl.paths import UsageError
-from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES
+from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES, ContextTooLarge
 from mailcrawl.search import search_messages
 from mailcrawl.store import connect, index_message
 
@@ -468,6 +468,24 @@ class JevBatteryTest(unittest.TestCase):
                 self.assertEqual([hit["source"] for hit in ranked], ["jev"] * len(ranked))
                 search_messages(conn, "shared", jev=client, config=flags)
                 self.assertEqual(client.calls, 1)
+            finally:
+                conn.close()
+
+    def test_rerank_keeps_keyword_order_when_the_hits_exceed_the_context_budget(self) -> None:
+        class TooBig:
+            model_id = MODEL_ID
+            left_machine = True
+
+            def ask(self, state: str, questions: tuple[Question, ...]):
+                raise ContextTooLarge("thread text exceeds byte budget")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                _seed(conn)
+                plain = search_messages(conn, "shared", jev=None, config=None)
+                ranked = search_messages(conn, "shared", jev=TooBig(), config={"search-reranker": True})
+                self.assertEqual(ranked, plain)
             finally:
                 conn.close()
 

@@ -276,11 +276,14 @@ def rerank(
     if scores is None:
         state = _search_state(query, texts)
         questions = _search_questions(texts)
-        answered = invoke(
-            "search-reranker",
-            lambda: client.ask(state, questions),
-            config,
-        )
+        try:
+            answered = invoke(
+                "search-reranker",
+                lambda: client.ask(state, questions),
+                config,
+            )
+        except ContextTooLarge:
+            return ranked
         if answered is None:
             return ranked
         answers, model = answered
