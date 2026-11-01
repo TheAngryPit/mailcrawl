@@ -3,7 +3,7 @@ Local-first archive for mail you already exported. Pulls a local export into one
 
 ## Status
 
-mailcrawl is pre-alpha. This revision is schema v11, cleaned body text, the attachment interface, rules 0 to 8, and `stats` and `dry-run` counts. [The spec](docs/SPEC.md) is the behavior contract.
+mailcrawl is pre-alpha. This revision is schema v11, cleaned body text, the attachment interface, rules 0 to 8, and `stats` and `dry-run` counts. It also ships `embed`, `knn`, `jev`, `review`, `decide`, `bench`, and `from-me`. The embedding, Jev, and review commands stay off until config turns them on. [The spec](docs/SPEC.md) is the behavior contract.
 
 ## Why it exists
 
