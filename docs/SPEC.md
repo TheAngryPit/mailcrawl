@@ -1,6 +1,14 @@
 # mailcrawl: spec v0
 
-Status: schema v2 is in the tree. Idempotent import, cleaned `body_text`, FTS search, and the JSON CLI. Repo: `TheAngryPit/mailcrawl`. License: MIT.
+Current implementation: schema v11, import, FTS search, rules and review,
+optional inference, and crawler metadata, health and configured local refresh.
+Repo: `TheAngryPit/mailcrawl`. License: MIT.
+
+The phase sections below preserve the original design and its evidence. Their
+phase-specific scope statements are historical, not a complete inventory of the
+current CLI. See [README](../README.md) for implemented commands and
+[crawler architecture](CRAWLER_ARCHITECTURE.md) for local source receipts,
+health inspection, CrawlBar integration and the separate future Go decision.
 
 **Local-only.** mailcrawl archives mail that is already on disk. It does not open a network connection, does not read credentials, and does not write to Gmail. Unknown export shapes fail closed.
 
@@ -76,10 +84,9 @@ Phase 1 uses Python and keeps source exports and Gmail unchanged. It does all of
 The plan is a large initial archive from a Google Takeout mbox, then incremental imports through the gog API. That split keeps API quota and cost down.
 
 ```
-mailcrawl --json import mbox <file> --alias <thehive|vcl|personal> [--labels <labels.json>] [--taxonomy <catalogue.json>] [--max-import-mib <n>]
+mailcrawl --json import mbox <file> --alias <thehive|vcl|personal> [--labels <labels.json>] [--taxonomy <catalogue.json>]
 ```
 
-`--max-import-mib` scales the aggregate import budgets together. The default is 512, which gives 512 MiB read, 256 MiB of new image storage, 64 MiB of extracted text, and 100,000 records. The range is 1 to 65536. It does not change the per-line, per-message, or per-part limits. `import gog-export` takes the same flag.
 
 `--alias` and `--account` are synonyms on both import commands. `pessoal` still selects `personal`. The import is read-only toward the file and toward Gmail. It reads one message at a time and never loads the whole file. It never holds a whole message either: only the header block is buffered, and the body goes to the hash and the email parser in 64 KiB chunks. Base64 attachments are decoded straight from the parsed text. Peak memory follows the largest single message, not the file size or the message count. A test bounds peak process RSS growth below four times the largest message. When a message's key is already stored, its body is hashed but not parsed, because a duplicate, a conflict, and a row from another source need only the header block and the hash. A reimport therefore stays near the baseline, and a test bounds its RSS growth below a quarter of the first import's. Every connection sets `PRAGMA mmap_size = 0`, because some SQLite builds map the database file by default and mapped pages count as process RSS. It writes schema v2 through the `import gog-export` writer, so body cleaning, attachment parsing, headers, and FTS are the same. There is no new migration. A file whose first non-blank line is not an mbox `From ` line is `unsupported_schema` and exits 3. A missing file is `missing_file` and exits 1. The JSON result adds `n_refused` and `n_reconciled` to the existing counts on both import commands.
 

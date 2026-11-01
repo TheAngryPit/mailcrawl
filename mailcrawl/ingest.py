@@ -35,6 +35,7 @@ from mailcrawl.threads import embeddable_image, mark_image_only
 from mailcrawl.version import mailcrawl_version, provenance_hash
 
 Item = LabelRec | MessageRec | Refused
+_DIAGNOSTIC_SAMPLE_LIMIT = 100
 
 
 class ImportResult:
@@ -72,8 +73,11 @@ def import_gog_export(
     taxonomy_path: Path | None,
     account_email: str,
     aliases: frozenset[str] = frozenset(),
+    limits: inputio.ImportLimits | None = None,
+    on_success: Callable[[ImportResult], None] | None = None,
 ) -> ImportResult:
-    parsed, manifest_sha = _load_export(export_dir)
+    policy = inputio.DEFAULT_GOG_IMPORT_LIMITS if limits is None else limits
+    parsed, manifest_sha = _load_export(export_dir, limits=policy)
     account_id = _account_id(conn, alias)
     return _ingest(
         conn,
@@ -86,6 +90,8 @@ def import_gog_export(
         catalogue=load_catalogue_entries(taxonomy_path, alias),
         account_email=account_email,
         aliases=aliases,
+        limits=policy,
+        on_success=on_success,
     )
 
 
@@ -99,7 +105,10 @@ def import_mbox(
     account_email: str,
     label_map: dict[str, str] | None = None,
     aliases: frozenset[str] = frozenset(),
+    limits: inputio.ImportLimits | None = None,
+    on_success: Callable[[ImportResult], None] | None = None,
 ) -> ImportResult:
+    policy = inputio.DEFAULT_MBOX_IMPORT_LIMITS if limits is None else limits
     account_id = _account_id(conn, alias)
     mapping = checked_label_map(label_map)
     seed = load_labels(labels_path) if labels_path is not None else ()
@@ -116,13 +125,20 @@ def import_mbox(
         known,
         seed,
         label_map=mapping,
+        limits=policy,
         stored=lambda key: conn.execute(
             "SELECT 1 FROM messages WHERE account_id = ? AND gmail_message_id = ?",
             (account_id, key),
         ).fetchone()
         is not None,
     )
-    result = _ingest(
+    def finish(result: ImportResult) -> None:
+        report = repair_takeout(conn, label_map, aliases=aliases)
+        result.takeout_unmapped = report.unmapped
+        if on_success is not None:
+            on_success(result)
+
+    return _ingest(
         conn,
         account_id=account_id,
         alias=alias,
@@ -133,11 +149,9 @@ def import_mbox(
         catalogue=load_catalogue_entries(taxonomy_path, alias),
         account_email=account_email,
         aliases=aliases,
+        limits=policy,
+        on_success=finish,
     )
-    report = repair_takeout(conn, label_map, aliases=aliases)
-    result.takeout_unmapped = report.unmapped
-    conn.commit()
-    return result
 
 
 def _account_id(conn: sqlite3.Connection, alias: str) -> int:
@@ -162,6 +176,8 @@ def _ingest(
     catalogue: dict[str, dict[str, str | None]],
     account_email: str,
     aliases: frozenset[str] = frozenset(),
+    limits: inputio.ImportLimits | None = None,
+    on_success: Callable[[ImportResult], None] | None = None,
 ) -> ImportResult:
     version = mailcrawl_version()
     me = account_email.strip().lower()
@@ -170,8 +186,11 @@ def _ingest(
     conflicts: list[str] = []
     reconciled: list[dict[str, str]] = []
     refused: list[dict[str, object]] = []
+    refused_count = 0
+    input_records = 0
     known_labels = {row[0] for row in conn.execute("SELECT gmail_label_id FROM labels WHERE account_id = ?", (account_id,))}
-    budget = inputio.ImportBudget()
+    policy = inputio.DEFAULT_GOG_IMPORT_LIMITS if limits is None else limits
+    budget = inputio.ImportBudget(limits=policy)
     budget_token = inputio.import_budget.set(budget)
     try:
         for item in items:
@@ -181,15 +200,24 @@ def _ingest(
                     known_labels.add(item.gmail_label_id)
                 continue
             if isinstance(item, Refused):
-                refused.append({"offset": item.offset, "reason": item.reason})
+                input_records += 1
+                if policy.max_records is not None and input_records > policy.max_records:
+                    raise inputio.ImportExhausted("import record limit exceeded")
+                refused_count += 1
+                if len(refused) < _DIAGNOSTIC_SAMPLE_LIMIT:
+                    refused.append({"offset": item.offset, "reason": item.reason})
                 continue
+            input_records += 1
+            if policy.max_records is not None and input_records > policy.max_records:
+                raise inputio.ImportExhausted("import record limit exceeded")
             for label_id in item.label_ids:
                 if label_id not in known_labels and (source == "mbox" or not is_pseudo_label(label_id)):
                     _upsert_label(conn, account_id, LabelRec(label_id, label_id, infer_kind(label_id)), catalogue)
                     known_labels.add(label_id)
-            image_size = sum(len(a.image_bytes or b"") for a in item.attachments)
-            if any(len(a.image_bytes or b"") > inputio.MAX_IMAGE_BYTES for a in item.attachments) or budget.image_bytes + image_size > inputio.MAX_IMPORT_IMAGE_BYTES:
-                refused.append({"offset": 0, "reason": "image_limit"})
+            if any(len(a.image_bytes or b"") > inputio.MAX_IMAGE_BYTES for a in item.attachments):
+                refused_count += 1
+                if len(refused) < _DIAGNOSTIC_SAMPLE_LIMIT:
+                    refused.append({"offset": 0, "reason": "image_limit"})
                 continue
             outcome, kept_sha = _upsert_message(
                 conn,
@@ -203,17 +231,19 @@ def _ingest(
             )
             counts[outcome] += 1
             if outcome == "conflict":
-                conflicts.append(item.gmail_message_id)
+                if len(conflicts) < _DIAGNOSTIC_SAMPLE_LIMIT:
+                    conflicts.append(item.gmail_message_id)
             elif outcome == "reconciled":
-                reconciled.append(
-                    {
-                        "gmail_message_id": item.gmail_message_id,
-                        "kept_raw_sha256": kept_sha,
-                        "seen_raw_sha256": item.raw_sha256,
-                    }
-                )
+                if len(reconciled) < _DIAGNOSTIC_SAMPLE_LIMIT:
+                    reconciled.append(
+                        {
+                            "gmail_message_id": item.gmail_message_id,
+                            "kept_raw_sha256": kept_sha,
+                            "seen_raw_sha256": item.raw_sha256,
+                        }
+                    )
         manifest_sha = ref()
-        n_seen = sum(counts.values()) + len(refused)
+        n_seen = sum(counts.values()) + refused_count
         _drop_empty_provisional_threads(conn, account_id)
         _recompute_threads(conn, account_id)
         _recompute_senders(conn, account_id)
@@ -264,32 +294,41 @@ def _ingest(
                 "n_error": counts["conflict"],
                 "n_new": counts["new"],
                 "n_reconciled": counts["reconciled"],
-                "n_refused": len(refused),
+                "n_refused": refused_count,
                 "n_seen": n_seen,
                 "reconciled": reconciled,
                 "refused": refused,
                 "source": source,
             },
         )
+        result = ImportResult(
+            n_seen=n_seen,
+            n_new=counts["new"],
+            n_dup=counts["dup"],
+            n_error=counts["conflict"],
+            n_refused=refused_count,
+            n_reconciled=counts["reconciled"],
+        )
+        if on_success is not None:
+            on_success(result)
         conn.commit()
-    except Exception:
-        conn.rollback()
-        for path in budget.created_images:
-            path.unlink(missing_ok=True)
+    except BaseException:
+        try:
+            conn.rollback()
+        finally:
+            budget.remove_created_images()
         raise
     finally:
         inputio.import_budget.reset(budget_token)
-    return ImportResult(
-        n_seen=n_seen,
-        n_new=counts["new"],
-        n_dup=counts["dup"],
-        n_error=counts["conflict"],
-        n_refused=len(refused),
-        n_reconciled=counts["reconciled"],
-    )
+        budget.close()
+    return result
 
 
-def _load_export(export_dir: Path) -> tuple[ExportDocument, str]:
+def _load_export(
+    export_dir: Path,
+    *,
+    limits: inputio.ImportLimits | None = None,
+) -> tuple[ExportDocument, str]:
     export_path = export_dir / "export.json"
     try:
         reader = inputio.SafeRoot(export_dir)
@@ -300,7 +339,7 @@ def _load_export(export_dir: Path) -> tuple[ExportDocument, str]:
         raw_file = reader.read("export.json", inputio.MAX_MANIFEST_BYTES)
     except FileNotFoundError:
         reader.close()
-        return load_native(export_dir)
+        return load_native(export_dir, limits=limits)
     except inputio.UnsafeInput as exc:
         reader.close()
         from mailcrawl.gognative import ExportInvalid
@@ -313,7 +352,12 @@ def _load_export(export_dir: Path) -> tuple[ExportDocument, str]:
     except (ValueError, RecursionError) as exc:
         reader.close()
         raise ValueError("invalid export manifest JSON") from exc
-    return parse_export(document, reader), hashlib.sha256(raw_file).hexdigest()
+    try:
+        parsed = parse_export(document, reader, limits=limits)
+    except BaseException:
+        reader.close()
+        raise
+    return parsed, hashlib.sha256(raw_file).hexdigest()
 
 
 def _upsert_label(
@@ -571,8 +615,6 @@ def _keep_image(conn: sqlite3.Connection, attachment: AttachmentRec) -> str | No
     if len(blob) > inputio.MAX_IMAGE_BYTES:
         raise inputio.InputLimit("image byte limit exceeded")
     budget = inputio.import_budget.get()
-    if budget is not None and budget.image_bytes + len(blob) > inputio.MAX_IMPORT_IMAGE_BYTES:
-        raise inputio.InputLimit("import image byte limit exceeded")
     directory = Path(db_file).parent / "images"
     directory.mkdir(mode=0o700, exist_ok=True)
     digest = hashlib.sha256(blob).hexdigest()
@@ -585,11 +627,24 @@ def _keep_image(conn: sqlite3.Connection, attachment: AttachmentRec) -> str | No
             with inputio.SafeRoot(directory) as reader:
                 reader.read(digest, inputio.MAX_IMAGE_BYTES)
         else:
-            if budget is not None:
-                budget.created_images.append(path)
-                budget.image_bytes += len(blob)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(blob)
+            try:
+                if (
+                    budget is not None
+                    and budget.limits.max_image_bytes is not None
+                    and budget.image_bytes + len(blob) > budget.limits.max_image_bytes
+                ):
+                    raise inputio.ImportExhausted("import image byte limit exceeded")
+                if budget is not None:
+                    budget.track_image(path)
+                    budget.image_bytes += len(blob)
+                with os.fdopen(fd, "wb") as handle:
+                    fd = -1
+                    handle.write(blob)
+            except BaseException:
+                if fd >= 0:
+                    os.close(fd)
+                    os.unlink(digest, dir_fd=directory_fd)
+                raise
     finally:
         os.close(directory_fd)
     return str(path)

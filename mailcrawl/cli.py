@@ -8,9 +8,9 @@ import csv
 import json
 import sqlite3
 import sys
+from dataclasses import replace
 from pathlib import Path
 
-from mailcrawl import inputio
 from mailcrawl.advise import StubAdvisor
 from mailcrawl.bench import run_bench
 from mailcrawl.clock import as_of
@@ -78,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
         code = exc.code
         return 2 if code is None else int(code)
     try:
+        if args.command in ("metadata", "status", "doctor", "sync"):
+            return _control(args)
         if args.command == "init":
             return _init(args)
         if args.command == "import":
@@ -139,7 +141,19 @@ def _parser() -> argparse.ArgumentParser:
     common.add_argument("--home", "--db", dest="home")
     common.add_argument("--config")
     parser = argparse.ArgumentParser(prog="mailcrawl", parents=[common])
+    from mailcrawl.version import VERSION
+    parser.add_argument("--version", action="version", version=VERSION)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    for command in ("metadata", "status", "doctor", "sync"):
+        operation = sub.add_parser(command)
+        operation.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        operation.add_argument("--home", "--db", dest="home", default=argparse.SUPPRESS)
+        operation.add_argument("--config", default=argparse.SUPPRESS)
+        if command != "metadata":
+            operation.add_argument("--account")
+        if command == "sync":
+            operation.add_argument("--source")
 
     init = sub.add_parser("init")
     init.add_argument("--account", action="append", dest="account_list")
@@ -152,13 +166,16 @@ def _parser() -> argparse.ArgumentParser:
     gog.add_argument("--dir", required=True)
     gog.add_argument("--taxonomy")
     gog.add_argument("--account", "--alias", dest="account", required=True)
-    gog.add_argument("--max-import-mib", type=int)
     mbox = imp_sub.add_parser("mbox")
     mbox.add_argument("file")
     mbox.add_argument("--account", "--alias", dest="account", required=True)
     mbox.add_argument("--labels")
     mbox.add_argument("--taxonomy")
-    mbox.add_argument("--max-import-mib", type=int)
+    for import_command in (gog, mbox):
+        import_command.add_argument("--max-bytes", type=int, dest="max_total_bytes")
+        import_command.add_argument("--max-records", type=int)
+        import_command.add_argument("--max-image-bytes", type=int)
+        import_command.add_argument("--max-extract-bytes", type=int)
 
     takeout = sub.add_parser("takeout")
     takeout_sub = takeout.add_subparsers(dest="takeout_command", required=True)
@@ -175,6 +192,7 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument("--since", type=int)
     search.add_argument("--until", type=int)
     search.add_argument("--semantic", action="store_true")
+    search.add_argument("--read-only", action="store_true")
     search.add_argument("--vec-weight", type=float, default=1.0)
     search.add_argument("--keyword-weight", type=float, default=1.0)
     search.add_argument("--k", type=int, default=10)
@@ -261,6 +279,25 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _control(args: argparse.Namespace) -> int:
+    from mailcrawl import control
+    from mailcrawl.sources import sync_sources
+    if args.command == "metadata":
+        document = control.metadata()
+    else:
+        home = data_dir(args.home)
+        config = config_path(args.config)
+        account = canonical_alias(args.account) if args.account else None
+        if args.command == "sync":
+            document = sync_sources(home, config, source_id=args.source, account=account)
+        else:
+            document = getattr(control, args.command)(home, config, account)
+    _emit(args, document, json.dumps(document, ensure_ascii=False, indent=2))
+    if args.command == "sync":
+        return 0 if document["ok"] else 1
+    return 0 if args.command == "metadata" or document.get("state") == "ready" else 1
+
+
 def _init(args: argparse.Namespace) -> int:
     names = _init_aliases(args)
     if not names:
@@ -287,6 +324,13 @@ def _init(args: argparse.Namespace) -> int:
 
 
 def _import(args: argparse.Namespace) -> int:
+    from mailcrawl import inputio
+    base_limits = (inputio.DEFAULT_GOG_IMPORT_LIMITS if args.import_command == "gog-export"
+                   else inputio.DEFAULT_MBOX_IMPORT_LIMITS)
+    overrides = {field: getattr(args, field) for field in
+                 ("max_total_bytes", "max_records", "max_image_bytes", "max_extract_bytes")
+                 if getattr(args, field) is not None}
+    limits = replace(base_limits, **overrides)
     alias = canonical_alias(args.account)
     cfg = config_path(args.config)
     email = account_email(cfg, alias)
@@ -297,31 +341,32 @@ def _import(args: argparse.Namespace) -> int:
     conn = connect(db_path)
     try:
         result: ImportResult
-        with inputio.scaled_import_limits(args.max_import_mib):
-            if args.import_command == "gog-export":
-                aliases = owner_addresses(cfg, alias)
-                result = import_gog_export(
-                    conn,
-                    alias=alias,
-                    export_dir=Path(args.dir),
-                    taxonomy_path=catalogue,
-                    account_email=email,
-                    aliases=aliases,
-                )
-            elif args.import_command == "mbox":
-                aliases = owner_addresses(cfg, alias)
-                result = import_mbox(
-                    conn,
-                    alias=alias,
-                    mbox_path=Path(args.file),
-                    label_map=takeout_label_map(cfg, alias),
-                    labels_path=Path(args.labels) if args.labels else None,
-                    taxonomy_path=catalogue,
-                    account_email=email,
-                    aliases=aliases,
-                )
-            else:
-                raise UsageError("unknown import command")
+        if args.import_command == "gog-export":
+            aliases = owner_addresses(cfg, alias)
+            result = import_gog_export(
+                conn,
+                alias=alias,
+                export_dir=Path(args.dir),
+                taxonomy_path=catalogue,
+                account_email=email,
+                aliases=aliases,
+                limits=limits,
+            )
+        elif args.import_command == "mbox":
+            aliases = owner_addresses(cfg, alias)
+            result = import_mbox(
+                conn,
+                alias=alias,
+                mbox_path=Path(args.file),
+                label_map=takeout_label_map(cfg, alias),
+                labels_path=Path(args.labels) if args.labels else None,
+                taxonomy_path=catalogue,
+                account_email=email,
+                aliases=aliases,
+                limits=limits,
+            )
+        else:
+            raise UsageError("unknown import command")
         absent = _taxonomy_warnings(conn, alias, catalogue)
     finally:
         conn.close()
@@ -373,35 +418,47 @@ def _search(args: argparse.Namespace) -> int:
         raise UsageError("account is not initialized")
     if args.k < 1:
         raise UsageError("k needs a positive count")
-    flags = inference_config(config_path(args.config))
-    embedder = None
-    if "search-embedding" in enabled_points(flags):
-        embedder = _open_embedder(args)
-    jev = None
-    if "search-reranker" in enabled_points(flags):
-        jev = open_client(args.jev_client, allow_remote=jev_allow_remote(config_path(args.config)))
-    conn = connect(db_path)
-    try:
-        hits = search_messages(
-            conn,
-            args.query,
-            sender=args.sender,
-            label=args.label,
-            mime=args.mime,
-            image_only=1 if args.image_only else None,
-            since=args.since,
-            until=args.until,
-            embedder=embedder,
-            jev=jev,
-            config=flags,
-            fusion="rrf" if args.semantic else "keyword",
-            keyword_weight=args.keyword_weight,
-            vec_weight=args.vec_weight,
-            k=args.k,
-        )
-    finally:
-        conn.close()
-    _emit(args, {"hits": hits, "ok": True, "query": args.query})
+    options = {
+        "sender": args.sender,
+        "label": args.label,
+        "mime": args.mime,
+        "image_only": 1 if args.image_only else None,
+        "since": args.since,
+        "until": args.until,
+        "fusion": "rrf" if args.semantic else "keyword",
+        "keyword_weight": args.keyword_weight,
+        "vec_weight": args.vec_weight,
+        "k": args.k,
+    }
+    if args.read_only:
+        from mailcrawl.control import readonly_archive
+
+        with readonly_archive(db_path, account=alias) as conn:
+            hits = search_messages(conn, args.query, config={}, **options)
+    else:
+        flags = inference_config(config_path(args.config))
+        embedder = None
+        if "search-embedding" in enabled_points(flags):
+            embedder = _open_embedder(args)
+        jev = None
+        if "search-reranker" in enabled_points(flags):
+            jev = open_client(args.jev_client, allow_remote=jev_allow_remote(config_path(args.config)))
+        conn = connect(db_path)
+        try:
+            hits = search_messages(
+                conn,
+                args.query,
+                embedder=embedder,
+                jev=jev,
+                config=flags,
+                **options,
+            )
+        finally:
+            conn.close()
+    result = {"hits": hits, "ok": True, "query": args.query}
+    if args.read_only:
+        result["read_only"] = True
+    _emit(args, result)
     return 0
 
 

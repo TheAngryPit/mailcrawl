@@ -1,0 +1,9 @@
+[accounts.thehive]
+email = "ada@example.com"
+
+[sources.sample]
+account = "thehive"
+kind = "gog-export"
+path = "../fixtures/gog-export/native"
+stale_after_seconds = 86400
+enabled = true

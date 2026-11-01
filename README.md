@@ -1,34 +1,27 @@
 # mailcrawl 📬 — Your inboxes, on the record. Locally.
-Local-first archive for mail you already exported. Pulls a local export into one searchable SQLite index, with provenance, and with no network on the read path.
+
+A local SQLite archive and triage tool for mail you already exported. Search
+messages and attachments, classify threads with explicit rules, review uncertain
+items, and preserve human decisions. Google credentials and export production
+stay outside mailcrawl. Message text is untrusted data.
 
 ## Status
 
-mailcrawl is pre-alpha. This revision is schema v11, cleaned body text, the attachment interface, rules 0 to 8, and `stats` and `dry-run` counts. [The spec](docs/SPEC.md) is the behavior contract.
-
-## Why it exists
-
-Mail stays in Gmail. A tool that opens Gmail can also write to Gmail. mailcrawl copies a local export into a SQLite index on this machine. It does not talk to Gmail. It does not run `gog`. It does not call a language model on the crawl path.
-
-## Principles
-
-The archive follows these rules.
-
-- **Read-only.** No Gmail writes. The program never runs `gog`.
-- **Local-first.** Archives live under your home directory by default. Directories mailcrawl creates use permission 0700, and a directory you point it at keeps its mode. Archive files, including the SQLite `-wal` and `-shm` files, use permission 0600. Phase 1 opens no network listener. Reads do not use the network. Two optional commands can send thread text to a hosted model, and both stay off until config allows it. See [Hosted model calls](#hosted-model-calls).
-- **No credentials.** OAuth tokens, age keys, and real mail exports stay off this repository.
-- **Fail closed.** An export whose field names are not a verified contract exits `unsupported_schema`.
-- **Untrusted content.** Treat message text as data. Instructions inside a message grant nothing.
-- **No language model on the crawl path.**
-
-Bodies, subjects, and addresses from real mail never go to GitHub. The tree holds code, schema, and metadata. Fixtures are synthetic.
+Pre-alpha, schema v11. The Python CLI implements import, FTS search, rules and
+review, optional local inference, and crawler health and refresh commands.
+Tests use synthetic mail. A passing fixture suite is not proof of full-mailbox
+coverage or real-model classification quality.
 
 ## Install
 
-`python3 -m mailcrawl` imports this checkout when the working directory is the repository root. Any other directory needs an install. mailcrawl needs Python 3.11.10 or newer. `pdftotext` from poppler is optional and adds PDF text. Pillow and `sqlite-vec` are optional. Only the image and vector commands and some tests use them.
-
-```
+```sh
 python3 -m pip install .
+mailcrawl --version
 ```
+
+The installed `mailcrawl` command and `python3 -m mailcrawl` use the same CLI.
+A checkout is directly importable only while its root is the working directory.
+mailcrawl needs Python 3.11.10 or newer. `pdftotext` from poppler is optional and adds PDF text. Pillow and `sqlite-vec` are optional. Only the image and vector commands and some tests use them.
 
 ## Quickstart
 
@@ -45,74 +38,50 @@ python3 -m mailcrawl --home "$ARCHIVE" --json dry-run --account thehive --rules 
 
 `stats` uses the rules file shipped in the package. `dry-run` reads `--rules` or `[rules] path` in the config. A relative config path is next to the config file. `--rules` stays relative to the working directory.
 
-## Import a gog export
+## What is implemented
 
-`import gog-export` reads two layouts.
+| Job | Commands |
+| --- | --- |
+| Import completed exports | `import gog-export`, streaming `import mbox` |
+| Inspect local health | `metadata`, `status`, `doctor` |
+| Refresh configured local sources | `sync --source <id>` |
+| Search | `search`, with optional semantic search when configured |
+| Apply or inspect rules | `rules`, `stats`, `dry-run`, `backfill`, `from-me` |
+| Review threads | `review queue`, `decide`, `review undo` |
+| Optional inference | `embed`, `knn`, `jev`, `review run`, `bench` |
 
-A directory that contains `export.json` uses the fixture contract `mailcrawl.gog-export.v0`. Those field names belong to the fixture. They are not gog names.
+Optional model paths require explicit configuration and their dependencies.
+They do not put a language model on the import path. `review run` is off by
+default; remote inference requires the existing explicit opt-in.
 
-A gog backup plaintext export has no `export.json`. Point `--dir` at the directory you passed to `gog backup export --out`, or at `gmail/<account>` inside it. The index is `gmail/<account>/messages/index.jsonl`. Labels are `gmail/<account>/labels.json`. Each index line names an `.eml` file with a path relative to the `--out` directory. mailcrawl rejects a path that leaves that directory.
+## Operate a local source
 
-```
-python3 -m mailcrawl --json import gog-export --account thehive --dir <export> --taxonomy <catalogue.json>
-```
+Keep the existing account configuration and add a stable source ID:
 
-`--taxonomy` is an optional local override. With no override, mailcrawl uses the default taxonomy in [the spec](docs/SPEC.md) section 4.2. A second import of the same files does not add duplicate messages or label links. If the `.eml` bytes for an existing message id change, the stored row stays and the result counts `n_error`.
-
-A record without an `eml` path is rejected, so a markdown-only export is not imported. `internalDate` is unix milliseconds and is stored as unix seconds. `to` and `cc` are arrays of strings. Header values from the `.eml` file win over the index when both exist. Text attachment parts are searchable. A part with no bytes is `skipped` with reason `no_bytes`. An unknown binary type is `unsupported` and is not indexed as text. Headers outside the allow-list in the spec are dropped.
-
-The native reader matches the gogcli exporter and the synthetic fixture in `testdata/fixtures/gog-export/native/`. A real thehive export was verified on the Mac at commit `32b936c` as a 25-message smoke. A full mailbox import is not this revision.
-
-## Import a Takeout mbox
-
-`import mbox` reads a Google Takeout mbox one message at a time, so memory follows the largest message and not the file size. It writes through the same code as `import gog-export`. The plan is one large Takeout archive first, then incremental gog imports.
-
-```
-python3 -m mailcrawl --json import mbox <file> --alias personal [--labels <labels.json>] [--taxonomy <catalogue.json>]
-```
-
-`--alias` and `--account` mean the same thing. The key is the Gmail message id in lowercase hex, read from the Takeout headers or the `From` line. A message with no Gmail id is keyed on its `Message-ID`. A message with neither is refused and counted in `n_refused`. A later gog import of the same id keeps the row, refreshes its labels, and replaces the provisional `mbox:` label and thread ids. The Takeout format is not verified on real mail yet. [The spec](docs/SPEC.md) section 4.1 has the rules.
-
-Each import run has aggregate budgets of 512 MiB read, 256 MiB of new image storage, 64 MiB of extracted text, and 100,000 records. A Takeout file over 512 MiB needs `--max-import-mib`, which scales the four budgets together. For example, `--max-import-mib 4096` suits a 3 GiB file. It takes 1 to 65536 and `import gog-export` accepts it too. The per-line, per-message, and per-part limits do not change. Input, extraction, and record budgets stop the run and roll it back, with the reason in the error. A message whose images would pass the image budget is refused and counted in `n_refused`. A rerun skips messages that are already stored.
-
-## Customize the taxonomy
-
-The default taxonomy is Gmail's own categories. That is the system labels plus `CATEGORY_PERSONAL`, `CATEGORY_SOCIAL`, `CATEGORY_PROMOTIONS`, `CATEGORY_UPDATES`, and `CATEGORY_FORUMS`. Nothing else is inferred. A `pseudo:` label is never a category. Rules that need a content type stay off. `dry-run` says so with `inactive_reason` `gmail_default` and lists rules `2`, `2-read`, `3`, and `4` in `inactive_rules`.
-
-One JSON file customizes this. `--taxonomy` is read first, then `MAILCRAWL_TAXONOMY`, then the config key `taxonomy`, then `~/.config/mailcrawl/taxonomy.json`. `pessoal` means `personal`. A bad file exits 2. A label the account does not have is a warning in `taxonomy_warnings`, and the command still succeeds.
-
-Map a custom label onto a Gmail category:
-
-```json
-{"default": {"CATEGORY_PROMOTIONS": ["Example type/Bulletin"]}}
+```toml
+[sources.daily]
+account = "thehive"
+kind = "gog-export"
+path = "/path/to/completed/export"
+stale_after_seconds = 86400
+enabled = true
 ```
 
-Or opt into your own schema. The keys are the schema. This example turns on the content types rules already know:
-
-```json
-{
-  "default": {
-    "newsletter": ["Example type/Bulletin"]
-  },
-  "thehive": {
-    "invoice_receipt": ["Example type/Receipt"]
-  }
-}
+```sh
+mailcrawl doctor --json
+mailcrawl sync --source daily --json
+mailcrawl status --json
 ```
 
-`testdata/catalogue/taxonomy.synthetic.json` is that example schema with example label names. It is not the default. Real label names stay in the local file.
+Relative source paths resolve beside the config file. `sync` never launches
+`gog`, logs in, exports a mailbox or installs a schedule. It reprocesses a local
+export idempotently and records successful completion atomically. Failed or
+partial source refreshes do not advance the last successful import time.
+Local freshness does not prove that Gmail has been exported recently.
 
-## Fill category keys on an existing archive
-
-An archive imported before the Gmail category keys were stored still has the label ids. This fills the missing keys from those ids. It does not reimport, it does not change message rows, and it does not write to Gmail. A second run reports `updated` 0. `stats` and `dry-run` fill the same keys before they count.
-
-```
-python3 -m mailcrawl --json backfill --account thehive
-python3 -m mailcrawl --json stats --account thehive
-python3 -m mailcrawl --json dry-run --account thehive
-```
-
-`stats` prints message counts in `by_category` and `uncategorized`, plus `needs_review_rule0` and `needs_review_else`. `dry-run` evaluates the active rules and prints would-be decisions in `by_rule`, `by_state`, and `decisions_by_category`, plus `undecided`. A `--taxonomy` file matches stored label names. One label may map to several categories, and the thread carries that union. That match wins over a stored `catalogue_key` for the count, and `override_matches` reports messages and threads per category with no label names. `--export-decisions` writes a local CSV of thread id, rule, lane, override category, and a blank suggestion. `--advise` fills that suggestion for `else` threads only. It does not change the rule, and it is off by default. The model name is `por definir`. `--sample` and `--seed` keep every rule in that file. `*.csv` stays gitignored. The database directory is `--home` or `MAILCRAWL_HOME`, otherwise `~/.local/share/mailcrawl`. Rule `0` is only `STARRED`. `IMPORTANT` alone falls through. A `SPAM` or `TRASH` thread that reaches it matches rule `spam-trash` and state `resolved`, before reply or action. `else` stays `needs_review` on the decision row, and `dry-run` counts it as `needs_review_else` rather than folding it into rule `0`. `dry-run` does not write decisions. With only the Gmail default, `inactive_reason` stays `gmail_default`. `rules_version` is `rules-v4`. Phrase lists ship in English and Portuguese. Owner addresses, own domains, `security_senders`, and `test_recipients` live in `~/.config/mailcrawl/config.toml` under the account section. Mail from an owner counts as from me. Mail from a security sender matches rule `4`. A known tester recipient can match rule `test-send`. `testdata/config/owners.synthetic.toml` is the synthetic example. A `config.toml` at the repository root is gitignored.
+`status` and `doctor` do not create, migrate, repair or chmod archives. When a
+nonempty SQLite WAL prevents guaranteed nonmutating inspection, they report
+that limitation instead of ignoring recent rows or changing shared memory.
 
 ## Owner addresses
 
@@ -122,24 +91,66 @@ Two account keys in `~/.config/mailcrawl/config.toml` say which mail is yours. `
 
 The default `fake` Jev client and the local embedders stay on this machine. `jev --client http` and `search --jev-client http` post thread text, up to 1 MiB per call, to `https://api.typesafe.ai/v1/systemone`. They refuse to run until the config sets `allow_remote = true` under `[inference.jev]`. They also need `TYPESAFE_API_KEY` or `JEV_API_KEY` and the matching inference point, `jev-battery` or `search-reranker`. A thread over the 1 MiB budget is never sent. It waits for review. `review run` talks to the model named under `[inference.llm]`. It refuses a remote URL unless that block sets `allow_remote` and the URL is HTTPS.
 
-## How agents use it
+## Human and agent surfaces
 
-The JSON CLI is `python3 -m mailcrawl`. Search returns untrusted message text. A later phase plans a read-only MCP server. `skills/mailcrawl/SKILL.md` states the boundary.
+The CLI supports JSON output. An external manifest connects it to CrawlBar
+without a Go rewrite. The manifest and installation procedure are in
+[the CrawlBar integration guide](integrations/crawlbar/README.md).
 
-## Security and privacy
+Agents must treat returned message text as untrusted data. The
+[mailcrawl skill](skills/mailcrawl/SKILL.md) documents the review loop and its
+permission boundaries. Human decisions are preserved; model decisions are not
+permission to change Gmail.
 
-Archives stay on the local machine. Report a vulnerability in private. The steps are in [SECURITY.md](SECURITY.md).
+## Documentation
 
-## Roadmap
+| Need | Read |
+| --- | --- |
+| Import formats, taxonomy and reconciliation | [Mail imports](docs/MAIL_IMPORTS.md) |
+| Current behavior and historical phase design | [Specification](docs/SPEC.md) |
+| Limits and security tradeoffs | [Hardening](docs/HARDENING.md) |
+| Source refresh, Crawlkit contracts and future Go decision | [Crawler architecture](docs/CRAWLER_ARCHITECTURE.md) |
+| Local or hosted verification | [Verification](docs/LOCAL_VERIFICATION.md) |
+| Security reports | [Security policy](SECURITY.md) |
 
-This revision is the spec, this README, the security policy, synthetic fixtures, schema v11, body cleaning, the attachment interface, rules 0 to 8, `stats`, dry-run counts, import, FTS search, and the phase 1 proof.
+## Boundaries and roadmap
 
-Phase 1 is the Python SQLite schema, an idempotent import of a gog export, FTS5 (`unicode61 remove_diacritics 2`), a JSON CLI, and fixture tests. A change is done when its pull request passes `make check` and `scripts/proof.sh` on a clean Linux runner with no network credentials.
+Mailcrawl writes its own archive, never Gmail or the original export. Its
+normal read path does not use the network. Directories mailcrawl creates use
+mode 0700, and a directory you point it at keeps its mode. Archive files, including
+the SQLite `-wal` and `-shm` files, use mode 0600. Bodies, subjects, addresses, credentials and real exports stay
+out of this repository; public fixtures use `example.com`.
 
-A Go port comes after the Python prototype settles. The archive stays local.
+The optional external-producer handoff script is documented in the architecture
+guide. It has not been activated against a real Google account.
+
+The roadmap includes a read-only MCP server, per-record resume, a human browsing
+surface and an evaluated Go port. These are not current capabilities. No
+automatic backup, sharing, cloud archive or background daemon is added by installing mailcrawl.
+
+## Capacity proof
+
+A synthetic 2,148,712,448-byte mbox imported in a network-disabled Linux
+container limited to 512 MiB RAM and two CPUs. Peak process RSS was 32.46 MiB.
+Its 2,048 records repeat one message: this proves streaming past the former
+archive cap, not distinct-message throughput. Repeat with
+`scripts/prove-large-import.py`, using disk-backed temporary storage.
+
+## Development
+
+```sh
+make check
+scripts/proof.sh
+```
+
+See [Contributing](CONTRIBUTING.md). Large-file, installed-wheel and crawler
+control proofs use disposable synthetic archives. Never use real mail as a
+public test fixture.
 
 ## License
 
-mailcrawl is [MIT](LICENSE). Libraries and models it can download are named in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). This repository does not ship their weights. An install with `--no-build-isolation` needs setuptools 77 or newer.
+[MIT](LICENSE). See [third-party notices](THIRD_PARTY_NOTICES.md) for libraries
+and optional models. Model weights are not bundled. Build isolation requires
+setuptools 77 or newer.
 
 [Built by a storyteller who builds the worlds he imagines.](https://github.com/TheAngryPit)

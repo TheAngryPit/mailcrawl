@@ -169,17 +169,23 @@ def classify_export(document: object) -> str:
     return "ok"
 
 
-def parse_export(document: object, root: Path | inputio.SafeRoot | None = None) -> ExportDocument:
+def parse_export(
+    document: object,
+    root: Path | inputio.SafeRoot | None = None,
+    *,
+    limits: inputio.ImportLimits | None = None,
+) -> ExportDocument:
     if not isinstance(document, dict) or document.get("schema") != CONTRACT_V0:
         raise ExportRejected()
     raw_messages = document.get("example_messages")
     if not isinstance(raw_messages, list):
         raise ExportRejected()
+    policy = inputio.DEFAULT_GOG_IMPORT_LIMITS if limits is None else limits
     labels = _parse_labels(document.get("example_labels"))
-    if len(raw_messages) > inputio.MAX_IMPORT_RECORDS:
+    if policy.max_records is not None and len(raw_messages) > policy.max_records:
         raise inputio.InputLimit("manifest record limit exceeded")
     manifest_messages = _manifest_count(document.get("example_manifest"), len(raw_messages))
-    messages = _fixture_messages(raw_messages, root)
+    messages = _fixture_messages(raw_messages, root, limits=policy)
     unknown = {key: value for key, value in document.items() if key not in ENVELOPE_KNOWN}
     return ExportDocument(
         manifest_messages=manifest_messages,
@@ -189,15 +195,23 @@ def parse_export(document: object, root: Path | inputio.SafeRoot | None = None) 
     )
 
 
-def _fixture_messages(items: list[object], root: Path | inputio.SafeRoot | None) -> Iterable[MessageRec | inputio.Refused]:
+def _fixture_messages(
+    items: list[object],
+    root: Path | inputio.SafeRoot | None,
+    *,
+    limits: inputio.ImportLimits | None = None,
+) -> Iterable[MessageRec | inputio.Refused]:
     reader = root if isinstance(root, inputio.SafeRoot) else (inputio.SafeRoot(root) if root is not None else None)
-    used = 0
+    policy = inputio.DEFAULT_GOG_IMPORT_LIMITS if limits is None else limits
+    account = inputio.import_budget.get()
+    token = None
+    if account is None:
+        account = inputio.ImportBudget(limits=policy)
+        token = inputio.import_budget.set(account)
     try:
         for offset, item in enumerate(items):
             size = len(json.dumps(item, ensure_ascii=False).encode())
-            used += size
-            if used > inputio.MAX_IMPORT_BYTES:
-                raise inputio.InputLimit("import byte limit exceeded")
+            inputio.charge_input(size, account)
             try:
                 if size > inputio.MAX_RECORD_BYTES:
                     raise inputio.InputLimit("fixture record byte limit exceeded")
@@ -209,6 +223,9 @@ def _fixture_messages(items: list[object], root: Path | inputio.SafeRoot | None)
     finally:
         if reader is not None:
             reader.close()
+        if token is not None:
+            inputio.import_budget.reset(token)
+            account.close()
 
 
 def is_pseudo_label(label_id: str) -> bool:

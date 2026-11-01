@@ -1,0 +1,91 @@
+{
+  "binary": {
+    "name": "mailcrawl"
+  },
+  "capabilities": [
+    "status",
+    "doctor",
+    "sync",
+    "search"
+  ],
+  "commands": {
+    "doctor": {
+      "argv": [
+        "mailcrawl",
+        "doctor",
+        "--account",
+        "{config:account}",
+        "--json"
+      ],
+      "json": true
+    },
+    "metadata": {
+      "argv": [
+        "mailcrawl",
+        "metadata",
+        "--json"
+      ],
+      "json": true
+    },
+    "search": {
+      "argv": [
+        "mailcrawl",
+        "--json",
+        "search",
+        "--account",
+        "{config:account}",
+        "--read-only"
+      ],
+      "json": true
+    },
+    "status": {
+      "argv": [
+        "mailcrawl",
+        "status",
+        "--account",
+        "{config:account}",
+        "--json"
+      ],
+      "json": true
+    },
+    "sync": {
+      "argv": [
+        "mailcrawl",
+        "sync",
+        "--account",
+        "{config:account}",
+        "--json"
+      ],
+      "json": true,
+      "mutates": true
+    }
+  },
+  "config_options": [
+    {
+      "choices": [
+        "personal",
+        "thehive",
+        "vcl"
+      ],
+      "default_value": "personal",
+      "id": "account",
+      "kind": "choice",
+      "label": "Mail account"
+    }
+  ],
+  "description": "A local archive for private email.",
+  "display_name": "Mailcrawl",
+  "id": "mailcrawl",
+  "paths": {
+    "default_config": "~/.config/mailcrawl/config.toml"
+  },
+  "privacy": {
+    "contains_private_messages": true,
+    "exports_secrets": false,
+    "local_only_scopes": [
+      "email archive",
+      "local search"
+    ]
+  },
+  "schema_version": "crawlkit.control.v1"
+}

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 import stat
-from collections.abc import Iterator
-from contextlib import contextmanager
+import json
+import tempfile
 from dataclasses import dataclass, field
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO
+from typing import BinaryIO, TextIO
 
 MAX_MANIFEST_BYTES = 16 << 20
 MAX_INDEX_BYTES = 32 << 20
@@ -31,33 +31,34 @@ MAX_EXTRACT_STDERR_BYTES = 64 << 10
 MAX_IMPORT_EXTRACT_BYTES = 64 << 20
 
 
-MIN_IMPORT_MIB = 1
-MAX_IMPORT_MIB = 65536
+@dataclass(frozen=True)
+class ImportLimits:
+    """Optional whole-import work limits, separate from per-record guards."""
+
+    max_total_bytes: int | None = None
+    max_records: int | None = None
+    max_image_bytes: int | None = None
+    max_extract_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_total_bytes",
+            "max_records",
+            "max_image_bytes",
+            "max_extract_bytes",
+        ):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value <= 0):
+                raise ValueError(f"{name} must be a positive integer or None")
 
 
-@contextmanager
-def scaled_import_limits(mebibytes: int | None) -> Iterator[None]:
-    """Scale the per-import budgets together. 512 MiB gives the shipped defaults.
-
-    Per-line, per-message and per-part limits stay fixed because they bound memory.
-    """
-    if mebibytes is None:
-        yield
-        return
-    if isinstance(mebibytes, bool) or not MIN_IMPORT_MIB <= mebibytes <= MAX_IMPORT_MIB:
-        raise ValueError(f"max-import-mib needs a count from {MIN_IMPORT_MIB} to {MAX_IMPORT_MIB}")
-    names = ("MAX_IMPORT_BYTES", "MAX_IMPORT_IMAGE_BYTES", "MAX_IMPORT_EXTRACT_BYTES", "MAX_IMPORT_RECORDS")
-    saved = {name: globals()[name] for name in names}
-    globals().update(
-        MAX_IMPORT_BYTES=mebibytes << 20,
-        MAX_IMPORT_IMAGE_BYTES=mebibytes << 19,
-        MAX_IMPORT_EXTRACT_BYTES=mebibytes << 17,
-        MAX_IMPORT_RECORDS=mebibytes * 100_000 // 512,
-    )
-    try:
-        yield
-    finally:
-        globals().update(saved)
+DEFAULT_GOG_IMPORT_LIMITS = ImportLimits(
+    max_total_bytes=MAX_IMPORT_BYTES,
+    max_records=MAX_IMPORT_RECORDS,
+    max_image_bytes=MAX_IMPORT_IMAGE_BYTES,
+    max_extract_bytes=MAX_IMPORT_EXTRACT_BYTES,
+)
+DEFAULT_MBOX_IMPORT_LIMITS = ImportLimits()
 
 
 class InputLimit(ValueError):
@@ -162,13 +163,61 @@ def read_file(path: Path, max_bytes: int) -> bytes:
 
 @dataclass
 class ImportBudget:
+    limits: ImportLimits = field(default_factory=lambda: DEFAULT_GOG_IMPORT_LIMITS)
     image_bytes: int = 0
     extract_bytes: int = 0
     input_bytes: int = 0
-    created_images: list[Path] = field(default_factory=list)
+    _image_rollback_journal: TextIO | None = field(default=None, repr=False)
+
+    def track_image(self, path: Path) -> None:
+        journal = self._image_rollback_journal
+        if journal is None:
+            journal = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
+            self._image_rollback_journal = journal
+        position = journal.tell()
+        try:
+            journal.write(json.dumps(os.fspath(path), ensure_ascii=True) + "\n")
+        except BaseException:
+            journal.seek(position)
+            journal.truncate()
+            raise
+
+    def remove_created_images(self) -> None:
+        journal = self._image_rollback_journal
+        if journal is None:
+            return
+        journal.flush()
+        journal.seek(0)
+        first_error: OSError | None = None
+        for line in journal:
+            try:
+                Path(json.loads(line)).unlink(missing_ok=True)
+            except OSError as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    def close(self) -> None:
+        if self._image_rollback_journal is not None:
+            self._image_rollback_journal.close()
+            self._image_rollback_journal = None
 
 
 import_budget: ContextVar[ImportBudget | None] = ContextVar("mailcrawl_import_budget", default=None)
+
+
+def charge_input(size: int, budget: ImportBudget | None = None) -> None:
+    """Charge source bytes that were already materialized, such as inline JSON."""
+    account = budget if budget is not None else import_budget.get()
+    if account is None:
+        return
+    if type(size) is not int or size < 0:
+        raise ValueError("input byte charge must be a nonnegative integer")
+    limit = account.limits.max_total_bytes
+    if limit is not None and size > limit - account.input_bytes:
+        raise ImportExhausted("import byte limit exceeded")
+    account.input_bytes += size
 
 
 def read_import(root: SafeRoot, relative: str, max_bytes: int, budget: ImportBudget | None = None) -> bytes:
@@ -179,17 +228,18 @@ def read_import(root: SafeRoot, relative: str, max_bytes: int, budget: ImportBud
             raise InputLimit("message byte limit exceeded")
         if account is None:
             return bounded_read(handle, max_bytes)
-        remaining = MAX_IMPORT_BYTES - account.input_bytes
-        if size > remaining:
+        total_limit = account.limits.max_total_bytes
+        remaining = None if total_limit is None else total_limit - account.input_bytes
+        if remaining is not None and size > remaining:
             raise ImportExhausted("import byte limit exceeded")
-        account.input_bytes += size
         try:
-            raw = bounded_read(handle, min(max_bytes, remaining))
+            read_limit = max_bytes if remaining is None else min(max_bytes, remaining)
+            raw = bounded_read(handle, read_limit)
         except InputLimit as exc:
-            if remaining <= max_bytes:
+            if remaining is not None and remaining <= max_bytes:
                 raise ImportExhausted("import byte limit exceeded") from exc
             raise
-        account.input_bytes += max(0, len(raw) - size)
+        account.input_bytes += len(raw)
         return raw
 
 
@@ -197,7 +247,8 @@ def charge_extraction(size: int) -> None:
     budget = import_budget.get()
     if budget is not None:
         budget.extract_bytes += size
-        if budget.extract_bytes > MAX_IMPORT_EXTRACT_BYTES:
+        limit = budget.limits.max_extract_bytes
+        if limit is not None and budget.extract_bytes > limit:
             raise ImportExhausted("import extraction byte limit exceeded")
 
 

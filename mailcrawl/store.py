@@ -361,21 +361,25 @@ def connect(path: Path | str) -> sqlite3.Connection:
         ensure_private_directory(dest.parent)
         _create_private_file(dest)
     conn = sqlite3.connect(target)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    # Some SQLite builds map the file by default, and mapped pages count as process RSS.
-    conn.execute("PRAGMA mmap_size = 0")
-    if memory:
-        conn.execute("PRAGMA journal_mode = MEMORY")
-    else:
-        conn.execute("PRAGMA journal_mode = WAL")
-    migrate(conn)
-    if not memory:
-        for suffix in ("", "-wal", "-shm"):
-            sidecar = Path(f"{target}{suffix}")
-            if sidecar.exists():
-                os.chmod(sidecar, 0o600)
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        # Some SQLite builds map the file by default, and mapped pages count as process RSS.
+        conn.execute("PRAGMA mmap_size = 0")
+        if memory:
+            conn.execute("PRAGMA journal_mode = MEMORY")
+        else:
+            conn.execute("PRAGMA journal_mode = WAL")
+        migrate(conn)
+        if not memory:
+            for suffix in ("", "-wal", "-shm"):
+                sidecar = Path(f"{target}{suffix}")
+                if sidecar.exists():
+                    os.chmod(sidecar, 0o600)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _create_private_file(path: Path) -> None:

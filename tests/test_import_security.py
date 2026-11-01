@@ -167,8 +167,8 @@ class InputBoundaryTest(unittest.TestCase):
             message = replace(message, attachments=(AttachmentRec("new.png", "image/png", 3, None, image_bytes=b"new"), old))
             def stream():
                 yield message
-                raise ValueError("synthetic failure")
-            with self.assertRaises(ValueError):
+                raise KeyboardInterrupt("synthetic cancellation")
+            with self.assertRaises(KeyboardInterrupt):
                 _ingest(conn, account_id=1, alias="personal", source="gog-export", items=stream(), ref=lambda: "sha", run_json=None, catalogue={}, account_email="ada@example.com")
             self.assertTrue(old_path.is_file())
             self.assertFalse((old_path.parent / hashlib.sha256(b"new").hexdigest()).exists())
@@ -182,22 +182,26 @@ class InputBoundaryTest(unittest.TestCase):
             (self.root / name).write_bytes(b"Subject: synthetic\n\n" + b"x" * 492)
             items.append({"example_message_id": str(index), "example_thread_id": "t", "example_label_ids": [], "example_date": 1760054400, "example_raw_file": name})
         db = init_account(self.root / "home", "personal", "ada@example.com")
+        two_record_bytes = sum(
+            len(json.dumps(item, ensure_ascii=False).encode())
+            + (self.root / item["example_raw_file"]).stat().st_size
+            for item in items[:2]
+        ) + 1
         actual_read = inputio.bounded_read
-        with connect(db) as conn, patch.object(inputio, "MAX_IMPORT_BYTES", 1024), patch.object(inputio, "bounded_read", wraps=actual_read) as read:
+        with connect(db) as conn, patch.object(inputio, "bounded_read", wraps=actual_read) as read:
             with self.assertRaises(inputio.InputLimit):
-                _ingest(conn, account_id=1, alias="personal", source="gog-export", items=_fixture_messages(items, self.root), ref=lambda: "sha", run_json=None, catalogue={}, account_email="ada@example.com")
+                _ingest(conn, account_id=1, alias="personal", source="gog-export", items=_fixture_messages(items, self.root, limits=inputio.ImportLimits(max_total_bytes=two_record_bytes)), ref=lambda: "sha", run_json=None, catalogue={}, account_email="ada@example.com", limits=inputio.ImportLimits(max_total_bytes=two_record_bytes))
             self.assertEqual(read.call_count, 2)
             self.assertEqual(conn.execute("SELECT count(*) FROM messages").fetchone()[0], 0)
 
     def test_native_aggregate_work_budget_stops_before_next_read(self):
         target = self.native()
-        with patch.object(inputio, "MAX_IMPORT_BYTES", 600):
-            document, _sha = load_native(target)
-            actual = inputio.bounded_read
-            with patch.object(inputio, "bounded_read", wraps=actual) as read:
-                with self.assertRaises(inputio.ImportExhausted):
-                    list(document.messages)
-                self.assertEqual(read.call_count, 1)
+        document, _sha = load_native(target, limits=inputio.ImportLimits(max_total_bytes=600))
+        actual = inputio.bounded_read
+        with patch.object(inputio, "bounded_read", wraps=actual) as read:
+            with self.assertRaises(inputio.ImportExhausted):
+                list(document.messages)
+            self.assertEqual(read.call_count, 1)
 
     def test_header_and_physical_line_limits(self):
         for constant in ("MAX_HEADER_BYTES", "MAX_LINE_BYTES"):
@@ -205,25 +209,36 @@ class InputBoundaryTest(unittest.TestCase):
                 with self.assertRaises(inputio.InputLimit):
                     parse_bytes(b"Subject: oversized header\n\nbody")
 
-    def test_per_import_image_budget_preserves_first_record(self):
+    def test_per_import_image_budget_rolls_back_instead_of_skipping_later_record(self):
         from dataclasses import replace
         db = init_account(self.root / "home", "personal", "ada@example.com")
         first = eml_record(b"Subject: first\n\nbody", gmail_message_id="1", gmail_thread_id="t", label_ids=(), internal_date=0, raw_path="test")
         first = replace(first, attachments=(AttachmentRec("a.png", "image/png", 4, None, image_bytes=b"aaaa"),))
         second = replace(first, gmail_message_id="2", attachments=(AttachmentRec("b.png", "image/png", 4, None, image_bytes=b"bbbb"),))
-        with connect(db) as conn, patch.object(inputio, "MAX_IMPORT_IMAGE_BYTES", 6):
-            result = _ingest(conn, account_id=1, alias="personal", source="gog-export", items=iter((first, second)), ref=lambda: "sha", run_json=None, catalogue={}, account_email="ada@example.com")
-            self.assertEqual((result.n_new, result.n_refused), (1, 1))
-            self.assertEqual(conn.execute("SELECT count(*) FROM attachments").fetchone()[0], 1)
+        with connect(db) as conn:
+            with self.assertRaises(inputio.ImportExhausted):
+                _ingest(
+                    conn,
+                    account_id=1,
+                    alias="personal",
+                    source="gog-export",
+                    items=iter((first, second)),
+                    ref=lambda: "sha",
+                    run_json=None,
+                    catalogue={},
+                    account_email="ada@example.com",
+                    limits=inputio.ImportLimits(max_image_bytes=6),
+                )
+            self.assertEqual(conn.execute("SELECT count(*) FROM attachments").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM messages").fetchone()[0], 0)
 
     def test_cumulative_extraction_budget(self):
         from mailcrawl.extract import parse_attachment
-        token = inputio.import_budget.set(inputio.ImportBudget())
+        token = inputio.import_budget.set(inputio.ImportBudget(limits=inputio.ImportLimits(max_extract_bytes=5)))
         try:
-            with patch.object(inputio, "MAX_IMPORT_EXTRACT_BYTES", 5):
-                self.assertEqual(parse_attachment("text/plain", b"abc").extract_status, "ok")
-                with self.assertRaises(inputio.InputLimit):
-                    parse_attachment("text/plain", b"abc")
+            self.assertEqual(parse_attachment("text/plain", b"abc").extract_status, "ok")
+            with self.assertRaises(inputio.ImportExhausted):
+                parse_attachment("text/plain", b"abc")
         finally:
             inputio.import_budget.reset(token)
 
