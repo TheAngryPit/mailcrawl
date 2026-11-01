@@ -72,6 +72,12 @@ class RuntimeSecurityTest(unittest.TestCase):
         with self.assertRaises(UsageError):
             context_parts(['éé'], 3)
 
+    def test_clipped_context_keeps_a_prefix_within_the_limit(self):
+        self.assertEqual(context_parts(['ab', 'cd'], 4, clip=True), 'ab\nc')
+        self.assertEqual(context_parts(['abcdef'], 3, clip=True), 'abc')
+        self.assertEqual(context_parts(['éé'], 3, clip=True), 'é')
+        self.assertEqual(context_parts(['ab', 'cd'], 5, clip=True), 'ab\ncd')
+
     def test_review_endpoint_transport_matrix(self):
         for url in ['http://remote.example.com/v1', 'http://192.0.2.1/v1']:
             with self.assertRaises(UsageError):

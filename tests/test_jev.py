@@ -31,6 +31,7 @@ from mailcrawl.jev import (
     score_grey_band,
 )
 from mailcrawl.paths import UsageError
+from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES, ContextTooLarge
 from mailcrawl.search import search_messages
 from mailcrawl.store import connect, index_message
 
@@ -189,6 +190,31 @@ class JevBatteryTest(unittest.TestCase):
                 self.assertEqual(client.calls, 1)
                 self.assertEqual(third["source_detail"], MODEL_ID)
                 self.assertEqual(third["created_at"], 12)
+            finally:
+                conn.close()
+
+    def test_an_oversized_thread_waits_for_review_and_the_pass_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                conn.execute(
+                    "UPDATE messages SET body_text = ? WHERE thread_pk = ?",
+                    ("x" * (MAX_CONTEXT_BYTES + 1), ids["reply"]),
+                )
+                conn.commit()
+                client = CountingJev()
+                passed = score_grey_band(conn, client, {"jev-battery": True}, 10)
+                self.assertEqual(passed.eligible, len(ids))
+                self.assertEqual(client.calls, len(ids) - 1)
+                held = conn.execute(
+                    "SELECT next_state, origin, evidence FROM decisions WHERE thread_pk = ?",
+                    (ids["reply"],),
+                ).fetchone()
+                self.assertEqual((held["next_state"], held["origin"]), ("needs_review", "model"))
+                self.assertFalse(json.loads(held["evidence"])[0]["left_machine"])
+                decided = conn.execute("SELECT count(*) FROM decisions").fetchone()[0]
+                self.assertEqual(decided, len(ids))
             finally:
                 conn.close()
 
@@ -398,7 +424,7 @@ class JevBatteryTest(unittest.TestCase):
         self.assertIn(LOCAL_VERIFY, spec)
         self.assertIn("TYPESAFE_API_KEY", spec)
         self.assertIn("Retry-After", spec)
-        self.assertIsInstance(open_client("http"), HttpJev)
+        self.assertIsInstance(open_client("http", allow_remote=True), HttpJev)
         with self.assertRaises(UsageError):
             jev_decide(
                 sqlite3.connect(":memory:"),
@@ -445,6 +471,24 @@ class JevBatteryTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_rerank_keeps_keyword_order_when_the_hits_exceed_the_context_budget(self) -> None:
+        class TooBig:
+            model_id = MODEL_ID
+            left_machine = True
+
+            def ask(self, state: str, questions: tuple[Question, ...]):
+                raise ContextTooLarge("thread text exceeds byte budget")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                _seed(conn)
+                plain = search_messages(conn, "shared", jev=None, config=None)
+                ranked = search_messages(conn, "shared", jev=TooBig(), config={"search-reranker": True})
+                self.assertEqual(ranked, plain)
+            finally:
+                conn.close()
+
     def test_ask_outside_the_gate_does_not_open_http(self) -> None:
         path = ROOT / "mailcrawl" / "jev.py"
         self.assertEqual(scan_source(path.read_text(encoding="utf-8"), str(path)), [])
@@ -452,6 +496,44 @@ class JevBatteryTest(unittest.TestCase):
             FakeJev().ask("synthetic", BATTERY)
         self.assertNotIn("httpx", __import__("sys").modules)
         self.assertNotIn("requests", __import__("sys").modules)
+
+    def test_http_client_needs_explicit_remote_consent(self) -> None:
+        import contextlib
+        from io import StringIO
+
+        from mailcrawl.cli import main
+        from mailcrawl.configfile import inference_config, jev_allow_remote
+        from mailcrawl.store import init_account
+
+        with self.assertRaisesRegex(UsageError, "allow_remote"):
+            open_client("http")
+        self.assertIsInstance(open_client("fake"), FakeJev)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "config.toml"
+            config.write_text("[inference]\njev-battery = true\nsearch-reranker = true\n", encoding="utf-8")
+            self.assertFalse(jev_allow_remote(config))
+            init_account(root / "data", "thehive", "ada@example.com")
+            argv = ["--json", "--home", str(root / "data"), "--config", str(config)]
+            with patch.object(HttpJev, "ask", side_effect=AssertionError("sent")):
+                for command in (
+                    ["jev", "--account", "thehive", "--client", "http"],
+                    ["search", "x", "--account", "thehive", "--jev-client", "http"],
+                ):
+                    out = StringIO()
+                    with contextlib.redirect_stdout(out):
+                        code = main(argv + command)
+                    self.assertEqual(code, 2, command)
+            config.write_text(
+                "[inference]\njev-battery = true\n\n[inference.jev]\nallow_remote = true\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(jev_allow_remote(config))
+            self.assertEqual(inference_config(config), {"jev-battery": True})
+            for bad in ('jev = "yes"\n', "[inference.jev]\nallow_remote = 1\n"):
+                config.write_text("[inference]\n" + bad if bad.startswith("jev") else bad, encoding="utf-8")
+                with self.assertRaises(UsageError):
+                    jev_allow_remote(config)
 
     def test_local_verify_command_scores_grey_threads(self) -> None:
         import shlex

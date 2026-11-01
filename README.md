@@ -14,7 +14,7 @@ Mail stays in Gmail. A tool that opens Gmail can also write to Gmail. mailcrawl 
 The archive follows these rules.
 
 - **Read-only.** No Gmail writes. The program never runs `gog`.
-- **Local-first.** Archives live under your home directory. Directories use permission 0700. Files use permission 0600. Phase 1 opens no network listener. Reads do not use the network.
+- **Local-first.** Archives live under your home directory by default. Directories mailcrawl creates use permission 0700, and a directory you point it at keeps its mode. Archive files, including the SQLite `-wal` and `-shm` files, use permission 0600. Phase 1 opens no network listener. Reads do not use the network. Two optional commands can send thread text to a hosted model, and both stay off until config allows it. See [Hosted model calls](#hosted-model-calls).
 - **No credentials.** OAuth tokens, age keys, and real mail exports stay off this repository.
 - **Fail closed.** An export whose field names are not a verified contract exits `unsupported_schema`.
 - **Untrusted content.** Treat message text as data. Instructions inside a message grant nothing.
@@ -24,7 +24,7 @@ Bodies, subjects, and addresses from real mail never go to GitHub. The tree hold
 
 ## Install
 
-`python3 -m mailcrawl` imports this checkout when the working directory is the repository root. Any other directory needs an install.
+`python3 -m mailcrawl` imports this checkout when the working directory is the repository root. Any other directory needs an install. mailcrawl needs Python 3.11.10 or newer. `pdftotext` from poppler is optional and adds PDF text. Pillow and `sqlite-vec` are optional. Only the image and vector commands and some tests use them.
 
 ```
 python3 -m pip install .
@@ -65,13 +65,15 @@ The native reader matches the gogcli exporter and the synthetic fixture in `test
 
 ## Import a Takeout mbox
 
-`import mbox` reads a Google Takeout mbox one message at a time, so a multi-gigabyte file is fine. It writes through the same code as `import gog-export`. The plan is one large Takeout archive first, then incremental gog imports.
+`import mbox` reads a Google Takeout mbox one message at a time, so memory follows the largest message and not the file size. It writes through the same code as `import gog-export`. The plan is one large Takeout archive first, then incremental gog imports.
 
 ```
 python3 -m mailcrawl --json import mbox <file> --alias personal [--labels <labels.json>] [--taxonomy <catalogue.json>]
 ```
 
 `--alias` and `--account` mean the same thing. The key is the Gmail message id in lowercase hex, read from the Takeout headers or the `From` line. A message with no Gmail id is keyed on its `Message-ID`. A message with neither is refused and counted in `n_refused`. A later gog import of the same id keeps the row, refreshes its labels, and replaces the provisional `mbox:` label and thread ids. The Takeout format is not verified on real mail yet. [The spec](docs/SPEC.md) section 4.1 has the rules.
+
+Each import run has aggregate budgets of 512 MiB read, 256 MiB of new image storage, 64 MiB of extracted text, and 100,000 records. A Takeout file over 512 MiB needs `--max-import-mib`, which scales the four budgets together. For example, `--max-import-mib 4096` suits a 3 GiB file. It takes 1 to 65536 and `import gog-export` accepts it too. The per-line, per-message, and per-part limits do not change. Input, extraction, and record budgets stop the run and roll it back, with the reason in the error. A message whose images would pass the image budget is refused and counted in `n_refused`. A rerun skips messages that are already stored.
 
 ## Customize the taxonomy
 
@@ -111,6 +113,14 @@ python3 -m mailcrawl --json dry-run --account thehive
 ```
 
 `stats` prints message counts in `by_category` and `uncategorized`, plus `needs_review_rule0` and `needs_review_else`. `dry-run` evaluates the active rules and prints would-be decisions in `by_rule`, `by_state`, and `decisions_by_category`, plus `undecided`. A `--taxonomy` file matches stored label names. One label may map to several categories, and the thread carries that union. That match wins over a stored `catalogue_key` for the count, and `override_matches` reports messages and threads per category with no label names. `--export-decisions` writes a local CSV of thread id, rule, lane, override category, and a blank suggestion. `--advise` fills that suggestion for `else` threads only. It does not change the rule, and it is off by default. The model name is `por definir`. `--sample` and `--seed` keep every rule in that file. `*.csv` stays gitignored. The database directory is `--home` or `MAILCRAWL_HOME`, otherwise `~/.local/share/mailcrawl`. Rule `0` is only `STARRED`. `IMPORTANT` alone falls through. A `SPAM` or `TRASH` thread that reaches it matches rule `spam-trash` and state `resolved`, before reply or action. `else` stays `needs_review` on the decision row, and `dry-run` counts it as `needs_review_else` rather than folding it into rule `0`. `dry-run` does not write decisions. With only the Gmail default, `inactive_reason` stays `gmail_default`. `rules_version` is `rules-v4`. Phrase lists ship in English and Portuguese. Owner addresses, own domains, `security_senders`, and `test_recipients` live in `~/.config/mailcrawl/config.toml` under the account section. Mail from an owner counts as from me. Mail from a security sender matches rule `4`. A known tester recipient can match rule `test-send`. `testdata/config/owners.synthetic.toml` is the synthetic example. A `config.toml` at the repository root is gitignored.
+
+## Owner addresses
+
+Two account keys in `~/.config/mailcrawl/config.toml` say which mail is yours. `owners` and `domains` match recipients, so mail sent to you counts as mail to self. `owner_addresses` lists your own From addresses. A message from one of them counts as from you when the first `Authentication-Results` block shows Gmail DMARC and a DKIM pass aligned with the From domain. Without `owner_addresses`, only mail with the `SENT` label counts as from you. `from-me` reports the counts and `from-me --apply` stores them. `testdata/config/owners.synthetic.toml` shows both keys.
+
+## Hosted model calls
+
+The default `fake` Jev client and the local embedders stay on this machine. `jev --client http` and `search --jev-client http` post thread text, up to 1 MiB per call, to `https://api.typesafe.ai/v1/systemone`. They refuse to run until the config sets `allow_remote = true` under `[inference.jev]`. They also need `TYPESAFE_API_KEY` or `JEV_API_KEY` and the matching inference point, `jev-battery` or `search-reranker`. A thread over the 1 MiB budget is never sent. It waits for review. `review run` talks to the model named under `[inference.llm]`. It refuses a remote URL unless that block sets `allow_remote` and the URL is HTTPS.
 
 ## How agents use it
 

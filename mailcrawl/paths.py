@@ -22,14 +22,22 @@ def canonical_alias(alias: str) -> str:
     return key
 
 
+PROTECTED_NAME = "db-v2"
+
+
+def refuse_protected_path(path: Path) -> None:
+    for candidate in (path, path.resolve()):
+        if any(PROTECTED_NAME in part.lower() for part in candidate.parts):
+            raise UsageError(f"refusing a path that includes {PROTECTED_NAME}")
+
+
 def data_dir(home_flag: str | None) -> Path:
     if home_flag:
         path = Path(home_flag)
     else:
         env = os.environ.get("MAILCRAWL_HOME")
         path = Path(env) if env else Path.home() / ".local" / "share" / "mailcrawl"
-    if any("db-v2" in part.lower() for part in path.parts):
-        raise UsageError("refusing a path that includes db-v2")
+    refuse_protected_path(path)
     return path
 
 
@@ -37,3 +45,11 @@ def config_path(config_flag: str | None) -> Path:
     if config_flag:
         return Path(config_flag)
     return Path.home() / ".config" / "mailcrawl" / "config.toml"
+
+
+def ensure_private_directory(directory: Path) -> None:
+    """Create a directory as 0700. A directory that already exists keeps its mode."""
+    created = not directory.exists()
+    directory.mkdir(parents=True, exist_ok=True)
+    if created:
+        os.chmod(directory, 0o700)

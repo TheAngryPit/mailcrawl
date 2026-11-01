@@ -3,7 +3,13 @@
 
 from __future__ import annotations
 
-from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES, context_parts, request_bytes, response_bytes
+from mailcrawl.runtime_limits import (
+    MAX_CONTEXT_BYTES,
+    ContextTooLarge,
+    context_parts,
+    request_bytes,
+    response_bytes,
+)
 
 import json
 import os
@@ -29,7 +35,7 @@ CONFIDENCE_FLOOR = 0.60
 RERANK_LIMIT = 20
 _RETRY_CAP = 60
 LOCAL_VERIFY = (
-    "python3 -m mailcrawl --db ~/MailVault/db-v3-sandbox "
+    "python3 -m mailcrawl --db $ARCHIVE "
     "jev --account thehive --client http"
 )
 _ENDPOINT = "https://api.typesafe.ai/v1/systemone"
@@ -143,10 +149,15 @@ class JevClient(Protocol):
     ) -> tuple[dict[str, Answer], str]: ...
 
 
-def open_client(name: str) -> JevClient:
+def open_client(name: str, *, allow_remote: bool = False) -> JevClient:
     if name == "fake":
         return FakeJev()
     if name == "http":
+        if not allow_remote:
+            raise UsageError(
+                f"jev http sends thread text to {_ENDPOINT}. "
+                "Set allow_remote = true under [inference.jev] to allow it."
+            )
         return HttpJev()
     raise UsageError(f"unknown jev client {name}")
 
@@ -265,11 +276,14 @@ def rerank(
     if scores is None:
         state = _search_state(query, texts)
         questions = _search_questions(texts)
-        answered = invoke(
-            "search-reranker",
-            lambda: client.ask(state, questions),
-            config,
-        )
+        try:
+            answered = invoke(
+                "search-reranker",
+                lambda: client.ask(state, questions),
+                config,
+            )
+        except ContextTooLarge:
+            return ranked
         if answered is None:
             return ranked
         answers, model = answered
@@ -316,7 +330,7 @@ class HttpJev:
         enter_model()
         key = _api_key()
         if len(state.encode("utf-8")) > MAX_CONTEXT_BYTES:
-            raise UsageError("thread text exceeds byte budget")
+            raise ContextTooLarge("thread text exceeds byte budget")
         payload = request_bytes(json.dumps(request_body(state, questions)).encode())
         req = urllib.request.Request(
             _ENDPOINT,
@@ -409,6 +423,8 @@ def _produce(
                 lambda: client.ask(_thread_state(conn, thread_pk), BATTERY),
                 config,
             )
+        except ContextTooLarge:
+            return _review(client.model_id, False)
         except (TokenLimit, RateLimited):
             return _review(client.model_id, client.left_machine)
         if answered is None:

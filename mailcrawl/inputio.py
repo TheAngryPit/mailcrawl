@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from contextvars import ContextVar
 from pathlib import Path, PurePosixPath
@@ -27,6 +29,35 @@ MAX_IMPORT_IMAGE_BYTES = 256 << 20
 MAX_EXTRACT_BYTES = 4 << 20
 MAX_EXTRACT_STDERR_BYTES = 64 << 10
 MAX_IMPORT_EXTRACT_BYTES = 64 << 20
+
+
+MIN_IMPORT_MIB = 1
+MAX_IMPORT_MIB = 65536
+
+
+@contextmanager
+def scaled_import_limits(mebibytes: int | None) -> Iterator[None]:
+    """Scale the per-import budgets together. 512 MiB gives the shipped defaults.
+
+    Per-line, per-message and per-part limits stay fixed because they bound memory.
+    """
+    if mebibytes is None:
+        yield
+        return
+    if isinstance(mebibytes, bool) or not MIN_IMPORT_MIB <= mebibytes <= MAX_IMPORT_MIB:
+        raise ValueError(f"max-import-mib needs a count from {MIN_IMPORT_MIB} to {MAX_IMPORT_MIB}")
+    names = ("MAX_IMPORT_BYTES", "MAX_IMPORT_IMAGE_BYTES", "MAX_IMPORT_EXTRACT_BYTES", "MAX_IMPORT_RECORDS")
+    saved = {name: globals()[name] for name in names}
+    globals().update(
+        MAX_IMPORT_BYTES=mebibytes << 20,
+        MAX_IMPORT_IMAGE_BYTES=mebibytes << 19,
+        MAX_IMPORT_EXTRACT_BYTES=mebibytes << 17,
+        MAX_IMPORT_RECORDS=mebibytes * 100_000 // 512,
+    )
+    try:
+        yield
+    finally:
+        globals().update(saved)
 
 
 class InputLimit(ValueError):

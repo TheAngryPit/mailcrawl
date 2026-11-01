@@ -10,6 +10,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from mailcrawl import inputio
 from mailcrawl.advise import StubAdvisor
 from mailcrawl.bench import run_bench
 from mailcrawl.clock import as_of
@@ -24,6 +25,7 @@ from mailcrawl.configfile import (
     llm_review,
     owner_addresses,
     inference_device,
+    jev_allow_remote,
     local_llm,
     rules_path,
     takeout_label_map,
@@ -150,11 +152,13 @@ def _parser() -> argparse.ArgumentParser:
     gog.add_argument("--dir", required=True)
     gog.add_argument("--taxonomy")
     gog.add_argument("--account", "--alias", dest="account", required=True)
+    gog.add_argument("--max-import-mib", type=int)
     mbox = imp_sub.add_parser("mbox")
     mbox.add_argument("file")
     mbox.add_argument("--account", "--alias", dest="account", required=True)
     mbox.add_argument("--labels")
     mbox.add_argument("--taxonomy")
+    mbox.add_argument("--max-import-mib", type=int)
 
     takeout = sub.add_parser("takeout")
     takeout_sub = takeout.add_subparsers(dest="takeout_command", required=True)
@@ -293,30 +297,31 @@ def _import(args: argparse.Namespace) -> int:
     conn = connect(db_path)
     try:
         result: ImportResult
-        if args.import_command == "gog-export":
-            aliases = owner_addresses(cfg, alias)
-            result = import_gog_export(
-                conn,
-                alias=alias,
-                export_dir=Path(args.dir),
-                taxonomy_path=catalogue,
-                account_email=email,
-                aliases=aliases,
-            )
-        elif args.import_command == "mbox":
-            aliases = owner_addresses(cfg, alias)
-            result = import_mbox(
-                conn,
-                alias=alias,
-                mbox_path=Path(args.file),
-                label_map=takeout_label_map(cfg, alias),
-                labels_path=Path(args.labels) if args.labels else None,
-                taxonomy_path=catalogue,
-                account_email=email,
-                aliases=aliases,
-            )
-        else:
-            raise UsageError("unknown import command")
+        with inputio.scaled_import_limits(args.max_import_mib):
+            if args.import_command == "gog-export":
+                aliases = owner_addresses(cfg, alias)
+                result = import_gog_export(
+                    conn,
+                    alias=alias,
+                    export_dir=Path(args.dir),
+                    taxonomy_path=catalogue,
+                    account_email=email,
+                    aliases=aliases,
+                )
+            elif args.import_command == "mbox":
+                aliases = owner_addresses(cfg, alias)
+                result = import_mbox(
+                    conn,
+                    alias=alias,
+                    mbox_path=Path(args.file),
+                    label_map=takeout_label_map(cfg, alias),
+                    labels_path=Path(args.labels) if args.labels else None,
+                    taxonomy_path=catalogue,
+                    account_email=email,
+                    aliases=aliases,
+                )
+            else:
+                raise UsageError("unknown import command")
         absent = _taxonomy_warnings(conn, alias, catalogue)
     finally:
         conn.close()
@@ -374,7 +379,7 @@ def _search(args: argparse.Namespace) -> int:
         embedder = _open_embedder(args)
     jev = None
     if "search-reranker" in enabled_points(flags):
-        jev = open_client(args.jev_client)
+        jev = open_client(args.jev_client, allow_remote=jev_allow_remote(config_path(args.config)))
     conn = connect(db_path)
     try:
         hits = search_messages(
@@ -720,7 +725,7 @@ def _jev(args: argparse.Namespace) -> int:
     decision = None
     passed = None
     try:
-        client = open_client(args.client)
+        client = open_client(args.client, allow_remote=jev_allow_remote(config_path(args.config)))
         if args.thread:
             row = conn.execute(
                 "SELECT thread_pk FROM threads WHERE gmail_thread_id = ?",

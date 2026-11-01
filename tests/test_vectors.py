@@ -27,6 +27,7 @@ from mailcrawl.configfile import (
 from mailcrawl.decisions import DecisionDraft, decide_once
 from mailcrawl.inference import BoundaryError, enter_model, invoke
 from mailcrawl.paths import UsageError
+from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES
 from mailcrawl.store import connect, index_message, init_account
 from mailcrawl.ingest import import_mbox
 from mailcrawl.threads import dimension_skip_reason, embeddable_image, image_gate, opened_limit_reason
@@ -54,6 +55,10 @@ from mailcrawl.search import search_messages
 
 def _sqlite_vec_installed() -> bool:
     return importlib.util.find_spec("sqlite_vec") is not None
+
+
+def _pillow_installed() -> bool:
+    return importlib.util.find_spec("PIL") is not None
 
 
 def _solid_png(width: int, height: int) -> bytes:
@@ -524,6 +529,7 @@ class VectorCliTest(unittest.TestCase):
             self.assertNotIn("sentence_transformers", sys.modules)
             self.assertNotIn("torch", sys.modules)
 
+    @unittest.skipUnless(_pillow_installed(), "Pillow is not installed")
     def test_image_encode_uses_the_gemma_guide(self) -> None:
         png = bytes.fromhex(
             "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
@@ -566,6 +572,7 @@ class VectorCliTest(unittest.TestCase):
             },
         )
 
+    @unittest.skipUnless(_pillow_installed(), "Pillow is not installed")
     def test_fake_encode_does_not_import_an_installed_torch(self) -> None:
         png = bytes.fromhex(
             "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de"
@@ -591,6 +598,7 @@ class VectorCliTest(unittest.TestCase):
             if previous is not None:
                 sys.modules["torch"] = previous
 
+    @unittest.skipUnless(_pillow_installed(), "Pillow is not installed")
     def test_non_rgb_images_are_converted_before_encode(self) -> None:
         from PIL import Image
 
@@ -952,6 +960,27 @@ class FlatEmbedTest(unittest.TestCase):
             self.assertIn('device` is `auto`', spec)
 
     @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
+    def test_an_oversized_thread_does_not_stop_embed_or_knn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = connect(Path(tmp) / "personal.db")
+            try:
+                ids = _seed(conn)
+                conn.execute(
+                    "UPDATE messages SET body_text = ? WHERE thread_pk = ?",
+                    ("x" * (MAX_CONTEXT_BYTES + 1), ids["near"]),
+                )
+                conn.commit()
+                flags = {"embeddings": True}
+                total = conn.execute("SELECT count(*) FROM threads").fetchone()[0]
+                self.assertEqual(embed_threads(conn, FakeEmbedder(), flags), total - 1)
+                eligible, decided, review = knn_account(conn, FakeEmbedder(), flags, 10)
+                self.assertEqual((eligible, decided, review), (total, 0, total))
+                with self.assertRaises(UsageError):
+                    knn_decide(conn, ids["near"], FakeEmbedder(), flags, 10)
+            finally:
+                conn.close()
+
+    @unittest.skipUnless(_sqlite_vec_installed(), "sqlite-vec is not installed")
     def test_a_failed_item_is_skipped_and_a_rerun_keeps_committed_threads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             conn = connect(Path(tmp) / "personal.db")
@@ -1130,6 +1159,7 @@ class FlatEmbedTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    @unittest.skipUnless(_pillow_installed(), "Pillow is not installed")
     def test_oversized_and_unknown_images_are_skipped_before_decode(self) -> None:
         huge_png = _png_header(12000, 12000)
         huge_gif = b"GIF89a" + struct.pack("<HH", 12000, 12000)

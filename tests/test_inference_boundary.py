@@ -51,6 +51,37 @@ class InferenceBoundaryTest(unittest.TestCase):
             module.classify(probe)
         self.assertEqual(probe.calls, 0)
 
+    def test_network_and_process_imports_are_caught_outside_their_modules(self) -> None:
+        source = "import urllib.request\nimport http.client\nimport socket\nimport subprocess\n"
+        self.assertEqual(
+            scan_source(source, "x.py"),
+            [
+                "x.py:1: network or process import urllib",
+                "x.py:2: network or process import http",
+                "x.py:3: network or process import socket",
+                "x.py:4: network or process import subprocess",
+            ],
+        )
+        lazy = "def run():\n    from subprocess import run\n    import imaplib\n"
+        self.assertEqual(
+            scan_source(lazy, "pkg/y.py"),
+            [
+                "pkg/y.py:2: network or process import subprocess",
+                "pkg/y.py:3: network or process import imaplib",
+            ],
+        )
+
+    def test_the_modules_that_own_a_network_or_process_edge_may_import_it(self) -> None:
+        self.assertEqual(scan_source("import urllib.request\n", "mailcrawl/jev.py"), [])
+        self.assertEqual(scan_source("import urllib.request\n", "mailcrawl/review.py"), [])
+        self.assertEqual(scan_source("import socket\n", "mailcrawl/runtime_limits.py"), [])
+        for name in ("extract.py", "bench.py", "version.py"):
+            self.assertEqual(scan_source("import subprocess\n", f"mailcrawl/{name}"), [])
+        self.assertEqual(
+            scan_source("import socket\n", "mailcrawl/jev.py"),
+            ["mailcrawl/jev.py:1: network or process import socket"],
+        )
+
     def test_model_client_import_is_caught(self) -> None:
         problems = scan_source("import openai\n", "planted_import.py")
         self.assertEqual(problems, ["planted_import.py:1: model client import openai"])

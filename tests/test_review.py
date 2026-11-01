@@ -20,6 +20,7 @@ from mailcrawl.jev import FakeJev, jev_decide
 from mailcrawl.paths import UsageError
 from mailcrawl.review import ReviewScope, parse_agent_decision, review_queue, review_run
 from mailcrawl.rules import bundled_rules_path
+from mailcrawl.runtime_limits import MAX_CONTEXT_BYTES
 from mailcrawl.store import connect, init_account
 from mailcrawl.vectors import FakeEmbedder, knn_decide
 
@@ -48,6 +49,25 @@ class ReviewHarnessTest(unittest.TestCase):
             self.assertEqual(document["untrusted"]["text"], "aa bb")
             self.assertEqual(document["untrusted"]["images"], ["scans/one.png"])
             _artifact("review-queue.json", {"items": [item.document() for item in items]})
+
+    def test_queue_keeps_an_oversized_thread_and_clips_its_text(self) -> None:
+        with TemporaryDirectory() as tmp:
+            db = Path(tmp) / "personal.db"
+            _seed(db)
+            conn = connect(db)
+            try:
+                conn.execute(
+                    "UPDATE messages SET body_text = ? WHERE thread_pk = "
+                    "(SELECT thread_pk FROM threads WHERE gmail_thread_id = 'thread-review')",
+                    ("aa " * MAX_CONTEXT_BYTES,),
+                )
+                conn.commit()
+                items = review_queue(conn, "personal", ReviewScope(), max_tokens=2)
+            finally:
+                conn.close()
+            by_id = {item.thread_id: item for item in items}
+            self.assertEqual(set(by_id), {"thread-review", "thread-open", "thread-human"})
+            self.assertEqual(by_id["thread-review"].untrusted_text, "aa aa")
 
     def test_decide_round_trip_leaves_a_human_row(self) -> None:
         with TemporaryDirectory() as tmp:
