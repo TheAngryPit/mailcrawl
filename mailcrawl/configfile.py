@@ -331,6 +331,8 @@ def write_account(path: Path, alias: str, email: str) -> None:
     canonical = canonical_alias(alias)
     if '"' in email or "\n" in email:
         raise UsageError("email contains a character the config file cannot store")
+    wanted = email.strip()
+    before = load_config(path)
     document = load_config(path)
     accounts = document.get("accounts")
     if accounts is None:
@@ -341,14 +343,46 @@ def write_account(path: Path, alias: str, email: str) -> None:
     if current is not None and not isinstance(current, dict):
         raise UsageError("account config is not a table")
     row = dict(current) if isinstance(current, dict) else {}
-    row["email"] = email.strip()
+    row["email"] = wanted
     accounts[canonical] = row
     document["accounts"] = accounts
     legacy_rules = document.get("rules")
-    if isinstance(legacy_rules, str) and legacy_rules.strip():
+    normalize_rules = isinstance(legacy_rules, str) and bool(legacy_rules.strip())
+    if normalize_rules:
         document["rules"] = {"path": _rules_value(legacy_rules)}
-    content = "\n".join(_toml_table(document)) + "\n"
     ensure_private_directory(path.parent)
+    content = None
+    if path.is_file() and not normalize_rules:
+        if document == before:
+            os.chmod(path, 0o600)
+            return
+        content = _with_appended_account(path.read_text(encoding="utf-8"), canonical, wanted, before, document)
+    if content is None:
+        content = "\n".join(_toml_table(document)) + "\n"
+    _write_private(path, content)
+
+
+def _with_appended_account(
+    text: str,
+    alias: str,
+    email: str,
+    before: dict[str, object],
+    document: dict[str, object],
+) -> str | None:
+    """Add a new account table without touching the rest of the file, or None when that is unsafe."""
+    existing = before.get("accounts")
+    if isinstance(existing, dict) and alias in existing:
+        return None
+    block = f"[accounts.{_toml_key(alias)}]\nemail = {_toml_value(email)}\n"
+    candidate = f"{text.rstrip()}\n\n{block}" if text.strip() else block
+    try:
+        parsed = tomllib.loads(candidate)
+    except tomllib.TOMLDecodeError:
+        return None
+    return candidate if parsed == document else None
+
+
+def _write_private(path: Path, content: str) -> None:
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary_path = Path(temporary)
     try:
