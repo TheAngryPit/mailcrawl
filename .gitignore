@@ -111,4 +111,6 @@ env/
 .coverage
 htmlcov/
 *.egg-info/
+build/
+dist/
 .tox/
